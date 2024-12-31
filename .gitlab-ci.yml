@@ -1,0 +1,70 @@
+image: rust:latest
+
+variables:
+  CARGO_HOME: $CI_PROJECT_DIR/.cargo
+
+stages:
+  - test
+  - build
+  - release
+
+# Cache dependencies and build artifacts
+cache:
+  paths:
+    - target/
+    - .cargo/
+  key: $CI_COMMIT_REF_SLUG
+
+test:
+  stage: test
+  script:
+    - rustc --version
+    - cargo --version
+    - cargo test --verbose
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_TAG
+
+build:linux:
+  stage: build
+  script:
+    - rustc --version
+    - cargo --version
+    - cargo build --release
+    # Create artifacts directory
+    - mkdir -p artifacts
+    # Copy binary and documentation
+    - cp target/release/xperformance artifacts/
+    - cp README.md artifacts/
+    - cp README_zh.md artifacts/
+    - cp LICENSE artifacts/
+    # Create archive
+    - cd artifacts
+    - tar -czf xtools-linux-x86_64.tar.gz *
+  artifacts:
+    paths:
+      - artifacts/xtools-linux-x86_64.tar.gz
+    expire_in: never
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+    - if: $CI_COMMIT_TAG
+
+release:
+  stage: release
+  image: registry.gitlab.com/gitlab-org/release-cli:latest
+  script:
+    - echo "Creating release ${CI_COMMIT_TAG}"
+  release:
+    name: "Release $CI_COMMIT_TAG"
+    description: "XTools Release $CI_COMMIT_TAG"
+    tag_name: "$CI_COMMIT_TAG"
+    assets:
+      links:
+        - name: "xtools-linux-x86_64.tar.gz"
+          url: "${CI_PROJECT_URL}/-/jobs/${CI_JOB_ID}/artifacts/file/artifacts/xtools-linux-x86_64.tar.gz"
+          link_type: "package"
+  rules:
+    - if: $CI_COMMIT_TAG
+  needs:
+    - build:linux
