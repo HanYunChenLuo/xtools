@@ -1,0 +1,15 @@
+[package]
+name = "xperformance"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+clap.workspace = true
+anyhow.workspace = true
+tokio.workspace = true
+regex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+colored.workspace = true
+ctrlc.workspace = true
