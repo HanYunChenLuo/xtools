@@ -27,9 +27,9 @@ struct Args {
     #[arg(long)]
     memory: bool,
 
-    /// Generate detailed log file
-    #[arg(long)]
-    log: bool,
+    /// Enable verbose output with detailed metrics
+    #[arg(short, long)]
+    verbose: bool,
 
     /// Sampling interval in seconds (default: 1)
     #[arg(short, long, default_value_t = 1)]
@@ -116,7 +116,7 @@ async fn main() -> Result<()> {
     }
 
     // Initialize logging if enabled
-    if args.log {
+    if args.verbose {
         let path = utils::init_logging(&args.package)?;
         println!("Logging to: {}", path.display());
         utils::append_to_log(&format!(
@@ -169,7 +169,7 @@ async fn main() -> Result<()> {
                     } else {
                         println!("\n{}", restart_msg);
                     }
-                    if args.log {
+                    if args.verbose {
                         utils::append_to_log(&format!("{}\n\n{}\n", peaks, restart_msg))?;
                     }
                     last_process_info = current_info;
@@ -183,7 +183,7 @@ async fn main() -> Result<()> {
         }
 
         if args.cpu {
-            if let Ok((cpu_usage, timestamp)) = cpu::sample_cpu(&args.package, args.log).await {
+            if let Ok((cpu_usage, timestamp)) = cpu::sample_cpu(&args.package, args.verbose).await {
                 if cpu_usage > peak_stats.cpu_usage {
                     peak_stats.cpu_usage = cpu_usage;
                     peak_stats.cpu_time = timestamp;
@@ -192,7 +192,8 @@ async fn main() -> Result<()> {
         }
 
         if args.memory {
-            if let Ok((memory_kb, timestamp)) = memory::sample_memory(&args.package, args.log).await
+            if let Ok((memory_kb, timestamp)) =
+                memory::sample_memory(&args.package, args.verbose).await
             {
                 if memory_kb > peak_stats.memory_usage {
                     peak_stats.memory_usage = memory_kb;
@@ -235,7 +236,7 @@ async fn main() -> Result<()> {
     );
 
     // Write peak stats to log if enabled
-    if args.log {
+    if args.verbose {
         utils::append_to_log(&format!("\nPeak Statistics:\n{}\n", "-".repeat(80)))?;
         if args.cpu {
             utils::append_to_log(&format!(

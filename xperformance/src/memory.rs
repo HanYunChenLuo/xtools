@@ -3,7 +3,7 @@ use anyhow::Result;
 use chrono::{DateTime, Local};
 use colored::*;
 
-pub async fn sample_memory(package: &str, enable_logging: bool) -> Result<(u64, DateTime<Local>)> {
+pub async fn sample_memory(package: &str, verbose: bool) -> Result<(u64, DateTime<Local>)> {
     let timestamp = Local::now();
     let process_info = utils::get_process_info(package)?;
     let pid = &process_info.pid;
@@ -25,7 +25,7 @@ pub async fn sample_memory(package: &str, enable_logging: bool) -> Result<(u64, 
         }
     }
 
-    if enable_logging {
+    if verbose {
         let mut details = String::new();
         let mut current_section = String::new();
 

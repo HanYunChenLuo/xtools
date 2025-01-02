@@ -14,10 +14,10 @@ A real-time Android app performance monitoring tool that tracks CPU and memory u
   - Process-specific CPU usage
   - System-wide CPU usage and idle state
   - Thread count tracking
-  - Detailed thread-level CPU usage in logs
+  - Detailed thread-level CPU usage in verbose mode
 - Memory usage monitoring
   - Total PSS tracking
-  - Detailed memory breakdown in logs
+  - Detailed memory breakdown in verbose mode
 - Process monitoring
   - Automatic process restart detection
   - Peak usage tracking
@@ -32,7 +32,7 @@ A real-time Android app performance monitoring tool that tracks CPU and memory u
 #### Usage
 
 ```bash
-./target/release/xperformance --package <package_name> [--cpu] [--memory] [-i <interval>]
+./target/release/xperformance --package <package_name> [--cpu] [--memory] [-i <interval>] [--verbose]
 ```
 
 Options:
@@ -40,17 +40,18 @@ Options:
 - `--cpu`: Monitor CPU usage
 - `--memory`: Monitor memory usage
 - `--interval, -i`: Sampling interval in seconds (default: 1)
+- `--verbose, -v`: Enable verbose output with detailed metrics
 
 Examples:
 ```bash
-# Monitor both CPU and memory
-./target/release/xperformance --package com.example.app --cpu --memory
+# Monitor both CPU and memory with verbose output
+./target/release/xperformance --package com.example.app --cpu --memory --verbose
 
 # Monitor only CPU with 2-second interval
 ./target/release/xperformance --package com.example.app --cpu -i 2
 
-# Monitor only memory
-./target/release/xperformance --package com.example.app --memory
+# Monitor only memory with verbose output
+./target/release/xperformance --package com.example.app --memory --verbose
 ```
 
 #### Output Format
@@ -65,7 +66,7 @@ The tool provides formatted output with timestamps:
 [14:59:53] Process restarted! New PID: 25786 (previous: 25245), Start time: 2024-12-31 14:59:53
 ```
 
-Detailed logs are saved in the `log` directory with comprehensive performance metrics.
+Detailed metrics are saved in the `log` directory when running in verbose mode.
 
 ## Building
 
