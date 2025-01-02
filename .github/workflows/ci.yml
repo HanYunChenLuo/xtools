@@ -7,6 +7,19 @@ on:
         description: 'Release version (e.g. v0.1.3)'
         required: true
         type: string
+      build_type:
+        description: 'Build type'
+        type: choice
+        required: true
+        default: 'release'
+        options:
+          - release
+          - debug
+      run_tests:
+        description: 'Run tests'
+        type: boolean
+        required: true
+        default: true
 
 env:
   CARGO_TERM_COLOR: always
@@ -17,6 +30,7 @@ jobs:
   test:
     name: Run tests
     runs-on: ubuntu-18.04
+    if: ${{ inputs.run_tests }}
     steps:
       - uses: actions/checkout@v4
 
@@ -79,12 +93,20 @@ jobs:
         run: |
           rustc --version
           cargo --version
-          cargo build --release --target ${{ matrix.target }}
+          if [ "${{ inputs.build_type }}" = "release" ]; then
+            cargo build --release --target ${{ matrix.target }}
+          else
+            cargo build --target ${{ matrix.target }}
+          fi
 
       - name: Prepare artifacts
         run: |
           mkdir -p artifacts
-          cp target/${{ matrix.target }}/release/xperformance artifacts/
+          if [ "${{ inputs.build_type }}" = "release" ]; then
+            cp target/${{ matrix.target }}/release/xperformance artifacts/
+          else
+            cp target/${{ matrix.target }}/debug/xperformance artifacts/
+          fi
           cp README.md artifacts/
           cp README_zh.md artifacts/
           cp LICENSE artifacts/
@@ -126,10 +148,14 @@ jobs:
       - name: Create Release
         uses: softprops/action-gh-release@v1
         with:
-          name: Release ${{ inputs.version }}
+          name: Release ${{ inputs.version }} (${{ inputs.build_type }})
           tag_name: ${{ inputs.version }}
           body: |
-            XTools Release ${{ inputs.version }}
+            XTools Release ${{ inputs.version }} (${{ inputs.build_type }} build)
+
+            ## Build Information
+            - Build Type: ${{ inputs.build_type }}
+            - Tests Run: ${{ inputs.run_tests }}
 
             ## Downloads
             - Linux x86_64 (Ubuntu 18.04+ compatible)
@@ -140,5 +166,5 @@ jobs:
             artifacts/xtools-macos-x86_64.tar.gz
             artifacts/xtools-macos-arm64.tar.gz
           draft: false
-          prerelease: false
+          prerelease: ${{ inputs.build_type != 'release' }}
           generate_release_notes: true
