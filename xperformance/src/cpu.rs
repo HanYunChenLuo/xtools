@@ -16,7 +16,7 @@ struct CpuStats {
     host: f32,
 }
 
-pub async fn sample_cpu(package: &str, enable_logging: bool) -> Result<(f32, DateTime<Local>)> {
+pub async fn sample_cpu(package: &str, verbose: bool) -> Result<(f32, DateTime<Local>)> {
     let timestamp = Local::now();
     let process_info = utils::get_process_info(package)?;
     let pid = &process_info.pid;
@@ -88,7 +88,7 @@ pub async fn sample_cpu(package: &str, enable_logging: bool) -> Result<(f32, Dat
         }
     }
 
-    if enable_logging {
+    if verbose {
         let mut details = String::new();
 
         // Add section header

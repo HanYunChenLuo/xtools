@@ -14,10 +14,10 @@ Android 开发工具集合。
   - 进程级 CPU 使用率
   - 系统级 CPU 使用率和空闲状态
   - 线程数量跟踪
-  - 日志中详细的线程级 CPU 使用情况
+  - 详细模式下的线程级 CPU 使用情况
 - 内存使用监控
   - 总 PSS 跟踪
-  - 日志中详细的内存分布
+  - 详细模式下的内存分布信息
 - 进程监控
   - 自动检测进程重启
   - 峰值使用跟踪
@@ -32,7 +32,7 @@ Android 开发工具集合。
 #### 使用方法
 
 ```bash
-./target/release/xperformance --package <包名> [--cpu] [--memory] [-i <间隔>]
+./target/release/xperformance --package <包名> [--cpu] [--memory] [-i <间隔>] [--verbose]
 ```
 
 选项：
@@ -40,17 +40,18 @@ Android 开发工具集合。
 - `--cpu`：监控 CPU 使用率
 - `--memory`：监控内存使用情况
 - `--interval, -i`：采样间隔（秒），默认为 1
+- `--verbose, -v`：启用详细输出模式，显示完整指标
 
 示例：
 ```bash
-# 同时监控 CPU 和内存
-./target/release/xperformance --package com.example.app --cpu --memory
+# 同时监控 CPU 和内存，启用详细输出
+./target/release/xperformance --package com.example.app --cpu --memory --verbose
 
 # 每 2 秒监控一次 CPU
 ./target/release/xperformance --package com.example.app --cpu -i 2
 
-# 仅监控内存
-./target/release/xperformance --package com.example.app --memory
+# 仅监控内存，启用详细输出
+./target/release/xperformance --package com.example.app --memory --verbose
 ```
 
 #### 输出格式
@@ -65,7 +66,7 @@ Android 开发工具集合。
 [14:59:53] Process restarted! New PID: 25786 (previous: 25245), Start time: 2024-12-31 14:59:53
 ```
 
-详细的性能指标日志保存在 `log` 目录中。
+在详细模式下，完整的性能指标会保存在 `log` 目录中。
 
 ## 构建
 
