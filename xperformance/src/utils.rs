@@ -103,18 +103,24 @@ fn clean_control_chars(input: &str) -> String {
     result
 }
 
-pub fn ensure_log_dir() -> Result<PathBuf> {
-    let log_dir = PathBuf::from("log");
+pub fn ensure_log_dir(package: &str) -> Result<PathBuf> {
+    let log_dir = PathBuf::from("log").join(package);
     fs::create_dir_all(&log_dir)?;
     Ok(log_dir)
 }
 
-pub fn init_logging(package: &str) -> Result<PathBuf> {
+pub fn init_logging(package: &str, cpu: bool, memory: bool) -> Result<PathBuf> {
     let mut result = None;
     INIT_LOG.call_once(|| {
-        if let Ok(log_dir) = ensure_log_dir() {
+        if let Ok(log_dir) = ensure_log_dir(package) {
             let timestamp = Local::now().format("%Y%m%d_%H%M%S");
-            let filename = format!("performance_{}_{}.log", package, timestamp);
+            let metrics = match (cpu, memory) {
+                (true, true) => "cpu_memory",
+                (true, false) => "cpu",
+                (false, true) => "memory",
+                (false, false) => "none",
+            };
+            let filename = format!("performance_{}_{}.log", metrics, timestamp);
             let path = log_dir.join(filename);
             unsafe {
                 LOG_FILE_PATH = Some(path.clone());

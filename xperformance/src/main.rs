@@ -115,9 +115,9 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
-    // Initialize logging if enabled
+    // Initialize logging if verbose output is enabled
     if args.verbose {
-        let path = utils::init_logging(&args.package)?;
+        let path = utils::init_logging(&args.package, args.cpu, args.memory)?;
         println!("Logging to: {}", path.display());
         utils::append_to_log(&format!(
             "Performance monitoring for package: {}\nSampling interval: {} seconds\n",
