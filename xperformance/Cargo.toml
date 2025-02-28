@@ -13,3 +13,4 @@ serde_json.workspace = true
 chrono.workspace = true
 colored.workspace = true
 ctrlc.workspace = true
+plotters = "0.3"

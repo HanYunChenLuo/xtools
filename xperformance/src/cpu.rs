@@ -16,7 +16,7 @@ struct CpuStats {
     host: f32,
 }
 
-pub async fn sample_cpu(package: &str, verbose: bool) -> Result<(f32, DateTime<Local>)> {
+pub async fn sample_cpu(package: &str, verbose: bool) -> Result<(f32, f32, f32, DateTime<Local>)> {
     let timestamp = Local::now();
     let process_info = utils::get_process_info(package)?;
     let pid = &process_info.pid;
@@ -27,6 +27,8 @@ pub async fn sample_cpu(package: &str, verbose: bool) -> Result<(f32, DateTime<L
     let mut sys_stats = CpuStats::default();
     let mut sys_details = String::new();
     let mut tasks_info = String::new();
+    let mut process_top_line = String::new(); // 存储进程的top行
+    let mut process_cpu_from_top = 0.0; // 从top直接获取的进程CPU使用率
 
     // Parse top output
     for line in sys_output.lines() {
@@ -63,30 +65,83 @@ pub async fn sample_cpu(package: &str, verbose: bool) -> Result<(f32, DateTime<L
             }
         } else if line.starts_with("Tasks:") {
             tasks_info = line.to_string();
+        } else if line.trim().starts_with(pid)
+            || (line.contains(package) && !line.contains("top -p"))
+        {
+            // 更精确地匹配进程行：以PID开头或包含包名但不是top命令行
+            let words: Vec<&str> = line.split_whitespace().collect();
+            if !words.is_empty() && words[0] == pid {
+                process_top_line = line.to_string();
+                // 从进程行提取CPU使用率，通常是第9列（索引8）
+                if words.len() > 8 {
+                    if let Ok(cpu) = words[8].trim_end_matches('%').parse::<f32>() {
+                        process_cpu_from_top = cpu;
+                    }
+                }
+            } else if line.contains(package) && !line.contains("top -p") {
+                process_top_line = line.to_string();
+                // 同样尝试提取CPU使用率
+                for (i, word) in words.iter().enumerate() {
+                    if i > 0 && i < words.len() - 1 {
+                        if let Ok(cpu) = word.trim_end_matches('%').parse::<f32>() {
+                            // 验证这是一个合理的CPU值 (0-100%)
+                            if cpu >= 0.0 && cpu <= 100.0 {
+                                process_cpu_from_top = cpu;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 
     // Get detailed thread information
     let output = utils::run_adb_command(&["shell", "top", "-H", "-b", "-n", "1", "-p", pid])?;
 
-    let mut total_cpu = 0.0;
+    let mut total_thread_cpu = 0.0; // 从线程计算的CPU总和
     let mut thread_count = 0;
+    let mut cpu_column_index = 8; // Default index, will be updated if header is found
+
+    // Find the CPU column index from the header line
+    for line in output.lines() {
+        if line.contains("PID") && line.contains("[%CPU]") {
+            let headers: Vec<&str> = line.split_whitespace().collect();
+            for (i, header) in headers.iter().enumerate() {
+                if *header == "[%CPU]" {
+                    cpu_column_index = i;
+                    break;
+                }
+            }
+            break;
+        }
+    }
 
     // Parse CPU usage from top output
     for line in output.lines() {
         if line.contains(pid) || line.contains(package) {
             let fields: Vec<&str> = line.split_whitespace().collect();
-            if fields.len() >= 9 {
-                if let (Some(_tid), Some(cpu_str)) = (fields.get(0), fields.get(8)) {
+            if fields.len() > cpu_column_index {
+                if let (Some(_tid), Some(cpu_str)) = (fields.get(0), fields.get(cpu_column_index)) {
                     if let Ok(cpu_usage) = cpu_str.trim_matches(&['[', ']', '%'][..]).parse::<f32>()
                     {
-                        total_cpu += cpu_usage;
+                        total_thread_cpu += cpu_usage;
                         thread_count += 1;
                     }
                 }
             }
         }
     }
+
+    // Calculate active CPU usage (excluding idle and iowait)
+    let _active_cpu = sys_stats.total_cpu - sys_stats.idle - sys_stats.iow;
+
+    // 使用从top获取的进程CPU使用率，如果没有获取到，则使用线程CPU总和
+    let total_cpu = if process_cpu_from_top > 0.0 {
+        process_cpu_from_top
+    } else {
+        total_thread_cpu
+    };
 
     if verbose {
         let mut details = String::new();
@@ -132,6 +187,17 @@ pub async fn sample_cpu(package: &str, verbose: bool) -> Result<(f32, DateTime<L
         details.push_str(&format!("Host: {:.1}%\n", sys_stats.host));
         details.push_str("\n");
 
+        // 添加进程CPU使用率的信息
+        details.push_str(&format!(
+            "Process CPU (from top): {:.1}%\n",
+            process_cpu_from_top
+        ));
+        details.push_str(&format!(
+            "Process CPU (from threads): {:.1}%\n",
+            total_thread_cpu
+        ));
+        details.push_str("\n");
+
         details.push_str("Thread Details:\n");
         details.push_str(&"-".repeat(80));
         details.push_str("\n");
@@ -143,16 +209,27 @@ pub async fn sample_cpu(package: &str, verbose: bool) -> Result<(f32, DateTime<L
         for line in output.lines() {
             if line.contains(pid) || line.contains(package) {
                 let fields: Vec<&str> = line.split_whitespace().collect();
-                if fields.len() >= 9 {
-                    if let (Some(tid), Some(cpu_str)) = (fields.get(0), fields.get(8)) {
+                if fields.len() > cpu_column_index {
+                    if let (Some(tid), Some(cpu_str)) =
+                        (fields.get(0), fields.get(cpu_column_index))
+                    {
                         if let Ok(cpu_usage) =
                             cpu_str.trim_matches(&['[', ']', '%'][..]).parse::<f32>()
                         {
-                            let thread_name = fields.get(11).unwrap_or(&"<unknown>");
-                            details.push_str(&format!(
-                                "{:<8} {:>6.1}% {}\n",
-                                tid, cpu_usage, thread_name
-                            ));
+                            // Only log threads with CPU usage > 0
+                            if cpu_usage > 0.0 {
+                                // Get thread name - it's typically after the TIME+ column
+                                let thread_name = if fields.len() > cpu_column_index + 3 {
+                                    fields[cpu_column_index + 3..].join(" ")
+                                } else {
+                                    "<unknown>".to_string()
+                                };
+
+                                details.push_str(&format!(
+                                    "{:<8} {:>6.1}% {}\n",
+                                    tid, cpu_usage, thread_name
+                                ));
+                            }
                         }
                     }
                 }
@@ -165,10 +242,7 @@ pub async fn sample_cpu(package: &str, verbose: bool) -> Result<(f32, DateTime<L
         details.push_str("\n");
         details.push_str(&format!("Process ID: {}\n", pid));
         details.push_str(&format!("Total Process CPU: {:.1}%\n", total_cpu));
-        details.push_str(&format!(
-            "System CPU Usage: {:.1}%\n",
-            sys_stats.user + sys_stats.sys
-        ));
+        details.push_str(&format!("System CPU: {:.1}%\n", sys_stats.sys));
         details.push_str(&format!("System Idle: {:.1}%\n", sys_stats.idle));
         details.push_str(&format!("Thread Count: {}\n", thread_count));
         details.push_str(&"=".repeat(80));
@@ -184,12 +258,13 @@ pub async fn sample_cpu(package: &str, verbose: bool) -> Result<(f32, DateTime<L
             "[{}] Process: {}%, System: {}% (idle: {}%, pid: {}, threads: {})",
             timestamp.format("%H:%M:%S"),
             format!("{:.1}", total_cpu).blue(),
-            format!("{:.1}", sys_stats.user + sys_stats.sys).red(),
+            format!("{:.1}", sys_stats.sys).red(),
             format!("{:.1}", sys_stats.idle).green(),
             pid.yellow(),
             thread_count
         );
     }
 
-    Ok((total_cpu, timestamp))
+    // Return process CPU usage, system CPU usage, idle CPU usage, and timestamp
+    Ok((total_cpu, sys_stats.sys, sys_stats.idle, timestamp))
 }

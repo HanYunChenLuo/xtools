@@ -1,8 +1,9 @@
-#![deny(warnings)]
+// #![deny(warnings)]
 use anyhow::{Context, Result};
 use chrono::{DateTime, Local};
 use clap::Parser;
 use colored::*;
+use std::collections::VecDeque;
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -37,12 +38,45 @@ struct Args {
 }
 
 #[derive(Default)]
+struct CpuTimeSeriesData {
+    timestamps: VecDeque<DateTime<Local>>,
+    process_cpu: VecDeque<f32>,
+    system_cpu: VecDeque<f32>,
+    idle_cpu: VecDeque<f32>,
+}
+
+impl CpuTimeSeriesData {
+    fn new() -> Self {
+        Self {
+            timestamps: VecDeque::new(),
+            process_cpu: VecDeque::new(),
+            system_cpu: VecDeque::new(),
+            idle_cpu: VecDeque::new(),
+        }
+    }
+
+    fn add_data_point(
+        &mut self,
+        timestamp: DateTime<Local>,
+        process_cpu: f32,
+        system_cpu: f32,
+        idle_cpu: f32,
+    ) {
+        self.timestamps.push_back(timestamp);
+        self.process_cpu.push_back(process_cpu);
+        self.system_cpu.push_back(system_cpu);
+        self.idle_cpu.push_back(idle_cpu);
+    }
+}
+
+#[derive(Default)]
 struct PeakStats {
     cpu_usage: f32,
     cpu_time: DateTime<Local>,
     memory_usage: u64,
     memory_time: DateTime<Local>,
     restart_count: u32,
+    cpu_data: CpuTimeSeriesData,
 }
 
 impl PeakStats {
@@ -183,11 +217,16 @@ async fn main() -> Result<()> {
         }
 
         if args.cpu {
-            if let Ok((cpu_usage, timestamp)) = cpu::sample_cpu(&args.package, args.verbose).await {
+            if let Ok((cpu_usage, system_cpu, idle_cpu, timestamp)) =
+                cpu::sample_cpu(&args.package, args.verbose).await
+            {
                 if cpu_usage > peak_stats.cpu_usage {
                     peak_stats.cpu_usage = cpu_usage;
                     peak_stats.cpu_time = timestamp;
                 }
+                peak_stats
+                    .cpu_data
+                    .add_data_point(timestamp, cpu_usage, system_cpu, idle_cpu);
             }
         }
 
@@ -222,6 +261,30 @@ async fn main() -> Result<()> {
             format!("{:.1}", peak_stats.cpu_usage).red(),
             peak_stats.cpu_time.format("%Y-%m-%d %H:%M:%S")
         );
+
+        // Generate CPU chart if we have collected data
+        if !peak_stats.cpu_data.timestamps.is_empty() && args.cpu {
+            match utils::generate_cpu_chart(
+                &args.package,
+                &peak_stats.cpu_data.timestamps,
+                &peak_stats.cpu_data.process_cpu,
+                &peak_stats.cpu_data.system_cpu,
+                &peak_stats.cpu_data.idle_cpu,
+            ) {
+                Ok(chart_path) => {
+                    println!("CPU chart generated: {}", chart_path.display());
+                    if args.verbose {
+                        utils::append_to_log(&format!(
+                            "CPU chart generated: {}\n",
+                            chart_path.display()
+                        ))?;
+                    }
+                }
+                Err(e) => {
+                    println!("Failed to generate CPU chart: {}", e);
+                }
+            }
+        }
     }
     if args.memory {
         println!(

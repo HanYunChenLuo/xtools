@@ -15,6 +15,7 @@ A real-time Android app performance monitoring tool that tracks CPU and memory u
   - System-wide CPU usage and idle state
   - Thread count tracking
   - Detailed thread-level CPU usage in verbose mode
+  - CPU usage time-series chart generation
 - Memory usage monitoring
   - Total PSS tracking
   - Detailed memory breakdown in verbose mode
