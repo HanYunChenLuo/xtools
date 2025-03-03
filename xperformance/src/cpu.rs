@@ -54,7 +54,7 @@ fn clean_thread_name(name: &str) -> String {
 }
 
 // Add a new function to collect CPU statistics using pidstat
-async fn collect_pidstat_data(pid: &str, _verbose: bool) -> Result<(f32, Vec<ThreadCpuInfo>)> {
+async fn collect_pidstat_data(pid: &str) -> Result<(f32, Vec<ThreadCpuInfo>)> {
     // Run pidstat to get thread-specific CPU usage
     // -p <pid>: monitor this PID
     // -t: include individual threads
@@ -180,16 +180,13 @@ async fn collect_pidstat_data(pid: &str, _verbose: bool) -> Result<(f32, Vec<Thr
     Ok((process_cpu, threads))
 }
 
-pub async fn sample_cpu(
-    package: &str,
-    _verbose: bool,
-) -> Result<(f32, DateTime<Local>, Vec<ThreadCpuInfo>)> {
+pub async fn sample_cpu(package: &str) -> Result<(f32, DateTime<Local>, Vec<ThreadCpuInfo>)> {
     let timestamp = Local::now();
     let process_info = utils::get_process_info(package)?;
     let pid = &process_info.pid;
 
     // 尝试使用pidstat命令获取进程CPU使用率
-    let pidstat_result = collect_pidstat_data(pid, _verbose).await;
+    let pidstat_result = collect_pidstat_data(pid).await;
 
     match pidstat_result {
         Ok((pidstat_process_cpu, pidstat_threads)) => {

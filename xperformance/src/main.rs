@@ -1,10 +1,9 @@
-// #![deny(warnings)]
+#![deny(warnings)]
 use anyhow::{Context, Result};
 use chrono::{DateTime, Local, Timelike};
 use clap::Parser;
 use colored::*;
 use std::collections::VecDeque;
-use std::path::PathBuf;
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -48,14 +47,6 @@ struct CpuTimeSeriesData {
 }
 
 impl CpuTimeSeriesData {
-    fn new() -> Self {
-        Self {
-            timestamps: VecDeque::new(),
-            process_cpu: VecDeque::new(),
-            top_threads: VecDeque::new(),
-        }
-    }
-
     fn add_data_point(
         &mut self,
         timestamp: DateTime<Local>,
@@ -145,9 +136,6 @@ async fn monitor_process(args: &Args) -> Result<(), Box<dyn std::error::Error>> 
         println!("No monitoring options selected. Use --cpu or --memory");
         return Ok(());
     }
-
-    // 不再初始化日志，禁用所有日志记录功能
-    let logging_enabled = false; // 设为false确保不会记录任何日志
 
     // Set up signal handling
     let running = Arc::new(AtomicBool::new(true));
@@ -270,10 +258,10 @@ async fn monitor_process(args: &Args) -> Result<(), Box<dyn std::error::Error>> 
 
                 if args.verbose && args.cpu {
                     // 为最新时间点的top线程创建CSV
-                    if let Some(last_timestamp) = peak_stats.cpu_data.timestamps.back() {
-                        if let Some(top_threads) = peak_stats.cpu_data.top_threads.back() {
-                            println!("Thread data collection available");
-                        }
+                    if peak_stats.cpu_data.timestamps.back().is_some()
+                        && peak_stats.cpu_data.top_threads.back().is_some()
+                    {
+                        println!("Thread data collection available");
                     }
 
                     // 仅打印图表生成信息，不写入日志
@@ -321,9 +309,7 @@ async fn monitor_process(args: &Args) -> Result<(), Box<dyn std::error::Error>> 
         }
 
         if args.cpu {
-            if let Ok((cpu_usage, timestamp, top_threads)) =
-                cpu::sample_cpu(&args.package, args.verbose).await
-            {
+            if let Ok((cpu_usage, timestamp, top_threads)) = cpu::sample_cpu(&args.package).await {
                 if cpu_usage > peak_stats.cpu_usage {
                     peak_stats.cpu_usage = cpu_usage;
                     peak_stats.cpu_time = timestamp;
@@ -442,7 +428,7 @@ async fn monitor_process(args: &Args) -> Result<(), Box<dyn std::error::Error>> 
         // Generate CPU chart if we have collected data
         if args.cpu && peak_stats.cpu_data.timestamps.len() > 1 {
             // Create timestamp-based subdirectory for final charts
-            if let Ok(timestamp_dir) = utils::create_timestamp_subdir(&args.package) {
+            if utils::create_timestamp_subdir(&args.package).is_ok() {
                 // Generate CPU usage chart
                 if let Ok(chart_path) = utils::generate_cpu_chart(
                     &args.package,
