@@ -12,10 +12,15 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::str;
 use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
+use std::sync::Mutex;
 
 // 全局静态变量，用于跟踪中断状态
 static INTERRUPT_FLAG: AtomicBool = AtomicBool::new(false);
 static mut LOG_FILE_PATH: Option<PathBuf> = None;
+
+// 存储当前执行期间的timestamp目录路径
+static mut TIMESTAMP_DIR: Option<PathBuf> = None;
+static TIMESTAMP_DIR_MUTEX: Mutex<()> = Mutex::new(());
 
 pub struct ProcessInfo {
     pub pid: String,
@@ -71,23 +76,6 @@ pub fn run_adb_command(args: &[&str]) -> Result<String> {
     let raw_output = String::from_utf8_lossy(&output.stdout).to_string();
     Ok(clean_control_chars(&raw_output))
 }
-
-pub fn format_bytes(bytes: u64) -> String {
-    const KB: u64 = 1024;
-    const MB: u64 = KB * 1024;
-    const GB: u64 = MB * 1024;
-
-    if bytes >= GB {
-        format!("{:.2} GB", bytes as f64 / GB as f64)
-    } else if bytes >= MB {
-        format!("{:.2} MB", bytes as f64 / MB as f64)
-    } else if bytes >= KB {
-        format!("{:.2} KB", bytes as f64 / KB as f64)
-    } else {
-        format!("{} B", bytes)
-    }
-}
-
 fn clean_control_chars(input: &str) -> String {
     let mut result = String::with_capacity(input.len());
     let mut chars = input.chars().peekable();
@@ -153,12 +141,9 @@ pub fn generate_cpu_chart(
         return Err(anyhow::format_err!("No CPU data to chart"));
     }
 
-    // Get the log directory
-    let log_dir = create_timestamp_subdir(package)?;
-    std::fs::create_dir_all(&log_dir)?;
-
-    // Create the output file path
-    let output_file = log_dir.join(format!("{}_cpu_chart.png", package));
+    // 直接创建输出文件路径，不创建目录
+    let temp_dir = std::env::temp_dir();
+    let output_file = temp_dir.join(format!("{}_cpu_chart.png", package));
     // 创建一个克隆用于返回
     let output_file_clone = output_file.clone();
 
@@ -166,7 +151,7 @@ pub fn generate_cpu_chart(
     let x_range = (*timestamps.front().unwrap())..(*timestamps.back().unwrap());
 
     // Create root drawing area
-    let root = BitMapBackend::new(&output_file, (1024, 480)).into_drawing_area();
+    let root = BitMapBackend::new(&output_file, (1920, 1080)).into_drawing_area();
     root.fill(&WHITE)?;
 
     // Only one chart for process CPU
@@ -188,7 +173,6 @@ pub fn generate_cpu_chart(
     mesh_config
         .y_desc("Process CPU")
         .y_label_formatter(&|v| format!("{:.1}", v))
-        .disable_x_mesh() // 不显示X轴网格线
         .x_desc("Time")
         .x_labels(10)
         .x_label_formatter(&|x| x.format("%H:%M:%S").to_string());
@@ -248,6 +232,17 @@ pub fn export_cpu_data_to_csv(
 
 // Function to create timestamp subdirectory within the log directory
 pub fn create_timestamp_subdir(package: &str) -> Result<PathBuf> {
+    // 使用互斥锁保护静态变量的访问
+    let _lock = TIMESTAMP_DIR_MUTEX.lock().unwrap();
+
+    // 检查缓存中是否已存在timestamp目录
+    unsafe {
+        if let Some(ref dir) = TIMESTAMP_DIR {
+            return Ok(dir.clone());
+        }
+    }
+
+    // 如果没有，创建新的timestamp目录
     let log_dir = create_log_dir_if_needed(package)?;
     let timestamp_str = Local::now().format("%Y%m%d_%H%M%S").to_string();
     let timestamp_dir = log_dir.join(&timestamp_str);
@@ -259,6 +254,11 @@ pub fn create_timestamp_subdir(package: &str) -> Result<PathBuf> {
 
         // Log directory creation
         let _ = append_to_log(&msg);
+    }
+
+    // 缓存目录路径
+    unsafe {
+        TIMESTAMP_DIR = Some(timestamp_dir.clone());
     }
 
     Ok(timestamp_dir)
@@ -399,7 +399,7 @@ pub fn generate_thread_time_series_chart(
     let filepath = path.join(&chart_filename);
 
     // Create a chart with 3 rows: process CPU, system CPU, and thread CPU
-    let root = BitMapBackend::new(&filepath, (1000, 600)).into_drawing_area();
+    let root = BitMapBackend::new(&filepath, (1920, 1080)).into_drawing_area();
     root.fill(&WHITE)?;
 
     // Create chart title with process name and PID

@@ -4,6 +4,8 @@ use chrono::{DateTime, Local, Timelike};
 use clap::Parser;
 use colored::*;
 use std::collections::VecDeque;
+use std::io::Write;
+use std::path::PathBuf;
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -14,6 +16,7 @@ mod memory;
 mod utils;
 
 use cpu::ThreadCpuInfo;
+use memory::MemoryTimeSeriesData;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -29,6 +32,10 @@ struct Args {
     /// Monitor memory usage
     #[arg(long)]
     memory: bool,
+
+    /// Monitor thread activity
+    #[arg(long)]
+    thread: bool,
 
     /// Enable verbose output with detailed metrics
     #[arg(short, long)]
@@ -67,6 +74,7 @@ struct PeakStats {
     memory_time: DateTime<Local>,
     restart_count: u32,
     cpu_data: CpuTimeSeriesData,
+    memory_data: MemoryTimeSeriesData,
 }
 
 impl PeakStats {
@@ -85,7 +93,7 @@ impl PeakStats {
             peaks.push(format!(
                 "[{}] Peak Memory: {} at {}",
                 timestamp.blue(),
-                utils::format_bytes(self.memory_usage * 1024).red(),
+                format!("{} KB", self.memory_usage).red(),
                 self.memory_time.format("%H:%M:%S").to_string().blue()
             ));
         }
@@ -319,7 +327,7 @@ async fn monitor_process(args: &Args) -> Result<(), Box<dyn std::error::Error>> 
                     .add_data_point(timestamp, cpu_usage, top_threads.clone());
 
                 // 将线程数据添加到时间序列跟踪
-                if args.verbose {
+                if args.thread {
                     // 打印CPU占用最高的线程信息
                     println!("Top CPU threads:");
 
@@ -355,12 +363,50 @@ async fn monitor_process(args: &Args) -> Result<(), Box<dyn std::error::Error>> 
         }
 
         if args.memory {
-            if let Ok((memory_kb, timestamp)) =
+            if let Ok((memory_kb, timestamp, memory_details)) =
                 memory::sample_memory(&args.package, args.verbose).await
             {
                 if memory_kb > peak_stats.memory_usage {
                     peak_stats.memory_usage = memory_kb;
                     peak_stats.memory_time = timestamp;
+                }
+
+                // 添加内存数据点到时间序列
+                peak_stats
+                    .memory_data
+                    .add_data_point(timestamp, memory_details);
+
+                // 如果开启了详细模式并且已收集了足够的数据点，生成内存图表
+                if args.verbose && peak_stats.memory_data.timestamps.len() >= 5 {
+                    if let Ok(timestamp_dir) = utils::create_timestamp_subdir(&args.package) {
+                        // 创建memory子目录
+                        let memory_dir = timestamp_dir.join("memory");
+                        if !memory_dir.exists() {
+                            if let Err(e) = std::fs::create_dir_all(&memory_dir) {
+                                println!("Failed to create memory directory: {}", e);
+                                continue;
+                            }
+                            println!("Created memory directory: {}", memory_dir.display());
+                        }
+
+                        // 生成内存图表
+                        let memory_charts = generate_memory_charts(
+                            &memory_dir,
+                            &args.package,
+                            &peak_stats.memory_data,
+                        );
+                        if let Ok(chart_paths) = memory_charts {
+                            for path in chart_paths {
+                                if path.to_string_lossy().ends_with(".png") {
+                                    println!("✓ Memory chart generated: {}", path.display());
+                                } else if path.to_string_lossy().ends_with(".csv") {
+                                    println!("✓ Memory data exported to CSV: {}", path.display());
+                                }
+                            }
+                        } else {
+                            println!("Failed to generate memory charts");
+                        }
+                    }
                 }
             }
         }
@@ -370,12 +416,22 @@ async fn monitor_process(args: &Args) -> Result<(), Box<dyn std::error::Error>> 
     let _ = adb_monitor.await;
 
     // 在结束前生成最终的线程时间序列图表
-    if args.verbose && args.cpu && !thread_time_series.is_empty() {
+    if args.thread && args.cpu && !thread_time_series.is_empty() {
         println!("Program ending, generating final thread time series chart...");
-        if let Ok(subdir) = utils::create_timestamp_subdir(&args.package) {
+        if let Ok(timestamp_dir) = utils::create_timestamp_subdir(&args.package) {
+            // 创建thread子目录
+            let thread_dir = timestamp_dir.join("thread");
+            if !thread_dir.exists() {
+                if let Err(e) = std::fs::create_dir_all(&thread_dir) {
+                    println!("Failed to create thread directory: {}", e);
+                    return Ok(());
+                }
+                println!("Created thread directory: {}", thread_dir.display());
+            }
+
             // 导出最终的线程数据
             match utils::export_thread_data_to_csv(
-                subdir.clone(),
+                thread_dir.clone(),
                 &last_process_info.pid,
                 &thread_time_series
                     .values()
@@ -385,7 +441,7 @@ async fn monitor_process(args: &Args) -> Result<(), Box<dyn std::error::Error>> 
             ) {
                 Ok(filenames) => {
                     println!(
-                        "Final thread data exported to {} CSV files",
+                        "✓ Final thread data exported to {} CSV files",
                         filenames.len()
                     );
                 }
@@ -396,7 +452,7 @@ async fn monitor_process(args: &Args) -> Result<(), Box<dyn std::error::Error>> 
 
             // 生成最终的线程时间序列图表
             match utils::generate_thread_time_series_chart(
-                subdir,
+                thread_dir,
                 &args.package,
                 &last_process_info.pid,
                 &thread_time_series,
@@ -404,7 +460,7 @@ async fn monitor_process(args: &Args) -> Result<(), Box<dyn std::error::Error>> 
                 Ok(chart_filename) => {
                     if !chart_filename.is_empty() {
                         println!(
-                            "Final thread time series chart generated: {}",
+                            "✓ Final thread time series chart generated: {}",
                             chart_filename
                         );
                     }
@@ -416,42 +472,99 @@ async fn monitor_process(args: &Args) -> Result<(), Box<dyn std::error::Error>> 
         }
     }
 
-    // Print peak stats
-    println!("\n{}", "Peak Statistics:".yellow().bold());
-    if args.cpu {
+    // 创建时间戳目录
+    let timestamp_dir = if let Ok(dir) = utils::create_timestamp_subdir(&args.package) {
+        dir
+    } else {
+        println!("Warning: Could not create timestamp directory.");
+        return Ok(());
+    };
+
+    // 程序结束时生成CPU图表
+    if args.cpu && peak_stats.cpu_data.timestamps.len() > 1 {
+        // 创建CPU子目录
+        let cpu_dir = timestamp_dir.join("cpu");
+        if !cpu_dir.exists() {
+            if let Err(e) = std::fs::create_dir_all(&cpu_dir) {
+                println!("Failed to create CPU directory: {}", e);
+                return Ok(());
+            }
+            println!("Created CPU directory: {}", cpu_dir.display());
+        }
+
         println!(
-            "Peak CPU Usage: {}% at {}",
-            format!("{:.1}", peak_stats.cpu_usage).red(),
+            "Peak CPU Usage: {} at {}",
+            format!("{:.1}%", peak_stats.cpu_usage).red(),
             peak_stats.cpu_time.format("%Y-%m-%d %H:%M:%S")
         );
 
-        // Generate CPU chart if we have collected data
-        if args.cpu && peak_stats.cpu_data.timestamps.len() > 1 {
-            // Create timestamp-based subdirectory for final charts
-            if utils::create_timestamp_subdir(&args.package).is_ok() {
-                // Generate CPU usage chart
-                if let Ok(chart_path) = utils::generate_cpu_chart(
-                    &args.package,
-                    &peak_stats.cpu_data.timestamps,
-                    &peak_stats.cpu_data.process_cpu,
-                    &last_process_info.pid,
-                ) {
-                    println!("✓ CPU chart generated: {}", chart_path.display());
-                }
-
-                // Generate thread data chart if thread data is available
-                if !peak_stats.cpu_data.top_threads.is_empty() {
-                    println!("Thread data available in final report");
-                }
+        // 生成CPU图表
+        let chart_path = match utils::generate_cpu_chart(
+            &args.package,
+            &peak_stats.cpu_data.timestamps,
+            &peak_stats.cpu_data.process_cpu,
+            &last_process_info.pid,
+        ) {
+            Ok(path) => path,
+            Err(e) => {
+                println!("Failed to generate CPU chart: {}", e);
+                return Ok(());
             }
+        };
+
+        // 复制CPU图表到输出目录
+        let target_path = cpu_dir.join(chart_path.file_name().unwrap());
+        if let Err(e) = std::fs::copy(&chart_path, &target_path) {
+            println!("Failed to copy CPU chart to output directory: {}", e);
+        } else {
+            println!("✓ CPU chart generated: {}", target_path.display());
+        }
+
+        // 导出CPU数据到CSV
+        let csv_path = cpu_dir.join(format!("{}_cpu_data.csv", args.package));
+        if let Ok(_) = utils::export_cpu_data_to_csv(
+            &csv_path,
+            &peak_stats.cpu_data.timestamps,
+            &peak_stats.cpu_data.process_cpu,
+        ) {
+            println!("✓ CPU data exported to CSV: {}", csv_path.display());
         }
     }
+
     if args.memory {
         println!(
             "Peak Memory Usage: {} at {}",
-            utils::format_bytes(peak_stats.memory_usage * 1024).red(),
+            format!("{} KB", peak_stats.memory_usage).red(),
             peak_stats.memory_time.format("%Y-%m-%d %H:%M:%S")
         );
+
+        // 如果收集了足够的内存数据点，生成内存图表
+        if peak_stats.memory_data.timestamps.len() > 1 {
+            // 在时间戳目录下创建memory子目录
+            let memory_dir = timestamp_dir.join("memory");
+            if !memory_dir.exists() {
+                if let Err(e) = std::fs::create_dir_all(&memory_dir) {
+                    println!("Failed to create memory directory: {}", e);
+                    return Ok(());
+                }
+                println!("Created memory directory: {}", memory_dir.display());
+            }
+
+            // 生成内存图表
+            let memory_charts =
+                generate_memory_charts(&memory_dir, &args.package, &peak_stats.memory_data);
+            if let Ok(chart_paths) = memory_charts {
+                for path in chart_paths {
+                    if path.to_string_lossy().ends_with(".png") {
+                        println!("✓ Memory chart generated: {}", path.display());
+                    } else if path.to_string_lossy().ends_with(".csv") {
+                        println!("✓ Memory data exported to CSV: {}", path.display());
+                    }
+                }
+            } else {
+                println!("Failed to generate memory charts");
+            }
+        }
     }
     println!(
         "Process Restarts: {}",
@@ -459,6 +572,252 @@ async fn monitor_process(args: &Args) -> Result<(), Box<dyn std::error::Error>> 
     );
 
     Ok(())
+}
+
+// 生成内存图表的函数
+fn generate_memory_charts(
+    output_dir: &PathBuf,
+    package: &str,
+    memory_data: &MemoryTimeSeriesData,
+) -> Result<Vec<PathBuf>> {
+    use plotters::prelude::*;
+
+    // 创建一个单一的内存图表文件
+    let mut chart_paths = Vec::new();
+    let file_name = format!("{}_memory_chart.png", package);
+    let path = output_dir.join(file_name);
+
+    // 检查数据是否足够
+    if memory_data.timestamps.is_empty() || memory_data.memory_details.is_empty() {
+        return Err(anyhow::format_err!("No memory data to chart"));
+    }
+
+    // 创建图表
+    let root = BitMapBackend::new(&path, (1920, 1080)).into_drawing_area();
+    root.fill(&WHITE)?;
+
+    // 创建图表标题
+    let title = format!("Memory Usage - {}", package);
+
+    // 分割绘图区域为标题、图表和图例
+    let (title_area, rest_area) = root.split_vertically(50);
+
+    // 绘制标题
+    title_area.titled(&title, ("sans-serif", 20))?;
+
+    // 查找最大内存使用量以设置Y轴范围
+    let mut max_memory = 0.1f32;
+    for detail in &memory_data.memory_details {
+        max_memory = max_memory.max(detail.total_pss as f32);
+        max_memory = max_memory.max(detail.java_heap as f32);
+        max_memory = max_memory.max(detail.native_heap as f32);
+        max_memory = max_memory.max(detail.code as f32);
+        max_memory = max_memory.max(detail.stack as f32);
+        max_memory = max_memory.max(detail.graphics as f32);
+        max_memory = max_memory.max(detail.private_other as f32);
+        max_memory = max_memory.max(detail.system as f32);
+    }
+
+    // 添加一些填充到最大内存使用量
+    max_memory = max_memory * 1.1;
+
+    // 获取时间范围
+    let min_time = *memory_data.timestamps.front().unwrap();
+    let max_time = *memory_data.timestamps.back().unwrap();
+
+    // 定义内存类型和对应的名称
+    let memory_types = [
+        "Total PSS",
+        "Java Heap",
+        "Native Heap",
+        "Code",
+        "Stack",
+        "Graphics",
+        "Private Other",
+        "System",
+    ];
+
+    // 定义颜色
+    let colors = [
+        &RED,
+        &BLUE,
+        &GREEN,
+        &YELLOW,
+        &MAGENTA,
+        &CYAN,
+        &RGBColor(128, 0, 0),
+        &RGBColor(0, 128, 0),
+    ];
+
+    // 创建图表上下文
+    let mut chart = ChartBuilder::on(&rest_area)
+        .margin(10)
+        .margin_right(35) // 增加右侧边距为图例留出空间
+        .x_label_area_size(40)
+        .y_label_area_size(60)
+        .build_cartesian_2d(min_time..max_time, 0f32..max_memory)?;
+
+    // 配置网格
+    chart
+        .configure_mesh()
+        .x_labels(8)
+        .x_label_formatter(&|x| x.format("%H:%M:%S").to_string())
+        .y_desc("Memory Usage (KB)")
+        .x_desc("Time")
+        .draw()?;
+
+    // 为每种内存类型绘制数据线
+    for (i, &memory_type) in memory_types.iter().enumerate() {
+        let color = colors[i];
+
+        // 根据内存类型获取对应的数据
+        let values: Vec<(DateTime<Local>, f32)> = memory_data
+            .timestamps
+            .iter()
+            .zip(memory_data.memory_details.iter())
+            .map(|(t, d)| {
+                let value = match i {
+                    0 => d.total_pss as f32,
+                    1 => d.java_heap as f32,
+                    2 => d.native_heap as f32,
+                    3 => d.code as f32,
+                    4 => d.stack as f32,
+                    5 => d.graphics as f32,
+                    6 => d.private_other as f32,
+                    7 => d.system as f32,
+                    _ => 0.0,
+                };
+                (t.to_owned(), value)
+            })
+            .collect();
+
+        // 绘制数据线
+        chart
+            .draw_series(LineSeries::new(values, color.clone()))?
+            .label(memory_type.to_string())
+            .legend(move |(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], color));
+    }
+
+    // 添加图例配置
+    chart
+        .configure_series_labels()
+        .background_style(WHITE.mix(0.8))
+        .border_style(BLACK)
+        .position(SeriesLabelPosition::UpperRight)
+        .margin(10)
+        .legend_area_size(35) // 增加图例区域大小
+        .label_font(("sans-serif", 15)) // 增加字体大小
+        .draw()?;
+
+    // 保存图表
+    root.present()?;
+
+    chart_paths.push(path.clone());
+    // 移除输出，由调用者处理输出
+    // println!("✓ Memory chart generated: {}", path.display());
+
+    // 导出内存数据到CSV
+    let csv_path = output_dir.join(format!("{}_memory_data.csv", package));
+    if let Ok(file) = std::fs::File::create(&csv_path) {
+        let mut writer = std::io::BufWriter::new(file);
+
+        // 写入CSV头
+        writeln!(
+            &mut writer,
+            "Timestamp,Total PSS,Java Heap,Native Heap,Code,Stack,Graphics,Private Other,System"
+        )?;
+
+        // 写入每个数据点
+        for i in 0..memory_data.timestamps.len() {
+            let timestamp = &memory_data.timestamps[i];
+            let details = &memory_data.memory_details[i];
+
+            writeln!(
+                &mut writer,
+                "{},{},{},{},{},{},{},{},{}",
+                timestamp.format("%Y-%m-%d %H:%M:%S"),
+                details.total_pss,
+                details.java_heap,
+                details.native_heap,
+                details.code,
+                details.stack,
+                details.graphics,
+                details.private_other,
+                details.system
+            )?;
+        }
+
+        // 添加CSV文件路径到返回结果
+        chart_paths.push(csv_path.clone());
+        // 移除输出，由调用者处理输出
+        // println!("✓ Memory data exported to CSV: {}", csv_path.display());
+    }
+
+    Ok(chart_paths)
+}
+
+// 保留原始的单个内存指标图表函数，但它不会被直接调用
+#[allow(dead_code)]
+fn generate_single_memory_chart(
+    output_dir: &PathBuf,
+    package: &str,
+    metric_name: &str,
+    timestamps: &VecDeque<DateTime<Local>>,
+    values: &Vec<f32>,
+) -> Result<PathBuf> {
+    use plotters::prelude::*;
+
+    // 创建文件名，用下划线替换空格
+    let file_name = format!("{}_{}.png", package, metric_name.replace(" ", "_"));
+    let path = output_dir.join(file_name);
+    let path_copy = path.clone();
+
+    // 创建图表
+    let root = BitMapBackend::new(&path, (1920, 1080)).into_drawing_area();
+    root.fill(&WHITE)?;
+
+    // 找到最大值
+    let max_value = values.iter().fold(0.0f32, |a, &b| a.max(b)) * 1.1;
+
+    // 获取开始和结束时间
+    let first_timestamp = timestamps.front().unwrap();
+    let last_timestamp = timestamps.back().unwrap();
+
+    // 定义图表区域
+    let mut chart = ChartBuilder::on(&root)
+        .caption(
+            format!("{} - {}", package, metric_name),
+            ("sans-serif", 22).into_font(),
+        )
+        .margin(10)
+        .x_label_area_size(40)
+        .y_label_area_size(60)
+        .build_cartesian_2d(
+            first_timestamp.to_owned()..last_timestamp.to_owned(),
+            0.0..max_value,
+        )?;
+
+    // 配置网格和标签
+    chart
+        .configure_mesh()
+        .x_labels(10)
+        .x_label_formatter(&|x| x.format("%H:%M:%S").to_string())
+        .y_desc(format!("{} (KB)", metric_name))
+        .draw()?;
+
+    // 绘制折线
+    chart.draw_series(LineSeries::new(
+        timestamps
+            .iter()
+            .zip(values.iter())
+            .map(|(t, &v)| (t.to_owned(), v)),
+        &RED,
+    ))?;
+
+    // 保存图表
+    root.present()?;
+
+    Ok(path_copy)
 }
 
 #[tokio::main]
