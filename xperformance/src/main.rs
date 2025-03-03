@@ -37,10 +37,6 @@ struct Args {
     #[arg(long)]
     thread: bool,
 
-    /// Enable verbose output with detailed metrics
-    #[arg(short, long)]
-    verbose: bool,
-
     /// Sampling interval in seconds (default: 1)
     #[arg(short, long, default_value_t = 1)]
     interval: u64,
@@ -78,6 +74,8 @@ struct PeakStats {
 }
 
 impl PeakStats {
+    // 未使用的方法，暂时注释掉
+    /*
     fn format_current_peaks(&self) -> String {
         let timestamp = Local::now().format("%H:%M:%S").to_string();
         let mut peaks = Vec::new();
@@ -99,6 +97,7 @@ impl PeakStats {
         }
         peaks.join("\n")
     }
+    */
 }
 
 fn check_adb() -> Result<()> {
@@ -155,7 +154,7 @@ async fn monitor_process(args: &Args) -> Result<(), Box<dyn std::error::Error>> 
         println!("\n程序正在退出...");
     })?;
 
-    // Start ADB connection monitoring
+    // 设置ADB连接监控
     let adb_monitor = {
         let running = running.clone();
         tokio::spawn(async move {
@@ -163,13 +162,12 @@ async fn monitor_process(args: &Args) -> Result<(), Box<dyn std::error::Error>> 
         })
     };
 
-    let interval = Duration::from_secs(args.interval);
-
     // 记录程序起始时间点，用于计算绝对采样时间
     let start_time = Instant::now();
     let mut sample_count: u64 = 0;
 
     let mut last_process_info = utils::get_process_info(&args.package)?;
+    let mut last_pid = last_process_info.pid.clone();
     println!(
         "Process started with PID {} at {}",
         last_process_info.pid.yellow(),
@@ -183,51 +181,164 @@ async fn monitor_process(args: &Args) -> Result<(), Box<dyn std::error::Error>> 
     let mut thread_time_series: std::collections::HashMap<String, Vec<ThreadCpuInfo>> =
         std::collections::HashMap::new();
 
-    // 如果是verbose模式且开启了CPU监控，立即尝试导出一个初始线程数据文件
+    // 如果开启了CPU监控，立即尝试导出一个初始线程数据文件
     // 确保文件被创建但不预先创建空目录
-    if args.verbose && args.cpu {
+    if args.cpu {
         println!(
             "CPU monitoring enabled, but not creating files until actual thread data is available"
         );
     }
 
     while running.load(Ordering::SeqCst) {
-        // 计算当前应该在的绝对采样点
-        sample_count += 1;
-        // 使用Duration::from_secs代替直接乘法
-        let target_duration = Duration::from_secs(args.interval * sample_count);
-        let target_sample_time = start_time + target_duration;
-        let now = Instant::now();
+        let current_time = Instant::now();
+        let elapsed = current_time.duration_since(start_time);
 
-        // 如果当前时间已经超过了下一个采样点，需要跳过一些采样点以赶上
-        if now > target_sample_time {
-            // 计算应该跳过多少个采样点
-            let time_behind = now.duration_since(start_time);
-            let should_be_at_sample =
-                (time_behind.as_secs_f64() / interval.as_secs_f64()).ceil() as u64;
+        // Calculate what sample we should be at based on elapsed time
+        let should_be_at_sample = elapsed.as_secs() / args.interval;
 
-            if should_be_at_sample > sample_count && args.verbose {
+        // Handle skipping samples if we're behind
+        if should_be_at_sample > sample_count {
+            let samples_to_skip = should_be_at_sample - sample_count - 1;
+            if samples_to_skip > 0 {
                 println!(
-                    "Warning: Sampling is taking longer than the interval. Skipped {} samples to catch up.",
-                    should_be_at_sample - sample_count
+                    "{}",
+                    format!(
+                        "⚠️ System too slow! Skipping {} sample(s) to maintain timing.",
+                        samples_to_skip
+                    )
+                    .yellow()
                 );
             }
-
-            // 直接跳到当前应该在的采样点
             sample_count = should_be_at_sample;
-            // 重新计算目标时间点
-            let target_duration = Duration::from_secs(args.interval * sample_count);
-            let target_sample_time = start_time + target_duration;
+        }
 
-            // 如果新目标时间仍然在过去，进行下一次循环并重新计算
-            if target_sample_time < now {
-                continue;
+        // CPU sampling
+        if args.cpu {
+            // 如果启用了CPU监控，则采样CPU使用情况
+            match cpu::sample_cpu(&args.package).await {
+                Ok((process_cpu, timestamp, threads)) => {
+                    // 将CPU数据添加到时间序列数据中
+                    peak_stats
+                        .cpu_data
+                        .add_data_point(timestamp, process_cpu, threads.clone());
+
+                    // 检查是否为峰值CPU使用率
+                    if process_cpu > peak_stats.cpu_usage {
+                        peak_stats.cpu_usage = process_cpu;
+                        peak_stats.cpu_time = timestamp;
+                    }
+
+                    // 在详细模式下打印线程信息
+                    if args.cpu {
+                        let mut top_threads = threads.clone();
+                        top_threads.sort_by(|a, b| b.cpu_usage.partial_cmp(&a.cpu_usage).unwrap());
+                        let top_threads = top_threads.into_iter().take(5).collect::<Vec<_>>();
+
+                        if !top_threads.is_empty() {
+                            println!("Top Threads:");
+                            for thread in top_threads {
+                                println!(
+                                    "  {} ({}): {}%",
+                                    thread.name.green(),
+                                    thread.tid.yellow(),
+                                    format!("{:.1}", thread.cpu_usage).blue()
+                                );
+                            }
+                        }
+                    }
+
+                    // 保存线程时间序列数据
+                    if args.thread && args.cpu {
+                        for thread in &threads {
+                            if thread.cpu_usage > 0.0 {
+                                let thread_data =
+                                    thread_time_series.entry(thread.name.clone()).or_default();
+                                thread_data.push(thread.clone());
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    if e.to_string().contains("No process found") {
+                        last_process_info = utils::get_process_info(&args.package)?;
+                        peak_stats.restart_count += 1;
+                        println!(
+                            "{}",
+                            format!(
+                                "\n[{}] Process restarted! New PID: {} (previous: {}), Start time: {}",
+                                Local::now().format("%H:%M:%S"),
+                                last_process_info.pid.yellow(),
+                                last_pid.yellow(),
+                                last_process_info.start_time.green()
+                            )
+                        );
+                        last_pid = last_process_info.pid.clone();
+                    } else {
+                        println!("Error sampling CPU: {}", e);
+                    }
+                }
             }
         }
 
-        // 等待到达计划的采样时间点
-        if target_sample_time > now {
-            sleep(target_sample_time - now).await;
+        // Memory sampling
+        if args.memory {
+            // 如果启用了内存监控，则采样内存使用情况
+            match memory::sample_memory(&args.package).await {
+                Ok((total_pss, timestamp, memory_details)) => {
+                    // 将内存数据添加到时间序列数据中
+                    peak_stats
+                        .memory_data
+                        .add_data_point(timestamp, memory_details);
+
+                    // 检查是否为峰值内存使用
+                    if total_pss > peak_stats.memory_usage {
+                        peak_stats.memory_usage = total_pss;
+                        peak_stats.memory_time = timestamp;
+                    }
+
+                    // 定期生成内存图表
+                    if peak_stats.memory_data.timestamps.len() >= 5 {
+                        if let Ok(timestamp_dir) = utils::create_timestamp_subdir(&args.package) {
+                            // 创建memory子目录
+                            let memory_dir = timestamp_dir.join("memory");
+                            if !memory_dir.exists() {
+                                if let Err(e) = std::fs::create_dir_all(&memory_dir) {
+                                    println!("Failed to create memory directory: {}", e);
+                                    continue;
+                                }
+                                println!("Created memory directory: {}", memory_dir.display());
+                            }
+
+                            // 生成内存图表
+                            let memory_charts = generate_memory_charts(
+                                &memory_dir,
+                                &args.package,
+                                &peak_stats.memory_data,
+                            );
+                            if let Ok(chart_paths) = memory_charts {
+                                for path in chart_paths {
+                                    if path.to_string_lossy().ends_with(".png") {
+                                        println!(
+                                            "✓ Scheduled Memory chart generated: {}",
+                                            path.display()
+                                        );
+                                    } else if path.to_string_lossy().ends_with(".csv") {
+                                        println!(
+                                            "✓ Memory data exported to CSV: {}",
+                                            path.display()
+                                        );
+                                    }
+                                }
+                            } else {
+                                println!("Failed to generate scheduled memory charts");
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    println!("Error sampling memory: {}", e);
+                }
+            }
         }
 
         // 检查当前是否为整小时，如果是则生成图表和CSV
@@ -264,7 +375,7 @@ async fn monitor_process(args: &Args) -> Result<(), Box<dyn std::error::Error>> 
                     }
                 };
 
-                if args.verbose && args.cpu {
+                if args.cpu {
                     // 为最新时间点的top线程创建CSV
                     if peak_stats.cpu_data.timestamps.back().is_some()
                         && peak_stats.cpu_data.top_threads.back().is_some()
@@ -279,133 +390,6 @@ async fn monitor_process(args: &Args) -> Result<(), Box<dyn std::error::Error>> 
                     let csv_path = chart_path.with_extension("csv");
                     if csv_path.exists() {
                         println!("Scheduled CPU data exported to CSV: {}", csv_path.display());
-                    }
-                }
-            }
-        }
-
-        // Check for process restart
-        match utils::get_process_info(&args.package) {
-            Ok(current_info) => {
-                if current_info.pid != last_process_info.pid {
-                    peak_stats.restart_count += 1;
-                    let timestamp = Local::now().format("%H:%M:%S").to_string();
-                    let restart_msg = format!(
-                        "[{}] Process restarted! New PID: {} (previous: {}), Start time: {}",
-                        timestamp.blue(),
-                        current_info.pid.yellow(),
-                        last_process_info.pid.red(),
-                        current_info.start_time
-                    );
-
-                    let peaks = peak_stats.format_current_peaks();
-                    if !peaks.is_empty() {
-                        println!("{}\n\n{}", peaks, restart_msg);
-                    } else {
-                        println!("\n{}", restart_msg);
-                    }
-
-                    // 移除进程重启时的日志记录，只在整小时和退出时记录
-                    last_process_info = current_info;
-                }
-            }
-            Err(e) => {
-                println!("\n{}: {}", "Process not found".red(), e);
-                running.store(false, Ordering::SeqCst);
-                break;
-            }
-        }
-
-        if args.cpu {
-            if let Ok((cpu_usage, timestamp, top_threads)) = cpu::sample_cpu(&args.package).await {
-                if cpu_usage > peak_stats.cpu_usage {
-                    peak_stats.cpu_usage = cpu_usage;
-                    peak_stats.cpu_time = timestamp;
-                }
-                peak_stats
-                    .cpu_data
-                    .add_data_point(timestamp, cpu_usage, top_threads.clone());
-
-                // 将线程数据添加到时间序列跟踪
-                if args.thread {
-                    // 打印CPU占用最高的线程信息
-                    println!("Top CPU threads:");
-
-                    // 只显示最多5个线程，避免输出过多
-                    let display_count = std::cmp::min(5, top_threads.len());
-                    for (i, thread) in top_threads.iter().take(display_count).enumerate() {
-                        println!(
-                            "  {}: {} (TID: {}) - {:.1}%",
-                            i + 1,
-                            thread.name.cyan(),
-                            thread.tid.yellow(),
-                            thread.cpu_usage
-                        );
-                    }
-
-                    // 如果有更多线程，显示总数
-                    if top_threads.len() > display_count {
-                        println!(
-                            "  ... and {} more threads",
-                            top_threads.len() - display_count
-                        );
-                    }
-                    println!(); // 空行分隔
-
-                    for thread in &top_threads {
-                        let entry = thread_time_series
-                            .entry(thread.tid.clone())
-                            .or_insert_with(Vec::new);
-                        entry.push(thread.clone());
-                    }
-                }
-            }
-        }
-
-        if args.memory {
-            if let Ok((memory_kb, timestamp, memory_details)) =
-                memory::sample_memory(&args.package, args.verbose).await
-            {
-                if memory_kb > peak_stats.memory_usage {
-                    peak_stats.memory_usage = memory_kb;
-                    peak_stats.memory_time = timestamp;
-                }
-
-                // 添加内存数据点到时间序列
-                peak_stats
-                    .memory_data
-                    .add_data_point(timestamp, memory_details);
-
-                // 如果开启了详细模式并且已收集了足够的数据点，生成内存图表
-                if args.verbose && peak_stats.memory_data.timestamps.len() >= 5 {
-                    if let Ok(timestamp_dir) = utils::create_timestamp_subdir(&args.package) {
-                        // 创建memory子目录
-                        let memory_dir = timestamp_dir.join("memory");
-                        if !memory_dir.exists() {
-                            if let Err(e) = std::fs::create_dir_all(&memory_dir) {
-                                println!("Failed to create memory directory: {}", e);
-                                continue;
-                            }
-                            println!("Created memory directory: {}", memory_dir.display());
-                        }
-
-                        // 生成内存图表
-                        let memory_charts = generate_memory_charts(
-                            &memory_dir,
-                            &args.package,
-                            &peak_stats.memory_data,
-                        );
-                        if let Ok(chart_paths) = memory_charts {
-                            for path in chart_paths {
-                                if path.to_string_lossy().ends_with(".png") {
-                                    println!("✓ Memory chart generated: {}", path.display());
-                                } else if path.to_string_lossy().ends_with(".csv") {
-                                    println!("✓ Memory data exported to CSV: {}", path.display());
-                                }
-                            }
-                        } else {
-                            println!("Failed to generate memory charts");
-                        }
                     }
                 }
             }
