@@ -1,32 +1,21 @@
 use crate::cpu::ThreadCpuInfo;
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result};
 use chrono::{DateTime, Local};
-use colored::*;
 use plotters::element::PathElement;
 use plotters::prelude::*;
-use plotters::style::text_anchor::{HPos, Pos, VPos};
 use plotters::style::Color;
 use plotters::style::RGBColor;
-use std::cmp::Ordering;
 use std::collections::VecDeque;
-use std::fs::File;
 use std::fs::{self, OpenOptions};
-use std::io::BufWriter;
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::Command;
 use std::str;
 use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
-use std::sync::Once;
-
-// 定义我们自己的ORANGE颜色常量
-const ORANGE: RGBColor = RGBColor(255, 165, 0);
-
-static INIT_LOG: Once = Once::new();
-static mut LOG_FILE_PATH: Option<PathBuf> = None;
 
 // 全局静态变量，用于跟踪中断状态
 static INTERRUPT_FLAG: AtomicBool = AtomicBool::new(false);
+static mut LOG_FILE_PATH: Option<PathBuf> = None;
 
 pub struct ProcessInfo {
     pub pid: String,
@@ -122,11 +111,6 @@ fn clean_control_chars(input: &str) -> String {
     result
 }
 
-pub fn ensure_log_dir(package: &str) -> Result<PathBuf> {
-    let log_dir = PathBuf::from("log").join(package);
-    Ok(log_dir)
-}
-
 pub fn create_log_dir_if_needed(package: &str) -> Result<PathBuf> {
     let log_dir = PathBuf::from("log").join(package);
     if !log_dir.exists() {
@@ -138,50 +122,6 @@ pub fn create_log_dir_if_needed(package: &str) -> Result<PathBuf> {
         let _ = append_to_log(&format!("Created log directory: {}", log_dir.display()));
     }
     Ok(log_dir)
-}
-
-pub fn init_logging(package: &str, cpu: bool, memory: bool) -> Result<PathBuf> {
-    let mut result = None;
-    INIT_LOG.call_once(|| {
-        if let Ok(log_dir) = ensure_log_dir(package) {
-            let timestamp = Local::now().format("%Y%m%d_%H%M%S");
-            let metrics = match (cpu, memory) {
-                (true, true) => "cpu_memory",
-                (true, false) => "cpu",
-                (false, true) => "memory",
-                (false, false) => "none",
-            };
-            let filename = format!("performance_{}_{}.log", metrics, timestamp);
-            let path = log_dir.join(filename);
-            unsafe {
-                LOG_FILE_PATH = Some(path.clone());
-            }
-            println!("Created log file: {}", path.display());
-            result = Some(path.clone());
-
-            // Initialize the log file with a header
-            if let Ok(mut file) = OpenOptions::new().create(true).write(true).open(&path) {
-                let header = format!(
-                    "Performance monitoring started at {}\nPackage: {}\nMetrics: {}\n",
-                    timestamp, package, metrics
-                );
-                let _ = writeln!(file, "{}", header);
-                let _ = file.flush();
-            }
-        }
-    });
-
-    if let Some(path) = result {
-        Ok(path)
-    } else {
-        unsafe {
-            if let Some(ref path) = LOG_FILE_PATH {
-                Ok(path.clone())
-            } else {
-                anyhow::bail!("Failed to initialize log file")
-            }
-        }
-    }
 }
 
 pub fn append_to_log(content: &str) -> Result<()> {
@@ -304,27 +244,6 @@ pub fn export_cpu_data_to_csv(
 
     file.flush()?;
     Ok(())
-}
-
-// Add this helper function to convert CPU usage to a color
-fn cpu_usage_to_color(cpu_usage: f32) -> RGBColor {
-    // Color gradient from green (low CPU) to red (high CPU)
-    if cpu_usage < 10.0 {
-        // Green for low usage
-        RGBColor(0, 255, 0)
-    } else if cpu_usage < 30.0 {
-        // Yellow-green
-        RGBColor(128, 255, 0)
-    } else if cpu_usage < 50.0 {
-        // Yellow
-        RGBColor(255, 255, 0)
-    } else if cpu_usage < 70.0 {
-        // Orange
-        RGBColor(255, 165, 0)
-    } else {
-        // Red for high usage
-        RGBColor(255, 0, 0)
-    }
 }
 
 // Function to create timestamp subdirectory within the log directory
