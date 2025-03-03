@@ -1,4 +1,4 @@
-image: ubuntu:18.04
+image: ubuntu:20.04
 
 variables:
   CARGO_HOME: $CI_PROJECT_DIR/.cargo
@@ -19,21 +19,9 @@ cache:
 
 .rust-setup: &rust-setup
   # Install SSL certificates for Rust installer
-  - apt-get update && apt-get install -y curl build-essential pkg-config ca-certificates
+  - apt-get update && apt-get install -y curl build-essential pkg-config ca-certificates libfontconfig1-dev
   - curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
   - source $CARGO_HOME/env
-
-test:
-  stage: test
-  script:
-    - *rust-setup
-    - rustc --version
-    - cargo --version
-    - cargo test --verbose
-  rules:
-    - if: $CI_COMMIT_BRANCH == "main"
-    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
-    - if: $CI_COMMIT_TAG
 
 build:linux:
   stage: build
@@ -60,61 +48,61 @@ build:linux:
     - if: $CI_COMMIT_BRANCH == "main"
     - if: $CI_COMMIT_TAG
 
-build:macos-x86_64:
-  stage: build
-  tags:
-    - macos
-    - x86_64
-    - bigsur  # macOS 11
-  script:
-    - rustc --version
-    - cargo --version
-    - cargo build --release --target x86_64-apple-darwin
-    # Create artifacts directory
-    - mkdir -p artifacts
-    # Copy binary and documentation
-    - cp target/x86_64-apple-darwin/release/xperformance artifacts/
-    - cp README.md artifacts/
-    - cp README_zh.md artifacts/
-    - cp LICENSE artifacts/
-    # Create archive
-    - cd artifacts
-    - tar -czf xtools-macos-x86_64.tar.gz *
-  artifacts:
-    paths:
-      - artifacts/xtools-macos-x86_64.tar.gz
-    expire_in: never
-  rules:
-    - if: $CI_COMMIT_BRANCH == "main"
-    - if: $CI_COMMIT_TAG
+# build:macos-x86_64:
+#   stage: build
+#   tags:
+#     - macos
+#     - x86_64
+#     - bigsur  # macOS 11
+#   script:
+#     - rustc --version
+#     - cargo --version
+#     - cargo build --release --target x86_64-apple-darwin
+#     # Create artifacts directory
+#     - mkdir -p artifacts
+#     # Copy binary and documentation
+#     - cp target/x86_64-apple-darwin/release/xperformance artifacts/
+#     - cp README.md artifacts/
+#     - cp README_zh.md artifacts/
+#     - cp LICENSE artifacts/
+#     # Create archive
+#     - cd artifacts
+#     - tar -czf xtools-macos-x86_64.tar.gz *
+#   artifacts:
+#     paths:
+#       - artifacts/xtools-macos-x86_64.tar.gz
+#     expire_in: never
+#   rules:
+#     - if: $CI_COMMIT_BRANCH == "main"
+#     - if: $CI_COMMIT_TAG
 
-build:macos-arm64:
-  stage: build
-  tags:
-    - macos
-    - arm64
-    - bigsur  # macOS 11
-  script:
-    - rustc --version
-    - cargo --version
-    - cargo build --release --target aarch64-apple-darwin
-    # Create artifacts directory
-    - mkdir -p artifacts
-    # Copy binary and documentation
-    - cp target/aarch64-apple-darwin/release/xperformance artifacts/
-    - cp README.md artifacts/
-    - cp README_zh.md artifacts/
-    - cp LICENSE artifacts/
-    # Create archive
-    - cd artifacts
-    - tar -czf xtools-macos-arm64.tar.gz *
-  artifacts:
-    paths:
-      - artifacts/xtools-macos-arm64.tar.gz
-    expire_in: never
-  rules:
-    - if: $CI_COMMIT_BRANCH == "main"
-    - if: $CI_COMMIT_TAG
+# build:macos-arm64:
+#   stage: build
+#   tags:
+#     - macos
+#     - arm64
+#     - bigsur  # macOS 11
+#   script:
+#     - rustc --version
+#     - cargo --version
+#     - cargo build --release --target aarch64-apple-darwin
+#     # Create artifacts directory
+#     - mkdir -p artifacts
+#     # Copy binary and documentation
+#     - cp target/aarch64-apple-darwin/release/xperformance artifacts/
+#     - cp README.md artifacts/
+#     - cp README_zh.md artifacts/
+#     - cp LICENSE artifacts/
+#     # Create archive
+#     - cd artifacts
+#     - tar -czf xtools-macos-arm64.tar.gz *
+#   artifacts:
+#     paths:
+#       - artifacts/xtools-macos-arm64.tar.gz
+#     expire_in: never
+#   rules:
+#     - if: $CI_COMMIT_BRANCH == "main"
+#     - if: $CI_COMMIT_TAG
 
 release:
   stage: release
@@ -128,23 +116,23 @@ release:
 
       ## Downloads
       - [Linux x86_64](${CI_PROJECT_URL}/-/jobs/${CI_JOB_ID}/artifacts/file/artifacts/xtools-linux-x86_64.tar.gz) (Ubuntu 18.04+ compatible)
-      - [macOS x86_64](${CI_PROJECT_URL}/-/jobs/${CI_JOB_ID}/artifacts/file/artifacts/xtools-macos-x86_64.tar.gz) (macOS 11.0+ Intel)
-      - [macOS ARM64](${CI_PROJECT_URL}/-/jobs/${CI_JOB_ID}/artifacts/file/artifacts/xtools-macos-arm64.tar.gz) (macOS 11.0+ Apple Silicon)
+      # - [macOS x86_64](${CI_PROJECT_URL}/-/jobs/${CI_JOB_ID}/artifacts/file/artifacts/xtools-macos-x86_64.tar.gz) (macOS 11.0+ Intel)
+      # - [macOS ARM64](${CI_PROJECT_URL}/-/jobs/${CI_JOB_ID}/artifacts/file/artifacts/xtools-macos-arm64.tar.gz) (macOS 11.0+ Apple Silicon)
     tag_name: "$CI_COMMIT_TAG"
     assets:
       links:
         - name: "Linux x86_64"
           url: "${CI_PROJECT_URL}/-/jobs/${CI_JOB_ID}/artifacts/file/artifacts/xtools-linux-x86_64.tar.gz"
           link_type: "package"
-        - name: "macOS x86_64"
-          url: "${CI_PROJECT_URL}/-/jobs/${CI_JOB_ID}/artifacts/file/artifacts/xtools-macos-x86_64.tar.gz"
-          link_type: "package"
-        - name: "macOS ARM64"
-          url: "${CI_PROJECT_URL}/-/jobs/${CI_JOB_ID}/artifacts/file/artifacts/xtools-macos-arm64.tar.gz"
-          link_type: "package"
+        # - name: "macOS x86_64"
+        #   url: "${CI_PROJECT_URL}/-/jobs/${CI_JOB_ID}/artifacts/file/artifacts/xtools-macos-x86_64.tar.gz"
+        #   link_type: "package"
+        # - name: "macOS ARM64"
+        #   url: "${CI_PROJECT_URL}/-/jobs/${CI_JOB_ID}/artifacts/file/artifacts/xtools-macos-arm64.tar.gz"
+        #   link_type: "package"
   rules:
     - if: $CI_COMMIT_TAG
   needs:
     - build:linux
-    - build:macos-x86_64
-    - build:macos-arm64
+    # - build:macos-x86_64
+    # - build:macos-arm64
