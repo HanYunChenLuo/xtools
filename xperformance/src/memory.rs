@@ -37,10 +37,7 @@ impl MemoryTimeSeriesData {
     }
 }
 
-pub async fn sample_memory(
-    package: &str,
-    verbose: bool,
-) -> Result<(u64, DateTime<Local>, MemoryDetails)> {
+pub async fn sample_memory(package: &str) -> Result<(u64, DateTime<Local>, MemoryDetails)> {
     let timestamp = Local::now();
     let process_info = utils::get_process_info(package)?;
     let pid = &process_info.pid;
@@ -113,124 +110,6 @@ pub async fn sample_memory(
                 }
             }
         }
-    }
-
-    if verbose {
-        let mut details = String::new();
-        let mut current_section = String::new();
-
-        // Add section header
-        details.push_str("Memory Usage Details\n");
-        details.push_str(&"=".repeat(80));
-        details.push_str("\n\n");
-
-        // Add process information
-        details.push_str(&format!("Process ID: {}\n", pid));
-        details.push_str(&format!("Package Name: {}\n", package));
-        details.push_str(&format!("Start Time: {}\n", process_info.start_time));
-        details.push_str("\n");
-
-        // 添加App Summary详细信息
-        details.push_str("App Summary\n");
-        details.push_str(&"-".repeat(80));
-        details.push_str("\n");
-        details.push_str(&format!(
-            "{:<25} {:>15}\n",
-            "Java Heap:",
-            format!("{} KB", memory_details.java_heap)
-        ));
-        details.push_str(&format!(
-            "{:<25} {:>15}\n",
-            "Native Heap:",
-            format!("{} KB", memory_details.native_heap)
-        ));
-        details.push_str(&format!(
-            "{:<25} {:>15}\n",
-            "Code:",
-            format!("{} KB", memory_details.code)
-        ));
-        details.push_str(&format!(
-            "{:<25} {:>15}\n",
-            "Stack:",
-            format!("{} KB", memory_details.stack)
-        ));
-        details.push_str(&format!(
-            "{:<25} {:>15}\n",
-            "Graphics:",
-            format!("{} KB", memory_details.graphics)
-        ));
-        details.push_str(&format!(
-            "{:<25} {:>15}\n",
-            "Private Other:",
-            format!("{} KB", memory_details.private_other)
-        ));
-        details.push_str(&format!(
-            "{:<25} {:>15}\n",
-            "System:",
-            format!("{} KB", memory_details.system)
-        ));
-        details.push_str(&format!(
-            "{:<25} {:>15}\n",
-            "TOTAL PSS:",
-            format!("{} KB", memory_details.total_pss)
-        ));
-        details.push_str("\n\n");
-
-        // Parse memory info for full details
-        for line in output.lines() {
-            let line = line.trim();
-            if line.is_empty() {
-                continue;
-            }
-
-            // Start of a new section
-            if line.ends_with(':') || line.contains("TOTAL") {
-                if !current_section.is_empty() {
-                    details.push_str(&current_section);
-                    details.push_str("\n");
-                }
-                current_section = format!("\n{}\n{}\n", line, "-".repeat(80));
-                continue;
-            }
-
-            // Parse memory values and format them
-            let parts: Vec<&str> = line.split_whitespace().collect();
-            if parts.len() >= 2 {
-                // Try to parse the second column as a number (memory value)
-                if let Ok(kb) = parts[1].parse::<u64>() {
-                    // 直接显示KB单位，不转换为字节
-                    let formatted_size = format!("{} KB", kb);
-                    // Left-align name (40 chars), right-align memory value (15 chars)
-                    current_section.push_str(&format!("{:<40} {:>15}\n", parts[0], formatted_size));
-                } else {
-                    // If not a memory line, just add it with indentation
-                    current_section.push_str(&format!("    {}\n", line));
-                }
-            } else {
-                // Lines that don't match the pattern
-                current_section.push_str(&format!("    {}\n", line));
-            }
-        }
-
-        // Add the last section if any
-        if !current_section.is_empty() {
-            details.push_str(&current_section);
-        }
-
-        // Add summary section
-        details.push_str("\nMemory Summary\n");
-        details.push_str(&"=".repeat(80));
-        details.push_str("\n");
-        details.push_str(&format!(
-            "{:<40} {:>15}\n",
-            "Total PSS",
-            format!("{} KB", total_pss)
-        ));
-        details.push_str(&"=".repeat(80));
-        details.push_str("\n");
-
-        // Write to log file
-        utils::append_to_log(&details)?;
     }
 
     // Print detailed summary to console

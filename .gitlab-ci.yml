@@ -6,6 +6,7 @@ variables:
   MACOSX_DEPLOYMENT_TARGET: "11.0"
 
 stages:
+  - validate
   - test
   - build
   - release
@@ -22,6 +23,19 @@ cache:
   - apt-get update && apt-get install -y curl build-essential pkg-config ca-certificates libfontconfig1-dev
   - curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
   - source $CARGO_HOME/env
+
+# Validate tag format (x.y.z)
+validate:tag:
+  stage: validate
+  script:
+    - |
+      if [[ ! "$CI_COMMIT_TAG" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        echo "Invalid tag format! Tags must follow semantic versioning (x.y.z or vx.y.z)"
+        exit 1
+      fi
+      echo "Tag format is valid: $CI_COMMIT_TAG"
+  rules:
+    - if: $CI_COMMIT_TAG
 
 build:linux:
   stage: build
@@ -114,25 +128,35 @@ release:
     description: |
       XTools Release $CI_COMMIT_TAG
 
+      ## Changes
+      <!-- Replace this with the actual changelog for this version -->
+      - Improved memory usage reporting
+      - Enhanced thread monitoring
+      - High-resolution charts (1920x1080)
+      - Absolute time-based sampling for consistent intervals
+
       ## Downloads
-      - [Linux x86_64](${CI_PROJECT_URL}/-/jobs/${CI_JOB_ID}/artifacts/file/artifacts/xtools-linux-x86_64.tar.gz) (Ubuntu 18.04+ compatible)
-      # - [macOS x86_64](${CI_PROJECT_URL}/-/jobs/${CI_JOB_ID}/artifacts/file/artifacts/xtools-macos-x86_64.tar.gz) (macOS 11.0+ Intel)
-      # - [macOS ARM64](${CI_PROJECT_URL}/-/jobs/${CI_JOB_ID}/artifacts/file/artifacts/xtools-macos-arm64.tar.gz) (macOS 11.0+ Apple Silicon)
+      - [Linux x86_64](${CI_PROJECT_URL}/-/jobs/artifacts/${CI_COMMIT_TAG}/raw/artifacts/xtools-linux-x86_64.tar.gz?job=build:linux) (Ubuntu 18.04+ compatible)
+      # - [macOS x86_64](${CI_PROJECT_URL}/-/jobs/artifacts/${CI_COMMIT_TAG}/raw/artifacts/xtools-macos-x86_64.tar.gz?job=build:macos-x86_64) (macOS 11.0+ Intel)
+      # - [macOS ARM64](${CI_PROJECT_URL}/-/jobs/artifacts/${CI_COMMIT_TAG}/raw/artifacts/xtools-macos-arm64.tar.gz?job=build:macos-arm64) (macOS 11.0+ Apple Silicon)
     tag_name: "$CI_COMMIT_TAG"
     assets:
       links:
         - name: "Linux x86_64"
-          url: "${CI_PROJECT_URL}/-/jobs/${CI_JOB_ID}/artifacts/file/artifacts/xtools-linux-x86_64.tar.gz"
+          url: "${CI_PROJECT_URL}/-/jobs/artifacts/${CI_COMMIT_TAG}/raw/artifacts/xtools-linux-x86_64.tar.gz?job=build:linux"
           link_type: "package"
         # - name: "macOS x86_64"
-        #   url: "${CI_PROJECT_URL}/-/jobs/${CI_JOB_ID}/artifacts/file/artifacts/xtools-macos-x86_64.tar.gz"
+        #   url: "${CI_PROJECT_URL}/-/jobs/artifacts/${CI_COMMIT_TAG}/raw/artifacts/xtools-macos-x86_64.tar.gz?job=build:macos-x86_64"
         #   link_type: "package"
         # - name: "macOS ARM64"
-        #   url: "${CI_PROJECT_URL}/-/jobs/${CI_JOB_ID}/artifacts/file/artifacts/xtools-macos-arm64.tar.gz"
+        #   url: "${CI_PROJECT_URL}/-/jobs/artifacts/${CI_COMMIT_TAG}/raw/artifacts/xtools-macos-arm64.tar.gz?job=build:macos-arm64"
         #   link_type: "package"
   rules:
     - if: $CI_COMMIT_TAG
   needs:
-    - build:linux
-    # - build:macos-x86_64
-    # - build:macos-arm64
+    - job: build:linux
+      artifacts: true
+    # - job: build:macos-x86_64
+    #   artifacts: true
+    # - job: build:macos-arm64
+    #   artifacts: true

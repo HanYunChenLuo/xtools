@@ -14,45 +14,53 @@ A real-time Android app performance monitoring tool that tracks CPU and memory u
   - Process-specific CPU usage
   - System-wide CPU usage and idle state
   - Thread count tracking
-  - Detailed thread-level CPU usage in verbose mode
-  - CPU usage time-series chart generation
+  - Detailed thread-level CPU usage
+  - CPU usage time-series chart generation with high resolution (1920x1080)
+  - Thread CPU usage visualization with time-series charts
 - Memory usage monitoring
   - Total PSS tracking
-  - Detailed memory breakdown in verbose mode
+  - Detailed memory breakdown (Java Heap, Native Heap, Code, Stack, Graphics, etc.)
+  - Memory composition charts with high resolution (1920x1080)
+  - Individual memory metrics visualization
 - Process monitoring
+  - Absolute time-based sampling for consistent intervals
   - Automatic process restart detection
   - Peak usage tracking
   - Process start time logging
+- Data visualization and export
+  - High resolution charts (1920x1080) for better detail
+  - CSV export of all collected metrics
+  - Organized output in timestamp-based directories
+  - Separate directories for CPU, memory, and thread data
 - ADB connection monitoring
   - Automatic termination on connection loss
-- Detailed logging
-  - Timestamp-based logging
-  - Formatted and aligned output
-  - Comprehensive performance metrics
+- Performance optimizations
+  - Skip delayed samples to maintain consistent sampling frequency
+  - Minimized filesystem overhead
 
 #### Usage
 
 ```bash
-./target/release/xperformance --package <package_name> [--cpu] [--memory] [-i <interval>] [--verbose]
+./target/release/xperformance --package <package_name> [--cpu] [--memory] [--thread] [-i <interval>]
 ```
 
 Options:
 - `--package, -p`: Android package name to monitor
 - `--cpu`: Monitor CPU usage
 - `--memory`: Monitor memory usage
+- `--thread`: Monitor thread activity (requires --cpu)
 - `--interval, -i`: Sampling interval in seconds (default: 1)
-- `--verbose, -v`: Enable verbose output with detailed metrics
 
 Examples:
 ```bash
-# Monitor both CPU and memory with verbose output
-./target/release/xperformance --package com.example.app --cpu --memory --verbose
+# Monitor CPU, memory and thread activity
+./target/release/xperformance --package com.example.app --cpu --memory --thread
 
 # Monitor only CPU with 2-second interval
 ./target/release/xperformance --package com.example.app --cpu -i 2
 
-# Monitor only memory with verbose output
-./target/release/xperformance --package com.example.app --memory --verbose
+# Monitor only memory
+./target/release/xperformance --package com.example.app --memory
 ```
 
 #### Output Format
@@ -60,14 +68,15 @@ Examples:
 The tool provides formatted output with timestamps:
 
 ```
-[14:59:48] Process: 3.3%, System: 180.0% (idle: 610.0%, pid: 25786, threads: 90)
-[14:59:49] Memory Usage: 256.5 MB
-[14:59:53] Peak CPU: 6.6% at 14:59:49
-
-[14:59:53] Process restarted! New PID: 25786 (previous: 25245), Start time: 2024-12-31 14:59:53
+[14:59:48] Process CPU: 3.3% (pid: 25786)
+[14:59:48] Memory Usage: 262144 KB (Java: 5092, Native: 105720, Code: 28672, Graphics: 32768)
+[14:59:53] Peak CPU: 6.6% at 2023-12-31 14:59:49
 ```
 
-Detailed metrics are saved in the `log` directory when running in verbose mode.
+Data is saved in the `log/<package_name>/<timestamp>/` directory with the following structure:
+- `cpu/`: CPU charts and CSV data
+- `memory/`: Memory charts and CSV data
+- `thread/`: Thread activity charts and CSV data
 
 ## Building
 
