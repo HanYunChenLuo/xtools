@@ -137,8 +137,8 @@ release:
 
       ## Downloads
       - [Linux x86_64](${CI_PROJECT_URL}/-/jobs/artifacts/${CI_COMMIT_TAG}/raw/artifacts/xtools-linux-x86_64.tar.gz?job=build:linux) (Ubuntu 20.04+ compatible)
-      # - [macOS x86_64](${CI_PROJECT_URL}/-/jobs/artifacts/${CI_COMMIT_TAG}/raw/artifacts/xtools-macos-x86_64.tar.gz?job=build:macos-x86_64) (macOS 11.0+ Intel)
-      # - [macOS ARM64](${CI_PROJECT_URL}/-/jobs/artifacts/${CI_COMMIT_TAG}/raw/artifacts/xtools-macos-arm64.tar.gz?job=build:macos-arm64) (macOS 11.0+ Apple Silicon)
+      - [macOS x86_64]Support Later! (${CI_PROJECT_URL}/-/jobs/artifacts/${CI_COMMIT_TAG}/raw/artifacts/xtools-macos-x86_64.tar.gz?job=build:macos-x86_64) (macOS 11.0+ Intel)
+      - [macOS ARM64]Support Later! (${CI_PROJECT_URL}/-/jobs/artifacts/${CI_COMMIT_TAG}/raw/artifacts/xtools-macos-arm64.tar.gz?job=build:macos-arm64) (macOS 11.0+ Apple Silicon)
     tag_name: "$CI_COMMIT_TAG"
     assets:
       links:
