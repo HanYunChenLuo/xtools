@@ -21,9 +21,15 @@ class LineChart {
     window.addEventListener('resize', () => this.resize());
   }
   resize() {
+    // 高分屏（devicePixelRatio>1）下需放大 canvas 缓冲区，否则字体和线条模糊。
+    // ctx 用 setTransform(dpr,0,0,dpr,0,0)，后续 draw 坐标按 CSS 像素书写即可。
     const r = this.canvas.parentElement.getBoundingClientRect();
-    this.canvas.width = r.width;
-    this.canvas.height = r.height;
+    const dpr = window.devicePixelRatio || 1;
+    this.cssW = r.width;
+    this.cssH = r.height;
+    this.canvas.width = Math.max(1, Math.round(r.width * dpr));
+    this.canvas.height = Math.max(1, Math.round(r.height * dpr));
+    this.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     this.draw();
   }
   push(pid, t, v) {
@@ -32,8 +38,8 @@ class LineChart {
     if (this.series[pid].length > 600) this.series[pid].shift();
   }
   draw() {
-    const { ctx, canvas } = this;
-    const W = canvas.width, H = canvas.height;
+    const { ctx } = this;
+    const W = this.cssW, H = this.cssH;
     const L = 70, R = 20, T = 30, B = 30;
     ctx.clearRect(0, 0, W, H);
     // 背景
@@ -41,7 +47,7 @@ class LineChart {
     ctx.fillRect(0, 0, W, H);
     // 标题
     ctx.fillStyle = '#cdd6f4';
-    ctx.font = '14px sans-serif';
+    ctx.font = '500 14px system-ui, sans-serif';
     ctx.fillText(this.title, 12, 20);
     // 计算范围
     let tMin = Infinity, tMax = -Infinity, vMax = 0;
@@ -59,7 +65,7 @@ class LineChart {
     // 网格 + Y 轴刻度
     ctx.strokeStyle = '#313244';
     ctx.fillStyle = '#6c7086';
-    ctx.font = '11px sans-serif';
+    ctx.font = '12px system-ui, sans-serif';
     for (let i = 0; i <= 4; i++) {
       const y = T + (H - B - T) * i / 4;
       ctx.beginPath(); ctx.moveTo(L, y); ctx.lineTo(W - R, y); ctx.stroke();
@@ -194,5 +200,46 @@ document.getElementById('stopBtn').addEventListener('click', async () => {
   document.getElementById('startBtn').disabled = false;
   document.getElementById('stopBtn').disabled = true;
   document.getElementById('status').textContent = '已停止';
-});;
+});
 _diag('UI handlers bound');
+
+// ---- 图表随 CPU/Memory 勾选状态显示/隐藏 ----
+function toggleCharts() {
+  const cpuOn = document.getElementById('cpu').checked;
+  const memOn = document.getElementById('memory').checked;
+  document.getElementById('cpuChartBox').classList.toggle('hidden', !cpuOn);
+  document.getElementById('memChartBox').classList.toggle('hidden', !memOn);
+  // 容器显隐变化后 chart 尺寸需刷新
+  setTimeout(() => { cpuChart.resize(); memChart.resize(); }, 50);
+}
+document.getElementById('cpu').addEventListener('change', toggleCharts);
+document.getElementById('memory').addEventListener('change', toggleCharts);
+toggleCharts();
+
+// ---- 包名列表（可搜索下拉）----
+async function loadPackages() {
+  try {
+    const list = await invoke('list_packages');
+    const dl = document.getElementById('pkgList');
+    dl.innerHTML = '';
+    for (const p of list) {
+      const opt = document.createElement('option');
+      opt.value = p;
+      dl.appendChild(opt);
+    }
+    _diag('packages loaded: ' + list.length);
+  } catch (e) {
+    _diag('list_packages ERROR: ' + JSON.stringify(e));
+  }
+}
+document.getElementById('refreshPkgs').addEventListener('click', loadPackages);
+loadPackages();
+
+// ---- 初始化同步按钮状态（自动启动时开始按钮应禁用）----
+invoke('is_running').then((running) => {
+  if (running) {
+    document.getElementById('startBtn').disabled = true;
+    document.getElementById('stopBtn').disabled = false;
+    document.getElementById('status').textContent = '监控中';
+  }
+}).catch(() => {});
