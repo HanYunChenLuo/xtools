@@ -34,6 +34,10 @@ struct Args {
     #[arg(long)]
     thread: bool,
 
+    /// Monitor FPS (SurfaceFlinger layer frame timestamps, works for SurfaceView/game direct rendering)
+    #[arg(long)]
+    fps: bool,
+
     /// Sampling interval in milliseconds (default: 1000)
     #[arg(short, long, default_value_t = 1000)]
     interval: u64,
@@ -81,8 +85,8 @@ async fn monitor_process(args: &Args) -> Result<(), Box<dyn std::error::Error>> 
 
     check_adb()?;
 
-    if !args.cpu && !args.memory {
-        println!("No monitoring options selected. Use --cpu or --memory");
+    if !args.cpu && !args.memory && !args.fps {
+        println!("No monitoring options selected. Use --cpu, --memory or --fps");
         return Ok(());
     }
 
@@ -104,7 +108,7 @@ async fn monitor_process(args: &Args) -> Result<(), Box<dyn std::error::Error>> 
     let start_time = Instant::now();
     let mut sample_count: u64 = 0;
 
-    let mut sampler = Sampler::new(&args.package, args.interval, args.cpu, args.memory, args.thread);
+    let mut sampler = Sampler::new(&args.package, args.interval, args.cpu, args.memory, args.thread, args.fps);
 
     // 初始枚举进程
     let initial_processes = xperf_core::get_all_processes(&args.package)?;
@@ -209,6 +213,17 @@ async fn monitor_process(args: &Args) -> Result<(), Box<dyn std::error::Error>> 
                 }
                 SampleEvent::NoProcess { error } => {
                     println!("No process found for package: {}", error);
+                }
+                SampleEvent::FpsUpdate { pid, timestamp, layer, fps, frame_count, jank_count } => {
+                    println!(
+                        "[{}] FPS: {} (jank: {}, frames: {}, layer: {}) [pid {}]",
+                        timestamp.format("%H:%M:%S"),
+                        format!("{:.1}", fps).blue(),
+                        jank_count.to_string().red(),
+                        frame_count,
+                        layer.green(),
+                        pid.yellow()
+                    );
                 }
                 SampleEvent::SampleError { pid, stage, error } => {
                     println!("Error sampling {} for pid {:?}: {}", stage, pid, error);
@@ -392,6 +407,24 @@ fn generate_final_outputs(
                 match generate_memory_summary_chart(&memory_dir, &args.package, &mem_series) {
                     Ok(p) => println!("✓ Memory summary chart generated: {}", p.display()),
                     Err(e) => println!("Failed to generate memory summary chart: {}", e),
+                }
+            }
+        }
+    }
+    if args.fps {
+        let fps_dir = timestamp_dir.join("fps");
+        let mut has_fps = false;
+        for s in pid_stats.values() {
+            if !s.fps_data.timestamps.is_empty() { has_fps = true; break; }
+        }
+        if has_fps {
+            std::fs::create_dir_all(&fps_dir)?;
+            for (pid, s) in pid_stats {
+                if s.fps_data.timestamps.is_empty() { continue; }
+                let csv_path = fps_dir.join(format!("{}_fps_data_pid{}.csv", args.package, pid));
+                match cli_utils::export_fps_data_to_csv(&csv_path, &s.fps_data) {
+                    Ok(_) => println!("✓ FPS data exported to CSV (pid {}): {}", pid, csv_path.display()),
+                    Err(e) => println!("Failed to export FPS data for pid {}: {}", pid, e),
                 }
             }
         }
