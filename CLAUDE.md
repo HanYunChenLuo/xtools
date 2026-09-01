@@ -33,175 +33,90 @@ Workspace 成员：`xperf-core`（采样核心）、`xperformance`（CLI）、`x
 
 ## xperformance 设计结构
 
-### 整体架构
+### 整体架构（统一 agent 采样）
+
+CLI 和 GUI 不再有 adb 轮询路径，**所有采样都在设备端 agent（xperf-agent）进行**：
 
 ```
-main()
- └─ monitor_process()          ← 主控函数，async
-     ├─ tokio::spawn            ← 独立任务：ADB 连接守护
-     │   └─ monitor_adb_connection()
-     └─ 采样主循环（while running）
-         ├─ cpu::sample_cpu()
-         └─ memory::sample_memory()
+CLI:  main() → monitor_process() → monitor_process_agent()
+GUI:  start_sampling / 自动启动 → spawn_sampling()（std::thread 阻塞读流）
+        │
+        ├─ agent::ensure_agent_built()   ← 无二进制时自动交叉编译（NDK）
+        ├─ agent::deploy_agent()         ← push 到 /data/local/tmp（大小不一致才推）
+        ├─ agent::spawn_agent()          ← adb exec-out 长连接
+        └─ 事件循环：next_event() 阻塞读 NDJSON 行 → 打印/emit + 累积 pid_stats
 ```
 
-程序入口 `main()` 直接调用 `monitor_process()`，无其他初始化逻辑。
+- **设备端**：xperf-agent 常驻，直接读 /proc（CPU/线程）、smaps_rollup 或 dumpsys meminfo（内存）、本地 dumpsys SurfaceFlinger（FPS），按绝对节拍（start + round×interval，防漂移）逐轮输出 JSON 行
+- **主机侧**：只是表现层（CLI 打印/CSV/图表；GUI emit 给前端）。ADB 断开 → exec-out EOF → 循环退出；Ctrl-C → 关闭连接 → agent 写 stdout 失败自行退出
+- **xperf-core 的 Sampler/cpu/memory/fps 轮询模块是参考实现（含完整单测），CLI/GUI 已不再调用**；agent 复制了其中的解析逻辑（零依赖独立发布的要求）
 
----
+### CPU 采样口径（agent 与参考实现一致）
 
-### 并发模型
-
-使用 `tokio` 单线程异步运行时（`#[tokio::main]`）：
-
-- **主任务**：`monitor_process()` 主循环，顺序执行 CPU 采样 → 内存采样 → 图表触发检查
-- **后台任务**：`tokio::spawn(monitor_adb_connection(...))` 每秒轮询 `adb devices`，ADB 断开时通过共享 `Arc<AtomicBool>` 将 `running` 置为 false，使主循环退出
-- **信号处理**：`ctrlc::set_handler` 注册 Ctrl-C 回调，同样置 `running=false` 并调用 `utils::set_interrupt_flag()`
-
-两个共享状态：
-- `Arc<AtomicBool> running`：主循环退出标志，主任务和 ADB 守护任务共享
-- `static AtomicBool INTERRUPT_FLAG`（在 utils.rs）：区分"用户主动中断"与"ADB 断开"，用于 CPU 采样错误时的日志过滤
-
----
-
-### 采样时序机制
+单核口径，与 `adb top` 一致：100% = 占满一个核，多线程可超 100%。
 
 ```
-start_time (Instant)
-sample_count: u64 = 0
-
-每轮循环:
-  should_be_at_sample = elapsed_secs / interval
-  if should_be_at_sample > sample_count:
-    跳帧数 = should_be_at_sample - sample_count - 1
-    sample_count = should_be_at_sample
-  执行本轮采样
+process_cpu% = (proc_jiffies_delta / total_jiffies_delta) × 100 × num_cores
+  total_jiffies_delta = /proc/stat 聚合行两轮差值（所有核之和）
+  num_cores           = /proc/stat 中 cpuN 行数
+  线程同理（/proc/<pid>/task/<tid>/stat 两轮差值）
 ```
 
-**设计意图**：`sample_cpu` 内部包含 `sleep(interval_ms)`，这是两次 `/proc` 读取之间的等待窗口，也自然充当了循环节拍。程序通过绝对时间基准（`Instant`）检测漂移，丢弃已过期的采样点，保持时间序列的准确性。出现"System too slow! Skipping N sample(s)"说明 ADB 读写加上 sleep 的总耗时超过了 `interval` 设定值（通常是 ADB 延迟过高）。
+`/proc/<pid>/stat` 解析：进程名含括号且可能有空格，找最后一个 `)` 后取第 12、13 字段（utime, stime，0-indexed）。
 
-循环内**不含额外 sleep**——节拍由 `sample_cpu` 内部的 sleep 提供。`-i` 参数单位为**毫秒**（默认 1000），支持亚秒级采样（如 `-i 500`）。
+进程重启：agent 端读 stat 失败 → 发 exit 行并重扫包名进程（约 1s 一次），主机侧计 restart_count。
 
----
+### 内存采样
 
-### 数据结构
+- interval ≥ 500ms：设备端 `dumpsys meminfo <pid>`（App Summary 全分类明细）+ smaps_rollup 补 RSS
+- interval < 500ms：只读 `/proc/<pid>/smaps_rollup`（Pss/Rss，~1ms；dumpsys ~100ms 太重）
 
-```rust
-PeakStats                          // 全局统计，贯穿整个监控会话
-├── cpu_usage: f32                 // 峰值 CPU %
-├── cpu_time: DateTime<Local>      // 峰值时间点
-├── memory_usage: u64              // 峰值内存 KB
-├── memory_time: DateTime<Local>
-├── restart_count: u32             // 进程重启次数
-├── cpu_data: CpuTimeSeriesData    // CPU 时序（无上限，持续追加）
-│   ├── timestamps: VecDeque<DateTime<Local>>
-│   ├── process_cpu: VecDeque<f32>
-│   └── top_threads: VecDeque<Vec<ThreadCpuInfo>>
-└── memory_data: MemoryTimeSeriesData  // 内存时序（最多保留 300 点）
-    ├── timestamps: VecDeque<DateTime<Local>>
-    └── memory_details: VecDeque<MemoryDetails>
-
-thread_time_series: HashMap<thread_name, Vec<ThreadCpuInfo>>
-    // --thread 模式下，按线程名聚合，仅保存 cpu_usage > 0 的点
-```
-
-`MemoryTimeSeriesData` 有容量限制（300 点），`CpuTimeSeriesData` 无限制——长时间运行会持续占用内存。
-
----
-
-### CPU 采样流程（cpu.rs）
-
-通过读取 Linux `/proc` 文件系统两次差值计算 CPU 使用率，不依赖 `pidstat`，对设备性能影响极低。
-
-```
-sample_cpu(package, interval_ms)
-  └─ get_process_info(package)
-  └─ adb shell ls /proc/<pid>/task          → 获取所有线程 TID 列表
-
-  【第一次采样】
-  └─ adb shell cat /proc/stat               → 系统总 jiffies（所有 CPU 核之和）
-  └─ adb shell cat /proc/<pid>/stat         → 进程 jiffies (utime+stime)
-  └─ adb shell cat /proc/<pid>/task/*/stat  → 所有线程 jiffies（一条命令批量读取）
-
-  └─ sleep(interval_ms)                     → 等待采样窗口
-
-  【第二次采样】（同上结构）
-
-  【计算】（单核口径，与 adb top 一致：100% = 占满一个核，多线程可超 100%）
-  total_delta  = sys_jiffies2 - sys_jiffies1（所有核之和）
-  num_cores    = /proc/stat 中 cpuN 行数
-  process_cpu% = (proc_jiffies_delta / total_delta) × 100 × num_cores
-  thread_cpu%  = (thread_jiffies_delta / total_delta) × 100 × num_cores（每线程独立计算）
-
-  └─ adb shell cat /proc/<pid>/task/*/comm  → 批量读取线程名
-```
-
-**`/proc/<pid>/stat` 解析**：文件格式为 `pid (comm) state ppid ...`，进程名含括号且可能有空格，解析时找最后一个 `)` 后按偏移量取第12、13字段（utime, stime，0-indexed）。
-
-**ADB 调用次数/轮**：固定 6 次（ls + cat×2 × 3组），与线程数量无关（批量 cat）。
-
-进程重启检测：`sample_cpu` 返回错误时，主循环调用 `get_process_info` 重新获取新 PID，并递增 `restart_count`。
-
----
-
-### 内存采样流程（memory.rs）
-
-```
-sample_memory(package)
-  └─ run_adb_command(["shell", "dumpsys", "meminfo", pid])
-     解析策略：
-       1. 找到 "App Summary" 行，进入解析模式
-       2. 跳过 "Pss(KB)" 标题行，等待 "------" 分隔线
-       3. 逐行按 "Category: value" 格式提取各内存分类
-       4. 遇空行退出 App Summary 模式
-       5. 兜底：在 App Summary 外查找 "TOTAL PSS:" 行
-```
+**真机格式注意**：App Summary 分类行与 `TOTAL PSS:` 之间隔一个空行——空行结束区块，TOTAL 必须在区块外兜底解析。
 
 `MemoryDetails` 字段（单位 KB）：`java_heap`, `native_heap`, `code`, `stack`, `graphics`, `private_other`, `system`, `total_pss`。
 
 ---
 
-### FPS 采样流程（fps.rs）
+### FPS 采样流程（agent 设备端实现）
 
 为什么不用 gfxinfo：`dumpsys gfxinfo framestats` 只统计 View 层级（HWUI）绘制的帧；游戏/相机/SurfaceView 直渲染应用的帧不上 gfxinfo。所有 buffer 最终都经 SurfaceFlinger 合成，因此对**图层**取帧时间戳是通用方案。
 
 ```
-FpsPidState::sample(pid, package)        ← 每 PID 每轮一次
-  ├─ discover_layers(pid, package)       ← 首轮 + 连续 10 轮零帧后重做（Surface 重建会换名 #0→#1）
+fps_sample_round(pid)                    ← agent 内每 PID 每轮一次
+  ├─ sf_discover_layers(pid, package)    ← 首轮 + 连续 10 轮零帧后重做（Surface 重建会换名 #0→#1）
   │    ├─ dumpsys SurfaceFlinger（全量）  → 按 BufferStateLayer 块 metadata 的 ownerPID 归属匹配
   │    └─ 兜底：dumpsys SurfaceFlinger --list → 按包名匹配（去掉 "<hex> " 别名前缀，去重）
-  └─ 每图层每轮：dumpsys SurfaceFlinger --latency '<layer>'
+  └─ 每图层每轮：dumpsys SurfaceFlinger --latency '<layer>'（设备端本地调用，无 adb 往返）
        解析最近 127 帧的 actualPresent（过滤 0=空槽、i64::MAX=已入队未上屏哨兵）
        与上轮缓冲末尾时间戳取差 → 本窗口新帧数 → FPS = 新帧数 / 窗口墙钟时长
-       有帧的图层各自上报一条 FpsUpdate（多渲染面不取舍、不混叠）；全零时报一条静止样本
+       有帧的图层各发一行（多渲染面不取舍、不混叠）；全零时发一条静止样本
 ```
 
 关键设计点：
 - **图层名可能不含包名**（如 svm 的渲染层叫 `SVM Container`），只能靠 ownerPID 归属识别
 - **不用 `--latency-clear`**：实测部分设备（如此车机）clear 只清空缓冲而不返回数据；改用 `--latency` 逐轮差值
 - 缓冲 127 帧 ≈ 2.1s@60fps：采样间隔大于该值时老帧被挤出，计数为下界（interval ≤ 1s 精确）
-- **jank 不按 vsync 阈值**（30fps 相机流在 60Hz 屏上帧间隔 33ms 会被误判全卡）：用间隔 > 2×窗口中位间隔，<3 帧不计
-- 图层名含空格/`#`，adb argv 拼成 shell 串时必须自带单引号
+- **jank 不按 vsync 阈值**（30fps 相机流在 60Hz 屏上帧间隔 33ms 会被误判全卡）：用间隔 > 2×窗口中位间隔，<3 帧不计；低间隔（<~200ms）窗口帧数太少，jank 恒 0 属预期
 - 静止界面 FPS=0 如实上报（事件照常发，GUI 折线落底）
 
-`--fps` 退出时导出 `log/<pkg>/<ts>/fps/<pkg>_fps_data_pid<pid>.csv`（Timestamp,FPS,Jank,Layer）。GUI 有 FPS 勾选框 + 折线图（自适应纵轴，多图层逐层一条线，图层名作图例）。
+`--fps` 退出时导出 `log/<pkg>/<ts>/fps/<pkg>_fps_data_pid<pid>.csv`（Timestamp,FPS,Jank,Layer）。GUI 有 FPS 勾选框 + 折线图（自适应纵轴，多图层逐层一条线，图层短名作图例）。
 
 ---
 
-### agent 模式（设备端低间隔采样，xperf-agent）
+### agent（设备端采样器，xperf-agent）
 
-**为什么需要**：adb 轮询单轮固定 6+ 次调用（每次 ~13ms 起，`dumpsys meminfo` ~100ms），interval < 500ms 时轮询开销就超过间隔本身。agent 模式把采样循环搬到设备上常驻，直接读 /proc（微秒级），结果以 NDJSON 经 `adb exec-out` 长连接流式回传（协议见 `xperf-agent/main.rs` 头注释）。
+**为什么**：adb 轮询单轮固定 6+ 次调用（每次 ~13ms 起，`dumpsys meminfo` ~100ms），低间隔下开销超过间隔本身，且每次 adb 调用都扰动被测系统。agent 常驻设备直接读 /proc（微秒级），NDJSON 经 `adb exec-out` 长连接流式回传（PerfDog Agent 同构思路，但免装 APK：纯静态二进制）。当前 CLI/GUI 的**唯一**采样路径。
 
-**触发**：CLI `--agent` 显式启用，或 `--interval < 500` 自动切换。首次自动交叉编译（需 NDK，链接器配置在 `.cargo/config.toml`）+ push 到 `/data/local/tmp/xperf-agent`。
+**部署**：首次运行自动交叉编译（需 NDK，链接器配置在 `.cargo/config.toml`）+ push 到 `/data/local/tmp/xperf-agent`（大小不一致才重推）。
 
-**与轮询模式的差异**：
-- CPU 口径相同（jiffies 差值 ×核数，单核基准），但窗口是相邻两轮（agent 常驻保有状态，无 phase1/phase2 结构）
-- 内存改读 `/proc/<pid>/smaps_rollup`（Pss/Rss，~1ms），不用 dumpsys meminfo（低间隔下太慢且扰动大）；因此 agent 模式的内存明细只有 total_pss，其余分类为 0
-- 不支持 --fps：127 帧缓冲在 1s 轮询下已是帧级分辨率，低间隔无收益
-- 终端按 ~1s 聚合打印（avg/max），全量明细在退出 CSV；CSV 时间戳带毫秒（`%.3f`）
+**要点**：
+- 绝对节拍：`start + round × interval`，漂移时发 err 行（"round N overrun"）
+- CPU 窗口 = 相邻两轮差值（常驻保有状态，无 phase1/phase2 结构）
+- 需要 root（读他进程的 /proc、smaps_rollup）；内部设备 adbd 已 root
+- 终端输出：interval ≥ 500ms 逐条详细打印；< 500ms 按 ~1s 聚合（avg/max），全量明细在退出 CSV；CSV 时间戳毫秒精度（`%.3f`）
 - 主机断连/Ctrl-C → exec-out 关闭 → agent 写 stdout 失败自行退出
 
-**验证基线**：svm @ 50ms 间隔，78 样本均值 15.03%，与轮询模式/adb top 一致；50ms 窗口可见 25-47% 的瞬时毛刺（1s 轮询看不到）。
-
+**验证基线**：svm @ 50ms 间隔，78 样本均值 15.03%，与 adb top 一致；50ms 窗口可见 25-47% 的瞬时毛刺（1s 采样看不到）。
 
 ---
 
@@ -209,14 +124,13 @@ FpsPidState::sample(pid, package)        ← 每 PID 每轮一次
 
 | 场景 | 触发条件 | 输出位置 |
 |------|---------|---------|
-| 内存图表（运行中） | 每次内存采样后，数据点 ≥ 5 个 | `log/<pkg>/<ts>/memory/` |
-| CPU 图表（运行中） | 进入新的整点小时（hour 变化） | 先写 `/tmp/<pkg>_cpu_chart.png`，仅打印路径，不复制 |
-| CPU 图表（退出时） | 程序退出，数据点 > 1 | `/tmp/` → 复制到 `log/<pkg>/<ts>/cpu/` |
-| CPU CSV（退出时） | 同上 | `log/<pkg>/<ts>/cpu/<pkg>_cpu_data.csv` |
-| 线程 CSV（退出时） | `--thread --cpu`，有数据 | `log/<pkg>/<ts>/thread/thread_<name>_<tid>_<pid>.csv` |
-| 线程时序图（退出时） | 同上 | `log/<pkg>/<ts>/thread/thread_time_series_<ts>_pid<pid>.png` |
+| CPU 图表 + CSV（退出时） | 程序退出，数据点 > 1 | `log/<pkg>/<ts>/cpu/` |
+| 内存图表 + CSV（退出时） | 同上 | `log/<pkg>/<ts>/memory/` |
+| FPS CSV（退出时） | `--fps`，有数据 | `log/<pkg>/<ts>/fps/<pkg>_fps_data_pid<pid>.csv` |
+| 线程 CSV + 时序图（退出时） | `--thread --cpu`，有数据 | `log/<pkg>/<ts>/thread/` |
 
-**注意**：`create_timestamp_subdir()` 使用 `OnceLock<Mutex>` 缓存目录路径，整个会话只创建一个时间戳目录，内存图表运行中触发时与退出时写入同一目录。
+**注意**：`create_timestamp_subdir()` 使用 `OnceLock<Mutex>` 缓存目录路径，整个会话只创建一个时间戳目录。
+
 
 ---
 

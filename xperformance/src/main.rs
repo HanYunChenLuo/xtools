@@ -1,6 +1,6 @@
 #![deny(warnings)]
 use anyhow::{Context, Result};
-use chrono::{DateTime, Local, Timelike};
+use chrono::{DateTime, Local};
 use clap::Parser;
 use colored::*;
 use std::path::{Path, PathBuf};
@@ -12,7 +12,6 @@ use tokio::time::Instant;
 mod utils;
 use utils as cli_utils;
 
-use xperf_core::{SampleEvent, Sampler};
 use xperf_core::ThreadCpuInfo;
 
 #[derive(Parser, Debug)]
@@ -37,12 +36,6 @@ struct Args {
     /// Monitor FPS (SurfaceFlinger layer frame timestamps, works for SurfaceView/game direct rendering)
     #[arg(long)]
     fps: bool,
-
-    /// 设备端采样模式（低间隔场景：agent 常驻设备读 /proc，流式回传）。
-    /// interval < 500ms 时自动启用。注意：agent 模式内存只有 Pss/Rss（smaps_rollup），
-    /// 且不支持 --fps（帧缓冲方案在 1s 轮询下已是帧级分辨率，无需提速）。
-    #[arg(long)]
-    agent: bool,
 
     /// Sampling interval in milliseconds (default: 1000)
     #[arg(short, long, default_value_t = 1000)]
@@ -70,20 +63,6 @@ fn check_adb() -> Result<()> {
     Ok(())
 }
 
-async fn monitor_adb_connection(running: Arc<AtomicBool>) {
-    loop {
-        if !running.load(Ordering::SeqCst) {
-            return;
-        }
-        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-        if !xperf_core::utils::check_adb_connection() {
-            eprintln!("{}", "ADB device disconnected!".red().bold());
-            running.store(false, Ordering::SeqCst);
-            return;
-        }
-    }
-}
-
 async fn monitor_process(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
     println!("{}", "XPerformance Monitor".green().bold());
     println!("Monitoring package: {}", args.package.cyan());
@@ -96,192 +75,22 @@ async fn monitor_process(args: &Args) -> Result<(), Box<dyn std::error::Error>> 
         return Ok(());
     }
 
-    // 低间隔场景走设备端 agent（adb 轮询单轮开销就超过间隔本身）
-    let use_agent = args.agent || args.interval < xperf_core::agent::AGENT_INTERVAL_THRESHOLD_MS;
-    if use_agent {
-        if args.fps {
-            println!("{}", "⚠️ agent 模式不支持 --fps（帧缓冲方案在 1s 轮询下已是帧级分辨率），FPS 项被忽略".yellow());
-        }
-        if args.interval >= xperf_core::agent::AGENT_INTERVAL_THRESHOLD_MS {
-            println!("已显式启用 --agent 模式");
-        } else {
-            println!("间隔 {}ms < 500ms，自动切换到 agent 模式（设备端采样）", args.interval);
-        }
-        return monitor_process_agent(args).await;
-    }
-
-    let running = Arc::new(AtomicBool::new(true));
-    let r = running.clone();
-    ctrlc::set_handler(move || {
-        r.store(false, Ordering::SeqCst);
-        xperf_core::utils::set_interrupt_flag();
-        println!("\n程序正在退出...");
-    })?;
-
-    let adb_monitor = {
-        let running = running.clone();
-        tokio::spawn(async move {
-            monitor_adb_connection(running).await;
-        })
-    };
-
-    let start_time = Instant::now();
-    let mut sample_count: u64 = 0;
-
-    let mut sampler = Sampler::new(&args.package, args.interval, args.cpu, args.memory, args.thread, args.fps);
-
-    // 初始枚举进程
-    let initial_processes = xperf_core::get_all_processes(&args.package)?;
-    for p in &initial_processes {
-        println!("Monitoring PID {} (start: {})", p.pid.yellow(), p.start_time.blue());
-    }
-    // 把初始进程喂给 sampler（通过首轮 sample_once 自动发现）
-    drop(initial_processes);
-
-    let mut last_chart_hour = Local::now().hour() as i32;
-
-    // 内存图表节流
-    const MEMORY_CHART_INTERVAL: usize = 30;
-    let mut last_memory_chart_sample_count: usize = 0;
-    let mut memory_sample_count: usize = 0;
-
-    // 每个线程的时间序列数据，按 pid → thread_name → Vec
-    let mut thread_time_series: std::collections::HashMap<
-        String,
-        std::collections::HashMap<String, Vec<ThreadCpuInfo>>,
-    > = std::collections::HashMap::new();
-
-    if args.cpu {
-        println!("CPU monitoring enabled, but not creating files until actual thread data is available");
-    }
-
-    while running.load(Ordering::SeqCst) {
-        let current_time = Instant::now();
-        let elapsed = current_time.duration_since(start_time);
-        let should_be_at_sample = elapsed.as_millis() as u64 / args.interval;
-
-        if should_be_at_sample > sample_count {
-            let samples_to_skip = should_be_at_sample - sample_count - 1;
-            if samples_to_skip > 0 {
-                println!(
-                    "{}",
-                    format!("⚠️ System too slow! Skipping {} sample(s) to maintain timing.", samples_to_skip).yellow()
-                );
-            }
-            sample_count = should_be_at_sample;
-        }
-
-        let events = sampler.sample_once().await;
-
-        for event in events {
-            match event {
-                SampleEvent::PidDiscovered { pid, start_time } => {
-                    println!("Monitoring PID {} (start: {})", pid.yellow(), start_time.blue());
-                }
-                SampleEvent::PidDisappeared { pid } => {
-                    println!("\n[{}] PID {} disappeared.", Local::now().format("%H:%M:%S"), pid.yellow());
-                }
-                SampleEvent::CpuUpdate { pid, timestamp, process_cpu, threads } => {
-                    println!(
-                        "[{}] Process CPU: {}% (pid: {})",
-                        timestamp.format("%H:%M:%S"),
-                        format!("{:.1}", process_cpu).blue(),
-                        pid.yellow()
-                    );
-                    let mut top_threads = threads.clone();
-                    top_threads.sort_by(|a, b| b.cpu_usage.partial_cmp(&a.cpu_usage).unwrap());
-                    let top_threads = top_threads.into_iter().take(5).collect::<Vec<_>>();
-                    if !top_threads.is_empty() {
-                        println!("Top Threads (pid {}):", pid.yellow());
-                        for thread in top_threads {
-                            println!(
-                                "  {} ({}): {}%",
-                                thread.name.green(),
-                                thread.tid.yellow(),
-                                format!("{:.1}", thread.cpu_usage).blue()
-                            );
-                        }
-                    }
-                    if args.thread {
-                        let per_pid = thread_time_series.entry(pid.clone()).or_default();
-                        for thread in &threads {
-                            if thread.cpu_usage > 0.0 {
-                                per_pid.entry(thread.name.clone()).or_default().push(thread.clone());
-                            }
-                        }
-                    }
-                }
-                SampleEvent::MemoryUpdate { pid, timestamp, total_pss, details } => {
-                    println!(
-                        "[{}] Memory Usage: {} KB (Java: {}, Native: {}, Code: {}, Graphics: {}) [pid {}]",
-                        timestamp.format("%H:%M:%S"),
-                        total_pss.to_string().blue(),
-                        details.java_heap,
-                        details.native_heap,
-                        details.code,
-                        details.graphics,
-                        pid.yellow()
-                    );
-                    memory_sample_count += 1;
-                    // 定期生成内存图表
-                    if memory_sample_count >= 5
-                        && memory_sample_count - last_memory_chart_sample_count >= MEMORY_CHART_INTERVAL
-                    {
-                        last_memory_chart_sample_count = memory_sample_count;
-                        generate_scheduled_memory_charts(args);
-                    }
-                }
-                SampleEvent::NoProcess { error } => {
-                    println!("No process found for package: {}", error);
-                }
-                SampleEvent::FpsUpdate { pid, timestamp, layer, fps, frame_count, jank_count } => {
-                    println!(
-                        "[{}] FPS: {} (jank: {}, frames: {}, layer: {}) [pid {}]",
-                        timestamp.format("%H:%M:%S"),
-                        format!("{:.1}", fps).blue(),
-                        jank_count.to_string().red(),
-                        frame_count,
-                        layer.green(),
-                        pid.yellow()
-                    );
-                }
-                SampleEvent::SampleError { pid, stage, error } => {
-                    println!("Error sampling {} for pid {:?}: {}", stage, pid, error);
-                }
-            }
-        }
-
-        // 整点 CPU 图表
-        let now = Local::now();
-        let current_hour = now.hour() as i32;
-        if current_hour != last_chart_hour && args.cpu {
-            last_chart_hour = current_hour;
-            generate_scheduled_cpu_charts(args, &sampler);
-        }
-
-        // 节拍：CPU 采样已 sleep；--memory 单跑时需自行维持间隔
-        sampler.tick_if_needed().await;
-    }
-
-    let _ = adb_monitor.await;
-
-    // 退出时生成最终图表
-    generate_final_outputs(args, sampler.pid_stats(), &thread_time_series)?;
-
-    println!("Process Restarts: {}", sampler.restart_count().to_string().red());
-    Ok(())
+    // 统一走设备端 agent 采样（无 adb 轮询路径）
+    monitor_process_agent(args).await
 }
 
-/// agent 模式（低间隔采样）：设备端常驻采样器 + exec-out 事件流。
-/// 与轮询模式的差异：内存只有 Pss/Rss（smaps_rollup）；不支持 --fps；
-/// 终端按 ~1s 聚合打印（50ms 逐条会刷屏），全量明细在退出 CSV 中。
+/// 统一采样路径：设备端 agent 常驻采样 + exec-out 事件流。
+/// 输出策略：interval ≥ 500ms 逐条详细打印（低频率，同旧轮询模式的信息量）；
+/// < 500ms 时按 ~1s 聚合打印（逐条会刷屏），全量明细均在退出 CSV 中。
 async fn monitor_process_agent(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
     use xperf_core::agent::{self, AgentEvent};
 
     let bin = agent::ensure_agent_built()?;
     agent::deploy_agent(&bin)?;
-    let mut stream = agent::spawn_agent(Some(&args.package), args.interval, args.cpu, args.memory)?;
+    let mut stream = agent::spawn_agent(Some(&args.package), args.interval, args.cpu, args.memory, args.fps)?;
     println!("agent 已部署并启动（间隔 {}ms）", args.interval);
+
+    let verbose = args.interval >= 500;
 
     let running = Arc::new(AtomicBool::new(true));
     let r = running.clone();
@@ -298,7 +107,7 @@ async fn monitor_process_agent(args: &Args) -> Result<(), Box<dyn std::error::Er
     > = Default::default();
     let mut restart_count = 0u32;
 
-    // 终端聚合输出：每 PID 累计窗口内样本，每秒打印一行
+    // 终端聚合输出（仅 interval < 500ms 用）：每 PID 累计窗口内样本，每秒打印一行
     #[derive(Default)]
     struct Agg {
         n: u32,
@@ -307,6 +116,7 @@ async fn monitor_process_agent(args: &Args) -> Result<(), Box<dyn std::error::Er
         pss: u64,
         rss: u64,
         has_mem: bool,
+        fps: Option<(String, f32, u32)>, // 最新 (图层, fps, jank)
     }
     let mut aggs: std::collections::HashMap<u32, Agg> = Default::default();
     let mut last_print = Instant::now();
@@ -337,6 +147,25 @@ async fn monitor_process_agent(args: &Args) -> Result<(), Box<dyn std::error::Er
                         timestamp: Some(t),
                     })
                     .collect();
+                if verbose {
+                    println!(
+                        "[{}] Process CPU: {}% (pid: {})",
+                        t.format("%H:%M:%S"),
+                        format!("{:.1}", cpu).blue(),
+                        pid.to_string().yellow()
+                    );
+                    let mut top = threads.clone();
+                    top.sort_by(|a, b| b.cpu_usage.partial_cmp(&a.cpu_usage).unwrap());
+                    top.truncate(5);
+                    for thread in top {
+                        println!(
+                            "  {} ({}): {}%",
+                            thread.name.green(),
+                            thread.tid.yellow(),
+                            format!("{:.1}", thread.cpu_usage).blue()
+                        );
+                    }
+                }
                 let s = pid_stats.entry(pid.to_string()).or_default();
                 s.active = true;
                 s.cpu_data.add_data_point(t, cpu, threads.clone());
@@ -359,19 +188,37 @@ async fn monitor_process_agent(args: &Args) -> Result<(), Box<dyn std::error::Er
                     a.max = cpu;
                 }
             }
-            AgentEvent::Mem { ts, pid, pss, rss } => {
+            AgentEvent::Mem { ts, pid, pss, rss, java, native, code, stack, gfx, other, sys } => {
                 let Some(t) = DateTime::from_timestamp_millis(ts as i64)
                     .map(|t| t.with_timezone(&Local))
                 else {
                     continue;
                 };
+                if verbose {
+                    println!(
+                        "[{}] Memory Usage: {} KB (Java: {}, Native: {}, Code: {}, Graphics: {}) [pid {}]",
+                        t.format("%H:%M:%S"),
+                        pss.to_string().blue(),
+                        java,
+                        native,
+                        code,
+                        gfx,
+                        pid.to_string().yellow()
+                    );
+                }
                 let s = pid_stats.entry(pid.to_string()).or_default();
                 s.active = true;
-                // agent 模式高频率数据：直接推入时序（绕过轮询模式的 300 点上限，保 CSV 完整）
+                // 直接推入时序（绕过轮询模式遗留的 300 点上限，保高频数据完整）
                 s.memory_data.timestamps.push_back(t);
                 s.memory_data.memory_details.push_back(xperf_core::MemoryDetails {
+                    java_heap: java,
+                    native_heap: native,
+                    code,
+                    stack,
+                    graphics: gfx,
+                    private_other: other,
+                    system: sys,
                     total_pss: pss,
-                    ..Default::default()
                 });
                 if s.memory_time.is_none() || pss > s.memory_usage {
                     s.memory_usage = pss;
@@ -382,6 +229,29 @@ async fn monitor_process_agent(args: &Args) -> Result<(), Box<dyn std::error::Er
                 a.rss = rss;
                 a.has_mem = true;
             }
+            AgentEvent::Fps { ts, pid, layer, fps, frames, jank } => {
+                let Some(t) = DateTime::from_timestamp_millis(ts as i64)
+                    .map(|t| t.with_timezone(&Local))
+                else {
+                    continue;
+                };
+                if verbose {
+                    println!(
+                        "[{}] FPS: {} (jank: {}, frames: {}, layer: {}) [pid {}]",
+                        t.format("%H:%M:%S"),
+                        format!("{:.1}", fps).blue(),
+                        jank.to_string().red(),
+                        frames,
+                        layer.green(),
+                        pid.to_string().yellow()
+                    );
+                }
+                let s = pid_stats.entry(pid.to_string()).or_default();
+                s.active = true;
+                s.fps_data.add_data_point(t, fps, jank, &layer);
+                let a = aggs.entry(pid).or_default();
+                a.fps = Some((layer, fps, jank));
+            }
             AgentEvent::Exit { pid } => {
                 restart_count += 1;
                 if let Some(s) = pid_stats.get_mut(&pid.to_string()) {
@@ -389,12 +259,12 @@ async fn monitor_process_agent(args: &Args) -> Result<(), Box<dyn std::error::Er
                 }
                 println!("[{}] PID {} 已退出", Local::now().format("%H:%M:%S"), pid.to_string().yellow());
             }
-            AgentEvent::Noproc => {} // 无进程期间 agent 每秒报一次，聚合行自然体现为无数据
+            AgentEvent::Noproc => {} // 无进程期间 agent 每秒报一次，无需逐条打印
             AgentEvent::Err { msg } => println!("{}", format!("agent: {}", msg).yellow()),
         }
 
-        // 每秒聚合打印一次（高频率逐条打印会刷屏）
-        if last_print.elapsed() >= std::time::Duration::from_secs(1) {
+        // 低间隔模式：每秒聚合打印一次（逐条会刷屏）
+        if !verbose && last_print.elapsed() >= std::time::Duration::from_secs(1) {
             last_print = Instant::now();
             let ts = Local::now().format("%H:%M:%S");
             for (pid, a) in aggs.iter_mut() {
@@ -408,6 +278,9 @@ async fn monitor_process_agent(args: &Args) -> Result<(), Box<dyn std::error::Er
                 }
                 if a.has_mem {
                     parts.push(format!("PSS {} KB (RSS {})", a.pss.to_string().blue(), a.rss));
+                }
+                if let Some((layer, fps, jank)) = &a.fps {
+                    parts.push(format!("FPS {} (jank {}, {})", format!("{:.1}", fps).blue(), jank, layer.green()));
                 }
                 if !parts.is_empty() {
                     println!("[{}] {} (pid: {})", ts, parts.join(" | "), pid.to_string().yellow());
@@ -423,33 +296,6 @@ async fn monitor_process_agent(args: &Args) -> Result<(), Box<dyn std::error::Er
     generate_final_outputs(args, &pid_stats, &thread_time_series)?;
     println!("Process Restarts: {}", restart_count.to_string().red());
     Ok(())
-}
-
-fn generate_scheduled_memory_charts(args: &Args) {
-    if let Ok(timestamp_dir) = cli_utils::create_timestamp_subdir(&args.package) {
-        let memory_dir = timestamp_dir.join("memory");
-        if !memory_dir.exists() {
-            if let Err(e) = std::fs::create_dir_all(&memory_dir) {
-                println!("Failed to create memory directory: {}", e);
-                return;
-            }
-        }
-        // 注：此处无法访问 sampler 的 pid_stats（sampler 在 monitor_process 作用域），
-        // 调度图表改为在退出时统一生成；运行中调度内存图表暂略。
-        let _ = memory_dir;
-    }
-}
-
-fn generate_scheduled_cpu_charts(args: &Args, _sampler: &Sampler) {
-    let now = Local::now();
-    println!(
-        "{} Generating scheduled CPU chart at {}...",
-        now.format("%H:%M:%S").to_string().blue(),
-        format!("{}:00", now.hour()).green()
-    );
-    // 运行中 CPU 图表：写 /tmp，仅打印路径（与原行为一致）
-    // 实际每 PID 图表在退出时生成；此处仅保留提示
-    let _ = args;
 }
 
 fn generate_final_outputs(
