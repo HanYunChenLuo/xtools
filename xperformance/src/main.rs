@@ -1,6 +1,6 @@
 #![deny(warnings)]
 use anyhow::{Context, Result};
-use chrono::{Local, Timelike};
+use chrono::{DateTime, Local, Timelike};
 use clap::Parser;
 use colored::*;
 use std::path::{Path, PathBuf};
@@ -37,6 +37,12 @@ struct Args {
     /// Monitor FPS (SurfaceFlinger layer frame timestamps, works for SurfaceView/game direct rendering)
     #[arg(long)]
     fps: bool,
+
+    /// 设备端采样模式（低间隔场景：agent 常驻设备读 /proc，流式回传）。
+    /// interval < 500ms 时自动启用。注意：agent 模式内存只有 Pss/Rss（smaps_rollup），
+    /// 且不支持 --fps（帧缓冲方案在 1s 轮询下已是帧级分辨率，无需提速）。
+    #[arg(long)]
+    agent: bool,
 
     /// Sampling interval in milliseconds (default: 1000)
     #[arg(short, long, default_value_t = 1000)]
@@ -88,6 +94,20 @@ async fn monitor_process(args: &Args) -> Result<(), Box<dyn std::error::Error>> 
     if !args.cpu && !args.memory && !args.fps {
         println!("No monitoring options selected. Use --cpu, --memory or --fps");
         return Ok(());
+    }
+
+    // 低间隔场景走设备端 agent（adb 轮询单轮开销就超过间隔本身）
+    let use_agent = args.agent || args.interval < xperf_core::agent::AGENT_INTERVAL_THRESHOLD_MS;
+    if use_agent {
+        if args.fps {
+            println!("{}", "⚠️ agent 模式不支持 --fps（帧缓冲方案在 1s 轮询下已是帧级分辨率），FPS 项被忽略".yellow());
+        }
+        if args.interval >= xperf_core::agent::AGENT_INTERVAL_THRESHOLD_MS {
+            println!("已显式启用 --agent 模式");
+        } else {
+            println!("间隔 {}ms < 500ms，自动切换到 agent 模式（设备端采样）", args.interval);
+        }
+        return monitor_process_agent(args).await;
     }
 
     let running = Arc::new(AtomicBool::new(true));
@@ -246,9 +266,162 @@ async fn monitor_process(args: &Args) -> Result<(), Box<dyn std::error::Error>> 
     let _ = adb_monitor.await;
 
     // 退出时生成最终图表
-    generate_final_outputs(args, &sampler, &thread_time_series)?;
+    generate_final_outputs(args, sampler.pid_stats(), &thread_time_series)?;
 
     println!("Process Restarts: {}", sampler.restart_count().to_string().red());
+    Ok(())
+}
+
+/// agent 模式（低间隔采样）：设备端常驻采样器 + exec-out 事件流。
+/// 与轮询模式的差异：内存只有 Pss/Rss（smaps_rollup）；不支持 --fps；
+/// 终端按 ~1s 聚合打印（50ms 逐条会刷屏），全量明细在退出 CSV 中。
+async fn monitor_process_agent(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
+    use xperf_core::agent::{self, AgentEvent};
+
+    let bin = agent::ensure_agent_built()?;
+    agent::deploy_agent(&bin)?;
+    let mut stream = agent::spawn_agent(Some(&args.package), args.interval, args.cpu, args.memory)?;
+    println!("agent 已部署并启动（间隔 {}ms）", args.interval);
+
+    let running = Arc::new(AtomicBool::new(true));
+    let r = running.clone();
+    ctrlc::set_handler(move || {
+        r.store(false, Ordering::SeqCst);
+        xperf_core::utils::set_interrupt_flag();
+        println!("\n程序正在退出...");
+    })?;
+
+    let mut pid_stats: std::collections::HashMap<String, xperf_core::PidStats> = Default::default();
+    let mut thread_time_series: std::collections::HashMap<
+        String,
+        std::collections::HashMap<String, Vec<ThreadCpuInfo>>,
+    > = Default::default();
+    let mut restart_count = 0u32;
+
+    // 终端聚合输出：每 PID 累计窗口内样本，每秒打印一行
+    #[derive(Default)]
+    struct Agg {
+        n: u32,
+        sum: f32,
+        max: f32,
+        pss: u64,
+        rss: u64,
+        has_mem: bool,
+    }
+    let mut aggs: std::collections::HashMap<u32, Agg> = Default::default();
+    let mut last_print = Instant::now();
+
+    while running.load(Ordering::SeqCst) {
+        let Some(ev) = stream.next_event()? else { break }; // EOF：agent 退出/断连
+        let ev = match ev {
+            Ok(ev) => ev,
+            Err(e) => {
+                println!("{}", format!("协议解析失败: {}", e).yellow());
+                continue;
+            }
+        };
+        match ev {
+            AgentEvent::Hello { ncores } => println!("设备 {} 核", ncores),
+            AgentEvent::Cpu { ts, pid, cpu, th } => {
+                let Some(t) = DateTime::from_timestamp_millis(ts as i64)
+                    .map(|t| t.with_timezone(&Local))
+                else {
+                    continue;
+                };
+                let threads: Vec<ThreadCpuInfo> = th
+                    .iter()
+                    .map(|(tid, name, usage)| ThreadCpuInfo {
+                        tid: tid.to_string(),
+                        cpu_usage: *usage,
+                        name: name.clone(),
+                        timestamp: Some(t),
+                    })
+                    .collect();
+                let s = pid_stats.entry(pid.to_string()).or_default();
+                s.active = true;
+                s.cpu_data.add_data_point(t, cpu, threads.clone());
+                if s.cpu_time.is_none() || cpu > s.cpu_usage {
+                    s.cpu_usage = cpu;
+                    s.cpu_time = Some(t);
+                }
+                if args.thread {
+                    let per_pid = thread_time_series.entry(pid.to_string()).or_default();
+                    for t2 in threads {
+                        if t2.cpu_usage > 0.0 {
+                            per_pid.entry(t2.name.clone()).or_default().push(t2);
+                        }
+                    }
+                }
+                let a = aggs.entry(pid).or_default();
+                a.n += 1;
+                a.sum += cpu;
+                if cpu > a.max {
+                    a.max = cpu;
+                }
+            }
+            AgentEvent::Mem { ts, pid, pss, rss } => {
+                let Some(t) = DateTime::from_timestamp_millis(ts as i64)
+                    .map(|t| t.with_timezone(&Local))
+                else {
+                    continue;
+                };
+                let s = pid_stats.entry(pid.to_string()).or_default();
+                s.active = true;
+                // agent 模式高频率数据：直接推入时序（绕过轮询模式的 300 点上限，保 CSV 完整）
+                s.memory_data.timestamps.push_back(t);
+                s.memory_data.memory_details.push_back(xperf_core::MemoryDetails {
+                    total_pss: pss,
+                    ..Default::default()
+                });
+                if s.memory_time.is_none() || pss > s.memory_usage {
+                    s.memory_usage = pss;
+                    s.memory_time = Some(t);
+                }
+                let a = aggs.entry(pid).or_default();
+                a.pss = pss;
+                a.rss = rss;
+                a.has_mem = true;
+            }
+            AgentEvent::Exit { pid } => {
+                restart_count += 1;
+                if let Some(s) = pid_stats.get_mut(&pid.to_string()) {
+                    s.active = false;
+                }
+                println!("[{}] PID {} 已退出", Local::now().format("%H:%M:%S"), pid.to_string().yellow());
+            }
+            AgentEvent::Noproc => {} // 无进程期间 agent 每秒报一次，聚合行自然体现为无数据
+            AgentEvent::Err { msg } => println!("{}", format!("agent: {}", msg).yellow()),
+        }
+
+        // 每秒聚合打印一次（高频率逐条打印会刷屏）
+        if last_print.elapsed() >= std::time::Duration::from_secs(1) {
+            last_print = Instant::now();
+            let ts = Local::now().format("%H:%M:%S");
+            for (pid, a) in aggs.iter_mut() {
+                let mut parts = Vec::new();
+                if a.n > 0 {
+                    parts.push(format!(
+                        "CPU avg {} max {}",
+                        format!("{:.1}%", a.sum / a.n as f32).blue(),
+                        format!("{:.1}%", a.max).red()
+                    ));
+                }
+                if a.has_mem {
+                    parts.push(format!("PSS {} KB (RSS {})", a.pss.to_string().blue(), a.rss));
+                }
+                if !parts.is_empty() {
+                    println!("[{}] {} (pid: {})", ts, parts.join(" | "), pid.to_string().yellow());
+                }
+                a.n = 0;
+                a.sum = 0.0;
+                a.max = 0.0;
+            }
+        }
+    }
+
+    drop(stream); // 杀掉设备端 agent（Drop 里 kill）
+    generate_final_outputs(args, &pid_stats, &thread_time_series)?;
+    println!("Process Restarts: {}", restart_count.to_string().red());
     Ok(())
 }
 
@@ -281,7 +454,7 @@ fn generate_scheduled_cpu_charts(args: &Args, _sampler: &Sampler) {
 
 fn generate_final_outputs(
     args: &Args,
-    sampler: &Sampler,
+    pid_stats: &std::collections::HashMap<String, xperf_core::PidStats>,
     thread_time_series: &std::collections::HashMap<String, std::collections::HashMap<String, Vec<ThreadCpuInfo>>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // 线程时序图（按 PID）
@@ -319,8 +492,6 @@ fn generate_final_outputs(
             return Ok(());
         }
     };
-
-    let pid_stats = sampler.pid_stats();
 
     // CPU 图表（每 PID 一张 + 汇总）
     let cpu_dir = timestamp_dir.join("cpu");
@@ -535,7 +706,7 @@ fn generate_memory_charts(
             let _ = writeln!(
                 writer,
                 "{},{},{},{},{},{},{},{},{}",
-                t.format("%Y-%m-%d %H:%M:%S"),
+                t.format("%Y-%m-%d %H:%M:%S%.3f"),
                 d.total_pss, d.java_heap, d.native_heap, d.code, d.stack, d.graphics, d.private_other, d.system
             );
         }

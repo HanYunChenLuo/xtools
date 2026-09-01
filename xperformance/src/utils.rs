@@ -178,7 +178,7 @@ pub fn export_cpu_data_to_csv(
         writeln!(
             file,
             "{},{:.2}",
-            timestamps[i].format("%Y-%m-%d %H:%M:%S"),
+            timestamps[i].format("%Y-%m-%d %H:%M:%S%.3f"),
             process_cpu[i]
         )?;
     }
@@ -194,7 +194,7 @@ pub fn export_fps_data_to_csv(path: &PathBuf, data: &xperf_core::FpsTimeSeriesDa
         writeln!(
             file,
             "{},{:.2},{},{}",
-            data.timestamps[i].format("%Y-%m-%d %H:%M:%S"),
+            data.timestamps[i].format("%Y-%m-%d %H:%M:%S%.3f"),
             data.fps[i],
             data.jank_counts[i],
             data.layers[i]
@@ -272,7 +272,7 @@ pub fn export_thread_data_to_csv(
         sorted_data.sort_by(|a, b| a.timestamp.unwrap().cmp(&b.timestamp.unwrap()));
         for thread in sorted_data {
             if let Some(timestamp) = thread.timestamp {
-                writeln!(writer, "{},{}", timestamp.format("%Y-%m-%d %H:%M:%S"), thread.cpu_usage)?;
+                writeln!(writer, "{},{}", timestamp.format("%Y-%m-%d %H:%M:%S%.3f"), thread.cpu_usage)?;
             }
         }
         writer.flush()?;
