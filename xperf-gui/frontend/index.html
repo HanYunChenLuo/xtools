@@ -20,6 +20,7 @@
     <div class="checkboxes">
       <label><input id="cpu" type="checkbox" checked /> CPU</label>
       <label><input id="memory" type="checkbox" checked /> Memory</label>
+      <label><input id="fps" type="checkbox" /> FPS</label>
     </div>
     <button id="startBtn">开始监控</button>
     <button id="stopBtn" disabled>停止</button>
@@ -30,6 +31,7 @@
   <div id="main">
     <div id="cpuChartBox" class="chart"><canvas id="cpuChart"></canvas></div>
     <div id="memChartBox" class="chart"><canvas id="memChart"></canvas></div>
+    <div id="fpsChartBox" class="chart hidden"><canvas id="fpsChart"></canvas></div>
   </div>
   <script src="main.js"></script>
 </body>

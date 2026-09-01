@@ -291,31 +291,34 @@ impl Sampler {
             }
         }
 
-        // 4. FPS 采样（SurfaceFlinger 图层帧时间戳，覆盖 SurfaceView/游戏直渲染场景）
+        // 4. FPS 采样（SurfaceFlinger 图层帧时间戳，覆盖 SurfaceView/游戏直渲染）
         if self.fps && !active_pids.is_empty() {
             for pid in &active_pids {
-                let state = self
-                    .fps_states
-                    .entry(pid.clone())
-                    .or_default();
+                let state = self.fps_states.entry(pid.clone()).or_default();
                 let result = state.sample(pid, &self.package);
                 match result {
-                    Ok(Some(sample)) => {
-                        let s = self
-                            .pid_stats
-                            .get_mut(pid)
-                            .expect("active pid must be in pid_stats");
-                        s.fps_data.add_data_point(sample.timestamp, sample.fps, sample.jank_count);
-                        events.push(SampleEvent::FpsUpdate {
-                            pid: pid.clone(),
-                            timestamp: sample.timestamp,
-                            layer: sample.layer,
-                            fps: sample.fps,
-                            frame_count: sample.frame_count,
-                            jank_count: sample.jank_count,
-                        });
+                    Ok(samples) => {
+                        for sample in samples {
+                            let s = self
+                                .pid_stats
+                                .get_mut(pid)
+                                .expect("active pid must be in pid_stats");
+                            s.fps_data.add_data_point(
+                                sample.timestamp,
+                                sample.fps,
+                                sample.jank_count,
+                                &sample.layer,
+                            );
+                            events.push(SampleEvent::FpsUpdate {
+                                pid: pid.clone(),
+                                timestamp: sample.timestamp,
+                                layer: sample.layer,
+                                fps: sample.fps,
+                                frame_count: sample.frame_count,
+                                jank_count: sample.jank_count,
+                            });
+                        }
                     }
-                    Ok(None) => {} // 首轮建基线，不出数
                     Err(e) => {
                         events.push(SampleEvent::SampleError {
                             pid: Some(pid.clone()),
