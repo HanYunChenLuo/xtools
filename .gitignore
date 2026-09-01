@@ -2,3 +2,7 @@
 /log/*
 !/log/.gitkeep
 log/*.log
+# Tauri 构建自动生成的 schema/权限清单（编译时重新生成）
+xperf-gui/gen/
+# Node / 前端构建产物
+node_modules/

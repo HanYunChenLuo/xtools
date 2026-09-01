@@ -18,3 +18,4 @@ chrono = "0.4"
 colored = "2.0"
 ctrlc = "3.4"
 plotters = "0.3"
+xperf-core = { path = "../xperf-core" }

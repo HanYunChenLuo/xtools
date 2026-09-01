@@ -1,0 +1,20 @@
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: -apple-system, "Segoe UI", sans-serif; display: flex; height: 100vh; }
+#sidebar { width: 260px; padding: 16px; background: #1e1e2e; color: #cdd6f4; overflow-y: auto; }
+#sidebar h2 { margin-bottom: 16px; color: #89b4fa; }
+#sidebar label { display: block; margin: 8px 0; font-size: 13px; }
+#sidebar input[type=text], #sidebar input[type=number] { width: 100%; padding: 4px; margin-top: 2px; background: #313244; color: #cdd6f4; border: 1px solid #45475a; border-radius: 3px; }
+.checkboxes { display: flex; gap: 12px; margin: 8px 0; }
+#sidebar button { width: 100%; padding: 8px; margin: 4px 0; border: none; border-radius: 4px; cursor: pointer; font-size: 14px; }
+#startBtn { background: #a6e3a1; color: #1e1e2e; }
+#stopBtn { background: #f38ba8; color: #1e1e2e; }
+#stopBtn:disabled, #startBtn:disabled { opacity: 0.4; cursor: not-allowed; }
+#status { margin: 12px 0; padding: 6px; background: #313244; border-radius: 3px; font-size: 12px; text-align: center; }
+#sidebar h3 { margin-top: 16px; color: #89b4fa; font-size: 14px; }
+#pidList { list-style: none; font-size: 12px; }
+#pidList li { padding: 3px 6px; background: #313244; margin: 2px 0; border-radius: 3px; }
+#pidList li.new { animation: flash 1s; }
+@keyframes flash { from { background: #a6e3a1; color: #1e1e2e; } to { background: #313244; color: #cdd6f4; } }
+#main { flex: 1; padding: 12px; background: #181825; display: flex; flex-direction: column; gap: 12px; }
+.chart { flex: 1; background: #1e1e2e; border-radius: 6px; position: relative; overflow: hidden; }
+.chart canvas { width: 100%; height: 100%; display: block; }
