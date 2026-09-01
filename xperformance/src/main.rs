@@ -5,7 +5,7 @@ use clap::Parser;
 use colored::*;
 use std::collections::VecDeque;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -37,8 +37,8 @@ struct Args {
     #[arg(long)]
     thread: bool,
 
-    /// Sampling interval in seconds (default: 1)
-    #[arg(short, long, default_value_t = 1)]
+    /// Sampling interval in milliseconds (default: 1000)
+    #[arg(short, long, default_value_t = 1000)]
     interval: u64,
 }
 
@@ -62,43 +62,19 @@ impl CpuTimeSeriesData {
     }
 }
 
+/// 单个 PID 的监控状态。多进程应用会有多个 PidStats，按 pid 索引在 HashMap 中。
 #[derive(Default)]
-struct PeakStats {
-    cpu_usage: f32,
-    cpu_time: DateTime<Local>,
-    memory_usage: u64,
-    memory_time: DateTime<Local>,
-    restart_count: u32,
+struct PidStats {
     cpu_data: CpuTimeSeriesData,
     memory_data: MemoryTimeSeriesData,
+    cpu_usage: f32, // 该 PID 的峰值 CPU %
+    cpu_time: Option<DateTime<Local>>, // 该 PID 达到峰值 CPU 的时间（None = 尚无采样）
+    memory_usage: u64, // 该 PID 的峰值内存 KB
+    memory_time: Option<DateTime<Local>>, // 该 PID 达到峰值内存的时间（None = 尚无采样）
+    start_time: String, // 该 PID 的启动时间
+    active: bool, // 是否仍在运行（动态跟随：消失的 PID 置 false 但保留数据）
 }
 
-impl PeakStats {
-    // 未使用的方法，暂时注释掉
-    /*
-    fn format_current_peaks(&self) -> String {
-        let timestamp = Local::now().format("%H:%M:%S").to_string();
-        let mut peaks = Vec::new();
-        if self.cpu_usage > 0.0 {
-            peaks.push(format!(
-                "[{}] Peak CPU: {}% at {}",
-                timestamp.blue(),
-                format!("{:.1}", self.cpu_usage).red(),
-                self.cpu_time.format("%H:%M:%S").to_string().blue()
-            ));
-        }
-        if self.memory_usage > 0 {
-            peaks.push(format!(
-                "[{}] Peak Memory: {} at {}",
-                timestamp.blue(),
-                format!("{} KB", self.memory_usage).red(),
-                self.memory_time.format("%H:%M:%S").to_string().blue()
-            ));
-        }
-        peaks.join("\n")
-    }
-    */
-}
 
 fn check_adb() -> Result<()> {
     let output = Command::new("adb")
@@ -131,11 +107,9 @@ async fn monitor_adb_connection(running: Arc<AtomicBool>) {
 }
 
 async fn monitor_process(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
-    let mut peak_stats = PeakStats::default();
-
     println!("{}", "XPerformance Monitor".green().bold());
     println!("Monitoring package: {}", args.package.cyan());
-    println!("Sampling interval: {} seconds", args.interval);
+    println!("Sampling interval: {} ms", args.interval);
 
     check_adb()?;
 
@@ -166,20 +140,41 @@ async fn monitor_process(args: &Args) -> Result<(), Box<dyn std::error::Error>> 
     let start_time = Instant::now();
     let mut sample_count: u64 = 0;
 
-    let mut last_process_info = utils::get_process_info(&args.package)?;
-    let mut last_pid = last_process_info.pid.clone();
-    println!(
-        "Process started with PID {} at {}",
-        last_process_info.pid.yellow(),
-        last_process_info.start_time.blue()
-    );
+    // 按 PID 索引的监控状态：多进程应用会有多个条目，动态跟随
+    let mut pid_stats: std::collections::HashMap<String, PidStats> = std::collections::HashMap::new();
+    let mut restart_count: u32 = 0;
 
-    // 添加变量以跟踪上次生成图表的小时
-    let mut last_chart_hour = -1i32;
+    // 初始枚举进程
+    let initial_processes = utils::get_all_processes(&args.package)?;
+    for p in &initial_processes {
+        println!(
+            "Monitoring PID {} (start: {})",
+            p.pid.yellow(),
+            p.start_time.blue()
+        );
+        pid_stats.insert(
+            p.pid.clone(),
+            PidStats {
+                start_time: p.start_time.clone(),
+                active: true,
+                ..Default::default()
+            },
+        );
+    }
 
-    // 添加变量用于跟踪每个线程的时间序列数据
-    let mut thread_time_series: std::collections::HashMap<String, Vec<ThreadCpuInfo>> =
-        std::collections::HashMap::new();
+    // 添加变量以跟踪上次生成图表的小时（初始化为当前小时，避免启动时立即触发）
+    let mut last_chart_hour = Local::now().hour() as i32;
+
+    // 内存图表节流：记录上次生成图表时的累计采样数，每 MEMORY_CHART_INTERVAL 个新采样生成一次。
+    const MEMORY_CHART_INTERVAL: usize = 30;
+    let mut last_memory_chart_sample_count: usize = 0;
+    let mut memory_sample_count: usize = 0;
+
+    // 每个线程的时间序列数据，按 pid → thread_name → Vec<ThreadCpuInfo> 组织
+    let mut thread_time_series: std::collections::HashMap<
+        String,
+        std::collections::HashMap<String, Vec<ThreadCpuInfo>>,
+    > = std::collections::HashMap::new();
 
     // 如果开启了CPU监控，立即尝试导出一个初始线程数据文件
     // 确保文件被创建但不预先创建空目录
@@ -194,7 +189,7 @@ async fn monitor_process(args: &Args) -> Result<(), Box<dyn std::error::Error>> 
         let elapsed = current_time.duration_since(start_time);
 
         // Calculate what sample we should be at based on elapsed time
-        let should_be_at_sample = elapsed.as_secs() / args.interval;
+        let should_be_at_sample = elapsed.as_millis() as u64 / args.interval;
 
         // Handle skipping samples if we're behind
         if should_be_at_sample > sample_count {
@@ -212,30 +207,92 @@ async fn monitor_process(args: &Args) -> Result<(), Box<dyn std::error::Error>> 
             sample_count = should_be_at_sample;
         }
 
-        // CPU sampling
-        if args.cpu {
-            // 如果启用了CPU监控，则采样CPU使用情况
-            match cpu::sample_cpu(&args.package).await {
-                Ok((process_cpu, timestamp, threads)) => {
-                    // 将CPU数据添加到时间序列数据中
-                    peak_stats
-                        .cpu_data
-                        .add_data_point(timestamp, process_cpu, threads.clone());
-
-                    // 检查是否为峰值CPU使用率
-                    if process_cpu > peak_stats.cpu_usage {
-                        peak_stats.cpu_usage = process_cpu;
-                        peak_stats.cpu_time = timestamp;
+        // 动态跟随：每轮重新枚举包名下的所有进程
+        let current_processes = match utils::get_all_processes(&args.package) {
+            Ok(ps) => ps,
+            Err(e) => {
+                // 包名下无任何进程（Process not found）：所有已知 PID 标记失活
+                for s in pid_stats.values_mut() {
+                    if s.active {
+                        s.active = false;
+                        restart_count += 1;
                     }
+                }
+                println!("No process found for package: {}", e);
+                if args.cpu {
+                    tokio::time::sleep(tokio::time::Duration::from_millis(args.interval)).await;
+                }
+                continue;
+            }
+        };
+        // 新出现的 PID 加入监控；已有的标记 active=true
+        for p in &current_processes {
+            pid_stats
+                .entry(p.pid.clone())
+                .or_insert_with(|| PidStats {
+                    start_time: p.start_time.clone(),
+                    active: true,
+                    ..Default::default()
+                });
+            if let Some(s) = pid_stats.get_mut(&p.pid) {
+                s.active = true;
+                if s.start_time.is_empty() {
+                    s.start_time = p.start_time.clone();
+                }
+            }
+        }
 
-                    // 在详细模式下打印线程信息
-                    if args.cpu {
+        // 收集本轮活跃的 PID（保持稳定顺序）
+        let active_pids: Vec<String> = pid_stats
+            .iter()
+            .filter(|(_, s)| s.active)
+            .map(|(pid, _)| pid.clone())
+            .collect();
+
+        // CPU 采样：两阶段，所有 PID 共享一个 sleep 窗口
+        if args.cpu && !active_pids.is_empty() {
+            // phase1：对每个活跃 PID 读取第一次 jiffies
+            let mut phase1_results: std::collections::HashMap<String, cpu::CpuSample1> =
+                std::collections::HashMap::new();
+            for pid in &active_pids {
+                match cpu::sample_cpu_phase1(pid).await {
+                    Ok(p1) => {
+                        phase1_results.insert(pid.clone(), p1);
+                    }
+                    Err(e) => {
+                        if e.to_string().contains("Process not found") {
+                            if let Some(s) = pid_stats.get_mut(pid) {
+                                s.active = false;
+                                restart_count += 1;
+                            }
+                            println!("\n[{}] PID {} disappeared.", Local::now().format("%H:%M:%S"), pid.yellow());
+                        } else {
+                            println!("Error sampling CPU (phase1) for pid {}: {}", pid, e);
+                        }
+                    }
+                }
+            }
+
+            // sleep 窗口：所有 PID 共享这一个 interval
+            tokio::time::sleep(tokio::time::Duration::from_millis(args.interval)).await;
+
+            // phase2：对每个有 phase1 结果的 PID 读取第二次 jiffies 并计算
+            for (pid, p1) in &phase1_results {
+                match cpu::sample_cpu_phase2(p1).await {
+                    Ok((process_cpu, timestamp, threads)) => {
+                        let s = pid_stats.get_mut(pid).expect("pid present in phase1_results implies pid_stats has it");
+                        s.cpu_data.add_data_point(timestamp, process_cpu, threads.clone());
+                        if s.cpu_time.is_none() || process_cpu > s.cpu_usage {
+                            s.cpu_usage = process_cpu;
+                            s.cpu_time = Some(timestamp);
+                        }
+
+                        // 打印 top 线程
                         let mut top_threads = threads.clone();
                         top_threads.sort_by(|a, b| b.cpu_usage.partial_cmp(&a.cpu_usage).unwrap());
                         let top_threads = top_threads.into_iter().take(5).collect::<Vec<_>>();
-
                         if !top_threads.is_empty() {
-                            println!("Top Threads:");
+                            println!("Top Threads (pid {}):", pid.yellow());
                             for thread in top_threads {
                                 println!(
                                     "  {} ({}): {}%",
@@ -245,98 +302,96 @@ async fn monitor_process(args: &Args) -> Result<(), Box<dyn std::error::Error>> 
                                 );
                             }
                         }
-                    }
 
-                    // 保存线程时间序列数据
-                    if args.thread && args.cpu {
-                        for thread in &threads {
-                            if thread.cpu_usage > 0.0 {
-                                let thread_data =
-                                    thread_time_series.entry(thread.name.clone()).or_default();
-                                thread_data.push(thread.clone());
+                        // 保存线程时间序列数据（按 pid → name 组织）
+                        if args.thread {
+                            let per_pid = thread_time_series.entry(pid.clone()).or_default();
+                            for thread in &threads {
+                                if thread.cpu_usage > 0.0 {
+                                    let thread_data = per_pid.entry(thread.name.clone()).or_default();
+                                    thread_data.push(thread.clone());
+                                }
                             }
                         }
                     }
-                }
-                Err(e) => {
-                    if e.to_string().contains("No process found") {
-                        last_process_info = utils::get_process_info(&args.package)?;
-                        peak_stats.restart_count += 1;
-                        println!(
-                            "{}",
-                            format!(
-                                "\n[{}] Process restarted! New PID: {} (previous: {}), Start time: {}",
-                                Local::now().format("%H:%M:%S"),
-                                last_process_info.pid.yellow(),
-                                last_pid.yellow(),
-                                last_process_info.start_time.green()
-                            )
-                        );
-                        last_pid = last_process_info.pid.clone();
-                    } else {
-                        println!("Error sampling CPU: {}", e);
+                    Err(e) => {
+                        if e.to_string().contains("Process not found") {
+                            if let Some(s) = pid_stats.get_mut(pid) {
+                                s.active = false;
+                                restart_count += 1;
+                            }
+                            println!("\n[{}] PID {} disappeared during sampling.", Local::now().format("%H:%M:%S"), pid.yellow());
+                        } else {
+                            println!("Error sampling CPU (phase2) for pid {}: {}", pid, e);
+                        }
                     }
                 }
             }
         }
 
-        // Memory sampling
-        if args.memory {
-            // 如果启用了内存监控，则采样内存使用情况
-            match memory::sample_memory(&args.package).await {
-                Ok((total_pss, timestamp, memory_details)) => {
-                    // 将内存数据添加到时间序列数据中
-                    peak_stats
-                        .memory_data
-                        .add_data_point(timestamp, memory_details);
-
-                    // 检查是否为峰值内存使用
-                    if total_pss > peak_stats.memory_usage {
-                        peak_stats.memory_usage = total_pss;
-                        peak_stats.memory_time = timestamp;
+        // Memory 采样：对每个活跃 PID 各采一次（无内部 sleep）
+        if args.memory && !active_pids.is_empty() {
+            for pid in &active_pids {
+                match memory::sample_memory(pid).await {
+                    Ok((total_pss, timestamp, memory_details)) => {
+                        let s = pid_stats.get_mut(pid).expect("active pid must be in pid_stats");
+                        s.memory_data.add_data_point(timestamp, memory_details);
+                        memory_sample_count += 1;
+                        if s.memory_time.is_none() || total_pss > s.memory_usage {
+                            s.memory_usage = total_pss;
+                            s.memory_time = Some(timestamp);
+                        }
                     }
-
-                    // 定期生成内存图表
-                    if peak_stats.memory_data.timestamps.len() >= 5 {
-                        if let Ok(timestamp_dir) = utils::create_timestamp_subdir(&args.package) {
-                            // 创建memory子目录
-                            let memory_dir = timestamp_dir.join("memory");
-                            if !memory_dir.exists() {
-                                if let Err(e) = std::fs::create_dir_all(&memory_dir) {
-                                    println!("Failed to create memory directory: {}", e);
-                                    continue;
-                                }
-                                println!("Created memory directory: {}", memory_dir.display());
+                    Err(e) => {
+                        if e.to_string().contains("Process not found") {
+                            if let Some(s) = pid_stats.get_mut(pid) {
+                                s.active = false;
+                                restart_count += 1;
                             }
-
-                            // 生成内存图表
-                            let memory_charts = generate_memory_charts(
-                                &memory_dir,
-                                &args.package,
-                                &peak_stats.memory_data,
-                            );
-                            if let Ok(chart_paths) = memory_charts {
-                                for path in chart_paths {
-                                    if path.to_string_lossy().ends_with(".png") {
-                                        println!(
-                                            "✓ Scheduled Memory chart generated: {}",
-                                            path.display()
-                                        );
-                                    } else if path.to_string_lossy().ends_with(".csv") {
-                                        println!(
-                                            "✓ Memory data exported to CSV: {}",
-                                            path.display()
-                                        );
-                                    }
-                                }
-                            } else {
-                                println!("Failed to generate scheduled memory charts");
-                            }
+                            println!("\n[{}] PID {} disappeared.", Local::now().format("%H:%M:%S"), pid.yellow());
+                        } else {
+                            println!("Error sampling memory for pid {}: {}", pid, e);
                         }
                     }
                 }
-                Err(e) => {
-                    println!("Error sampling memory: {}", e);
+            }
+
+            // 定期生成内存图表：达到 5 个采样后，每 MEMORY_CHART_INTERVAL 个新采样生成一次
+            if memory_sample_count >= 5
+                && memory_sample_count - last_memory_chart_sample_count
+                    >= MEMORY_CHART_INTERVAL
+            {
+                last_memory_chart_sample_count = memory_sample_count;
+                if let Ok(timestamp_dir) = utils::create_timestamp_subdir(&args.package) {
+                    let memory_dir = timestamp_dir.join("memory");
+                    if !memory_dir.exists() {
+                        if let Err(e) = std::fs::create_dir_all(&memory_dir) {
+                            println!("Failed to create memory directory: {}", e);
+                            continue;
+                        }
+                        println!("Created memory directory: {}", memory_dir.display());
+                    }
+
+                    // 为每个有数据的活跃 PID 生成内存图表
+                    for (pid, s) in &pid_stats {
+                        if s.memory_data.timestamps.len() < 2 {
+                            continue;
+                        }
+                        let memory_charts =
+                            generate_memory_charts(&memory_dir, &args.package, pid, &s.memory_data);
+                        match memory_charts {
+                            Ok(paths) => {
+                                for path in paths {
+                                    if path.to_string_lossy().ends_with(".png") {
+                                        println!("✓ Scheduled Memory chart generated: {}", path.display());
+                                    } else if path.to_string_lossy().ends_with(".csv") {
+                                        println!("✓ Memory data exported to CSV: {}", path.display());
+                                    }
+                                }
+                            }
+                            Err(e) => println!("Failed to generate memory chart for pid {}: {}", pid, e),
+                        }
+                    }
                 }
             }
         }
@@ -346,64 +401,49 @@ async fn monitor_process(args: &Args) -> Result<(), Box<dyn std::error::Error>> 
         let current_hour = now.hour() as i32;
 
         // 如果进入了新的整小时且有足够的CPU数据，生成图表
-        if current_hour != last_chart_hour && !peak_stats.cpu_data.timestamps.is_empty() && args.cpu
-        {
+        if current_hour != last_chart_hour && args.cpu {
             last_chart_hour = current_hour;
-
-            // 只有在收集了数据后才生成图表
-            if peak_stats.cpu_data.timestamps.len() > 1 {
-                // 计算整小时标记（格式如 14:00）
-                let hour_mark = format!("{}:00", now.hour());
-
-                println!(
-                    "{} Generating scheduled CPU chart at {}...",
-                    now.format("%H:%M:%S").to_string().blue(),
-                    hour_mark.green()
-                );
-
-                // 使用预定义chart_hourly_intervals的时间执行图表生成
-                let chart_path = match utils::generate_cpu_chart(
-                    &args.package,
-                    &peak_stats.cpu_data.timestamps,
-                    &peak_stats.cpu_data.process_cpu,
-                    &last_process_info.pid,
+            let hour_mark = format!("{}:00", now.hour());
+            println!(
+                "{} Generating scheduled CPU chart at {}...",
+                now.format("%H:%M:%S").to_string().blue(),
+                hour_mark.green()
+            );
+            for (pid, s) in &pid_stats {
+                if s.cpu_data.timestamps.len() <= 1 {
+                    continue;
+                }
+                match utils::generate_cpu_chart(
+                    &s.cpu_data.timestamps,
+                    &s.cpu_data.process_cpu,
+                    pid,
                 ) {
-                    Ok(path) => path,
-                    Err(e) => {
-                        eprintln!("Error generating CPU chart: {}", e);
-                        continue;
+                    Ok(chart_path) => {
+                        println!("Scheduled CPU chart generated (pid {}): {}", pid.yellow(), chart_path.display());
+                        let csv_path = chart_path.with_extension("csv");
+                        if csv_path.exists() {
+                            println!("Scheduled CPU data exported to CSV: {}", csv_path.display());
+                        }
                     }
-                };
-
-                if args.cpu {
-                    // 为最新时间点的top线程创建CSV
-                    if peak_stats.cpu_data.timestamps.back().is_some()
-                        && peak_stats.cpu_data.top_threads.back().is_some()
-                    {
-                        println!("Thread data collection available");
-                    }
-
-                    // 仅打印图表生成信息，不写入日志
-                    println!("Scheduled CPU chart generated: {}", chart_path.display());
-
-                    // 添加CSV数据文件的信息
-                    let csv_path = chart_path.with_extension("csv");
-                    if csv_path.exists() {
-                        println!("Scheduled CPU data exported to CSV: {}", csv_path.display());
-                    }
+                    Err(e) => eprintln!("Error generating CPU chart for pid {}: {}", pid, e),
                 }
             }
+        }
+
+        // 节拍：CPU 采样已在上面 sleep(interval)；
+        // --memory 单跑（无 --cpu）时需自行维持采样间隔，否则空转狂采样。
+        if !args.cpu {
+            tokio::time::sleep(tokio::time::Duration::from_millis(args.interval)).await;
         }
     }
 
     // Wait for ADB monitor to finish
     let _ = adb_monitor.await;
 
-    // 在结束前生成最终的线程时间序列图表
+    // 在结束前生成最终的线程时间序列图表（按 PID 分别生成）
     if args.thread && args.cpu && !thread_time_series.is_empty() {
         println!("Program ending, generating final thread time series chart...");
         if let Ok(timestamp_dir) = utils::create_timestamp_subdir(&args.package) {
-            // 创建thread子目录
             let thread_dir = timestamp_dir.join("thread");
             if !thread_dir.exists() {
                 if let Err(e) = std::fs::create_dir_all(&thread_dir) {
@@ -413,44 +453,24 @@ async fn monitor_process(args: &Args) -> Result<(), Box<dyn std::error::Error>> 
                 println!("Created thread directory: {}", thread_dir.display());
             }
 
-            // 导出最终的线程数据
-            match utils::export_thread_data_to_csv(
-                thread_dir.clone(),
-                &last_process_info.pid,
-                &thread_time_series
-                    .values()
-                    .flat_map(|v| v.iter().cloned())
-                    .collect::<Vec<_>>(),
-                false,
-            ) {
-                Ok(filenames) => {
-                    println!(
-                        "✓ Final thread data exported to {} CSV files",
-                        filenames.len()
-                    );
+            for (pid, per_pid_series) in &thread_time_series {
+                if per_pid_series.is_empty() {
+                    continue;
                 }
-                Err(e) => {
-                    println!("Failed to export final thread data to CSV: {}", e);
-                }
-            }
-
-            // 生成最终的线程时间序列图表
-            match utils::generate_thread_time_series_chart(
-                thread_dir,
-                &args.package,
-                &last_process_info.pid,
-                &thread_time_series,
-            ) {
-                Ok(chart_filename) => {
-                    if !chart_filename.is_empty() {
-                        println!(
-                            "✓ Final thread time series chart generated: {}",
-                            chart_filename
-                        );
+                let threads: Vec<ThreadCpuInfo> =
+                    per_pid_series.values().flat_map(|v| v.iter().cloned()).collect();
+                match utils::export_thread_data_to_csv(thread_dir.clone(), pid, &threads, false) {
+                    Ok(filenames) => {
+                        println!("✓ Final thread data (pid {}) exported to {} CSV files", pid, filenames.len());
                     }
+                    Err(e) => println!("Failed to export final thread data for pid {}: {}", pid, e),
                 }
-                Err(e) => {
-                    println!("Failed to generate final thread time series chart: {}", e);
+                match utils::generate_thread_time_series_chart(thread_dir.clone(), &args.package, pid, per_pid_series) {
+                    Ok(chart_filename) if !chart_filename.is_empty() => {
+                        println!("✓ Final thread time series chart (pid {}) generated: {}", pid, chart_filename);
+                    }
+                    Ok(_) => {}
+                    Err(e) => println!("Failed to generate thread chart for pid {}: {}", pid, e),
                 }
             }
         }
@@ -464,68 +484,86 @@ async fn monitor_process(args: &Args) -> Result<(), Box<dyn std::error::Error>> 
         return Ok(());
     };
 
-    // 程序结束时生成CPU图表
-    if args.cpu && peak_stats.cpu_data.timestamps.len() > 1 {
-        // 创建CPU子目录
-        let cpu_dir = timestamp_dir.join("cpu");
-        if !cpu_dir.exists() {
-            if let Err(e) = std::fs::create_dir_all(&cpu_dir) {
-                println!("Failed to create CPU directory: {}", e);
-                return Ok(());
+    // 程序结束时生成CPU图表（每 PID 一张 + 汇总）
+    let cpu_dir = timestamp_dir.join("cpu");
+    let mut cpu_series_for_summary: Vec<utils::CpuSeriesRef<'_>> = Vec::new();
+    if args.cpu {
+        let mut has_cpu_data = false;
+        for s in pid_stats.values() {
+            if s.cpu_data.timestamps.len() > 1 {
+                has_cpu_data = true;
+                break;
             }
-            println!("Created CPU directory: {}", cpu_dir.display());
         }
-
-        println!(
-            "Peak CPU Usage: {} at {}",
-            format!("{:.1}%", peak_stats.cpu_usage).red(),
-            peak_stats.cpu_time.format("%Y-%m-%d %H:%M:%S")
-        );
-
-        // 生成CPU图表
-        let chart_path = match utils::generate_cpu_chart(
-            &args.package,
-            &peak_stats.cpu_data.timestamps,
-            &peak_stats.cpu_data.process_cpu,
-            &last_process_info.pid,
-        ) {
-            Ok(path) => path,
-            Err(e) => {
-                println!("Failed to generate CPU chart: {}", e);
-                return Ok(());
+        if has_cpu_data {
+            if !cpu_dir.exists() {
+                if let Err(e) = std::fs::create_dir_all(&cpu_dir) {
+                    println!("Failed to create CPU directory: {}", e);
+                    return Ok(());
+                }
+                println!("Created CPU directory: {}", cpu_dir.display());
             }
-        };
 
-        // 复制CPU图表到输出目录
-        let target_path = cpu_dir.join(chart_path.file_name().unwrap());
-        if let Err(e) = std::fs::copy(&chart_path, &target_path) {
-            println!("Failed to copy CPU chart to output directory: {}", e);
-        } else {
-            println!("✓ CPU chart generated: {}", target_path.display());
-        }
+            for (pid, s) in &pid_stats {
+                if s.cpu_data.timestamps.len() <= 1 {
+                    continue;
+                }
+                println!(
+                    "Peak CPU Usage (pid {}): {} at {}",
+                    pid.yellow(),
+                    format!("{:.1}%", s.cpu_usage).red(),
+                    s.cpu_time
+                        .map(|t| t.format("%Y-%m-%d %H:%M:%S").to_string())
+                        .unwrap_or_else(|| "N/A".to_string())
+                );
+                let chart_path = match utils::generate_cpu_chart(
+                    &s.cpu_data.timestamps,
+                    &s.cpu_data.process_cpu,
+                    pid,
+                ) {
+                    Ok(path) => path,
+                    Err(e) => {
+                        println!("Failed to generate CPU chart for pid {}: {}", pid, e);
+                        continue;
+                    }
+                };
+                if let Some(filename) = chart_path.file_name() {
+                    let target_path = cpu_dir.join(filename);
+                    if let Err(e) = std::fs::copy(&chart_path, &target_path) {
+                        println!("Failed to copy CPU chart for pid {}: {}", pid, e);
+                    } else {
+                        println!("✓ CPU chart generated (pid {}): {}", pid, target_path.display());
+                    }
+                }
+                let csv_path = cpu_dir.join(format!("cpu_{}_data.csv", pid));
+                match utils::export_cpu_data_to_csv(&csv_path, &s.cpu_data.timestamps, &s.cpu_data.process_cpu) {
+                    Ok(_) => println!("✓ CPU data exported to CSV (pid {}): {}", pid, csv_path.display()),
+                    Err(e) => println!("Failed to export CPU data for pid {}: {}", pid, e),
+                }
+                cpu_series_for_summary.push((pid.clone(), &s.cpu_data.timestamps, &s.cpu_data.process_cpu));
+            }
 
-        // 导出CPU数据到CSV
-        let csv_path = cpu_dir.join(format!("{}_cpu_data.csv", args.package));
-        if let Ok(_) = utils::export_cpu_data_to_csv(
-            &csv_path,
-            &peak_stats.cpu_data.timestamps,
-            &peak_stats.cpu_data.process_cpu,
-        ) {
-            println!("✓ CPU data exported to CSV: {}", csv_path.display());
+            // 汇总 CPU 图表（多 PID 同图）
+            if cpu_series_for_summary.len() >= 2 {
+                match utils::generate_cpu_summary_chart(&cpu_dir, &args.package, &cpu_series_for_summary) {
+                    Ok(p) => println!("✓ CPU summary chart generated: {}", p.display()),
+                    Err(e) => println!("Failed to generate CPU summary chart: {}", e),
+                }
+            }
         }
     }
 
+    // 程序结束时生成内存图表（每 PID 一张 + 汇总）
     if args.memory {
-        println!(
-            "Peak Memory Usage: {} at {}",
-            format!("{} KB", peak_stats.memory_usage).red(),
-            peak_stats.memory_time.format("%Y-%m-%d %H:%M:%S")
-        );
-
-        // 如果收集了足够的内存数据点，生成内存图表
-        if peak_stats.memory_data.timestamps.len() > 1 {
-            // 在时间戳目录下创建memory子目录
-            let memory_dir = timestamp_dir.join("memory");
+        let memory_dir = timestamp_dir.join("memory");
+        let mut has_mem_data = false;
+        for s in pid_stats.values() {
+            if s.memory_data.timestamps.len() > 1 {
+                has_mem_data = true;
+                break;
+            }
+        }
+        if has_mem_data {
             if !memory_dir.exists() {
                 if let Err(e) = std::fs::create_dir_all(&memory_dir) {
                     println!("Failed to create memory directory: {}", e);
@@ -533,42 +571,58 @@ async fn monitor_process(args: &Args) -> Result<(), Box<dyn std::error::Error>> 
                 }
                 println!("Created memory directory: {}", memory_dir.display());
             }
-
-            // 生成内存图表
-            let memory_charts =
-                generate_memory_charts(&memory_dir, &args.package, &peak_stats.memory_data);
-            if let Ok(chart_paths) = memory_charts {
-                for path in chart_paths {
-                    if path.to_string_lossy().ends_with(".png") {
-                        println!("✓ Memory chart generated: {}", path.display());
-                    } else if path.to_string_lossy().ends_with(".csv") {
-                        println!("✓ Memory data exported to CSV: {}", path.display());
-                    }
+            let mut mem_series_for_summary: Vec<(String, &MemoryTimeSeriesData)> = Vec::new();
+            for (pid, s) in &pid_stats {
+                if s.memory_data.timestamps.len() <= 1 {
+                    continue;
                 }
-            } else {
-                println!("Failed to generate memory charts");
+                println!(
+                    "Peak Memory Usage (pid {}): {} at {}",
+                    pid.yellow(),
+                    format!("{} KB", s.memory_usage).red(),
+                    s.memory_time
+                        .map(|t| t.format("%Y-%m-%d %H:%M:%S").to_string())
+                        .unwrap_or_else(|| "N/A".to_string())
+                );
+                match generate_memory_charts(&memory_dir, &args.package, pid, &s.memory_data) {
+                    Ok(paths) => {
+                        for path in paths {
+                            if path.to_string_lossy().ends_with(".png") {
+                                println!("✓ Memory chart generated (pid {}): {}", pid, path.display());
+                            } else if path.to_string_lossy().ends_with(".csv") {
+                                println!("✓ Memory data exported to CSV (pid {}): {}", pid, path.display());
+                            }
+                        }
+                    }
+                    Err(e) => println!("Failed to generate memory charts for pid {}: {}", pid, e),
+                }
+                mem_series_for_summary.push((pid.clone(), &s.memory_data));
+            }
+            if mem_series_for_summary.len() >= 2 {
+                match generate_memory_summary_chart(&memory_dir, &args.package, &mem_series_for_summary) {
+                    Ok(p) => println!("✓ Memory summary chart generated: {}", p.display()),
+                    Err(e) => println!("Failed to generate memory summary chart: {}", e),
+                }
             }
         }
     }
-    println!(
-        "Process Restarts: {}",
-        peak_stats.restart_count.to_string().red()
-    );
+    println!("Process Restarts: {}", restart_count.to_string().red());
 
     Ok(())
 }
 
 // 生成内存图表的函数
 fn generate_memory_charts(
-    output_dir: &PathBuf,
+    output_dir: &Path,
     package: &str,
+    pid: &str,
     memory_data: &MemoryTimeSeriesData,
 ) -> Result<Vec<PathBuf>> {
     use plotters::prelude::*;
 
-    // 创建一个单一的内存图表文件
+    // 创建一个单一的内存图表文件。文件名带 pid 以区分多进程。
     let mut chart_paths = Vec::new();
-    let file_name = format!("{}_memory_chart.png", package);
+    let file_name = format!("memory_{}_chart.png", pid);
     let path = output_dir.join(file_name);
 
     // 检查数据是否足够
@@ -603,7 +657,7 @@ fn generate_memory_charts(
     }
 
     // 添加一些填充到最大内存使用量
-    max_memory = max_memory * 1.1;
+    max_memory *= 1.1;
 
     // 获取时间范围
     let min_time = *memory_data.timestamps.front().unwrap();
@@ -677,7 +731,7 @@ fn generate_memory_charts(
 
         // 绘制数据线
         chart
-            .draw_series(LineSeries::new(values, color.clone()))?
+            .draw_series(LineSeries::new(values, *color))?
             .label(memory_type.to_string())
             .legend(move |(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], color));
     }
@@ -701,7 +755,7 @@ fn generate_memory_charts(
     // println!("✓ Memory chart generated: {}", path.display());
 
     // 导出内存数据到CSV
-    let csv_path = output_dir.join(format!("{}_memory_data.csv", package));
+    let csv_path = output_dir.join(format!("memory_{}_data.csv", pid));
     if let Ok(file) = std::fs::File::create(&csv_path) {
         let mut writer = std::io::BufWriter::new(file);
 
@@ -740,69 +794,84 @@ fn generate_memory_charts(
     Ok(chart_paths)
 }
 
-// 保留原始的单个内存指标图表函数，但它不会被直接调用
-#[allow(dead_code)]
-fn generate_single_memory_chart(
-    output_dir: &PathBuf,
+/// 生成多 PID 内存汇总对比图：每个 PID 的 Total PSS 一条折线。
+fn generate_memory_summary_chart(
+    output_dir: &Path,
     package: &str,
-    metric_name: &str,
-    timestamps: &VecDeque<DateTime<Local>>,
-    values: &Vec<f32>,
+    series: &[(String, &MemoryTimeSeriesData)],
 ) -> Result<PathBuf> {
     use plotters::prelude::*;
 
-    // 创建文件名，用下划线替换空格
-    let file_name = format!("{}_{}.png", package, metric_name.replace(" ", "_"));
-    let path = output_dir.join(file_name);
-    let path_copy = path.clone();
-
-    // 创建图表
+    let path = output_dir.join("memory_summary.png");
+    let path_clone = path.clone();
     let root = BitMapBackend::new(&path, (1920, 1080)).into_drawing_area();
     root.fill(&WHITE)?;
 
-    // 找到最大值
-    let max_value = values.iter().fold(0.0f32, |a, &b| a.max(b)) * 1.1;
+    let (title_area, rest_area) = root.split_vertically(50);
+    title_area.titled(
+        &format!("Memory Summary - {} ({} PIDs)", package, series.len()),
+        ("sans-serif", 20),
+    )?;
 
-    // 获取开始和结束时间
-    let first_timestamp = timestamps.front().unwrap();
-    let last_timestamp = timestamps.back().unwrap();
+    // 跨所有 PID 计算 X/Y 范围（仅用 Total PSS）
+    let mut min_time = None;
+    let mut max_time = None;
+    let mut max_mem = 1.0f32;
+    for (_, md) in series {
+        if let (Some(&t0), Some(&tn)) = (md.timestamps.front(), md.timestamps.back()) {
+            min_time = Some(min_time.map_or(t0, |m: DateTime<Local>| m.min(t0)));
+            max_time = Some(max_time.map_or(tn, |m: DateTime<Local>| m.max(tn)));
+        }
+        for d in &md.memory_details {
+            if d.total_pss as f32 > max_mem {
+                max_mem = d.total_pss as f32;
+            }
+        }
+    }
+    let min_time = min_time.ok_or_else(|| anyhow::format_err!("No memory data for summary"))?;
+    let max_time = max_time.unwrap_or(min_time);
+    max_mem *= 1.1;
 
-    // 定义图表区域
-    let mut chart = ChartBuilder::on(&root)
-        .caption(
-            format!("{} - {}", package, metric_name),
-            ("sans-serif", 22).into_font(),
-        )
-        .margin(10)
+    let mut chart = ChartBuilder::on(&rest_area)
+        .margin(15)
         .x_label_area_size(40)
         .y_label_area_size(60)
-        .build_cartesian_2d(
-            first_timestamp.to_owned()..last_timestamp.to_owned(),
-            0.0..max_value,
-        )?;
+        .build_cartesian_2d(min_time..max_time, 0f32..max_mem)?;
 
-    // 配置网格和标签
-    chart
-        .configure_mesh()
-        .x_labels(10)
+    chart.configure_mesh()
+        .y_desc("Total PSS (KB)")
+        .x_desc("Time")
+        .x_labels(8)
         .x_label_formatter(&|x| x.format("%H:%M:%S").to_string())
-        .y_desc(format!("{} (KB)", metric_name))
         .draw()?;
 
-    // 绘制折线
-    chart.draw_series(LineSeries::new(
-        timestamps
-            .iter()
-            .zip(values.iter())
-            .map(|(t, &v)| (t.to_owned(), v)),
-        &RED,
-    ))?;
+    let colors = [
+        RGBColor(31, 119, 180), RGBColor(255, 127, 14), RGBColor(44, 160, 44),
+        RGBColor(214, 39, 40), RGBColor(148, 103, 189), RGBColor(140, 86, 75),
+        RGBColor(227, 119, 194), RGBColor(127, 127, 127), RGBColor(188, 189, 34),
+        RGBColor(23, 190, 207),
+    ];
 
-    // 保存图表
+    for (i, (pid, md)) in series.iter().enumerate() {
+        let color = colors[i % colors.len()];
+        let pts: Vec<(DateTime<Local>, f32)> = md.timestamps.iter()
+            .zip(md.memory_details.iter())
+            .map(|(t, d)| (*t, d.total_pss as f32))
+            .collect();
+        chart.draw_series(LineSeries::new(pts, color.stroke_width(2)))?
+            .label(format!("PID {}", pid))
+            .legend(move |(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], color.stroke_width(2)));
+    }
+    chart.configure_series_labels()
+        .background_style(WHITE.mix(0.8))
+        .border_style(BLACK)
+        .position(SeriesLabelPosition::UpperRight)
+        .draw()?;
+
     root.present()?;
-
-    Ok(path_copy)
+    Ok(path_clone)
 }
+
 
 #[tokio::main]
 async fn main() -> Result<()> {
