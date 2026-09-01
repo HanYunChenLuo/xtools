@@ -89,6 +89,7 @@ class LineChart {
     }
     this.drawAxes(L, T, W - R, H - B);
     // 折线
+    let legendX = W - R;
     pids.forEach((pid, i) => {
       const pts = this.series[pid];
       if (pts.length < 1) return;
@@ -101,9 +102,14 @@ class LineChart {
         j === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
       });
       ctx.stroke();
-      // 图例（key 即展示名：CPU/内存用 "PID xxx"，FPS 用图层名）
+      // 图例（key 即展示名：CPU/内存用 "PID xxx"，FPS 用图层短名）；
+      // 从右往左按文字实际宽度排布，长图层名不截断不重叠
       ctx.fillStyle = COLORS[i % COLORS.length];
-      ctx.fillText(pid, W - R - 70 - i * 70, 20);
+      legendX -= ctx.measureText(pid).width;
+      ctx.fillText(pid, legendX, 20);
+      legendX -= 14;
+      ctx.fillRect(legendX, 11, 10, 10);
+      legendX -= 10;
     });
   }
   drawAxes(l, t, r, b) {
@@ -180,8 +186,10 @@ listen('sample', (e) => {
     // 自动启动带 --fps 时前端勾选框未同步，收到首个 FPS 事件自动展开图表
     const fpsBox = document.getElementById('fps');
     if (!fpsBox.checked) { fpsBox.checked = true; toggleCharts(); }
-    // 多渲染面并存时逐图层一条折线（如游戏主 Surface + 相机预览），key 用图层名
-    fpsChart.push(layer, new Date(timestamp).getTime(), +fps.toFixed(1));
+    // 多渲染面并存时逐图层一条折线（如游戏主 Surface + 相机预览），
+    // key 用图层短名（截到最后一段，长名图例放不下）
+    const shortLayer = layer.split('/').pop();
+    fpsChart.push(shortLayer, new Date(timestamp).getTime(), +fps.toFixed(1));
     try { fpsChart.draw(); } catch (err) { _diag('fpsChart.draw ERROR: ' + err.message); }
   } else if (ev.NoProcess) {
     document.getElementById('status').textContent = '无进程: ' + ev.NoProcess.error;
