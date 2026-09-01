@@ -10,7 +10,9 @@
   <div id="sidebar">
     <h2>XPerformance</h2>
     <label>Package:
-      <input id="package" type="text" value="com.lixiang.car.browser" />
+      <input id="package" list="pkgList" placeholder="输入或选择包名" autocomplete="off" />
+      <datalist id="pkgList"></datalist>
+      <button id="refreshPkgs" class="small">刷新包列表</button>
     </label>
     <label>Interval (ms):
       <input id="interval" type="number" value="1000" min="200" />
@@ -26,8 +28,8 @@
     <ul id="pidList"></ul>
   </div>
   <div id="main">
-    <div class="chart"><canvas id="cpuChart"></canvas></div>
-    <div class="chart"><canvas id="memChart"></canvas></div>
+    <div id="cpuChartBox" class="chart"><canvas id="cpuChart"></canvas></div>
+    <div id="memChartBox" class="chart"><canvas id="memChart"></canvas></div>
   </div>
   <script src="main.js"></script>
 </body>
