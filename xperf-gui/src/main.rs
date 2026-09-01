@@ -1,8 +1,139 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use std::sync::{Arc, Mutex};
+use chrono::{DateTime, Local};
 use tauri::{Emitter, Manager, State};
-use xperf_core::{SampleEvent, Sampler};
+use xperf_core::agent::{self, AgentEvent};
+use xperf_core::{MemoryDetails, SampleEvent, ThreadCpuInfo};
+
+/// AgentEvent → 前端 SampleEvent（保持与前端既有协议一致，前端零改动）。
+/// 首次见到某 PID 时先补一条 PidDiscovered。
+fn map_event(
+    ev: AgentEvent,
+    known_pids: &mut std::collections::HashSet<u32>,
+) -> Vec<SampleEvent> {
+    let ts_of = |ts_ms: u64| {
+        DateTime::from_timestamp_millis(ts_ms as i64)
+            .map(|t| t.with_timezone(&Local))
+            .unwrap_or_else(Local::now)
+    };
+    let mut out = Vec::new();
+    let pid = match &ev {
+        AgentEvent::Cpu { pid, .. } | AgentEvent::Mem { pid, .. } | AgentEvent::Fps { pid, .. } => Some(*pid),
+        _ => None,
+    };
+    if let Some(p) = pid {
+        if known_pids.insert(p) {
+            out.push(SampleEvent::PidDiscovered {
+                pid: p.to_string(),
+                start_time: String::new(), // agent 协议不带启动时间，前端不展示该字段
+            });
+        }
+    }
+    match ev {
+        AgentEvent::Hello { ncores } => {
+            eprintln!("[sampling] agent 已启动（{} 核）", ncores);
+        }
+        AgentEvent::Cpu { ts, pid, cpu, th } => {
+            let t = ts_of(ts);
+            out.push(SampleEvent::CpuUpdate {
+                pid: pid.to_string(),
+                timestamp: t,
+                process_cpu: cpu,
+                threads: th
+                    .into_iter()
+                    .map(|(tid, name, usage)| ThreadCpuInfo {
+                        tid: tid.to_string(),
+                        cpu_usage: usage,
+                        name,
+                        timestamp: Some(t),
+                    })
+                    .collect(),
+            });
+        }
+        AgentEvent::Mem { ts, pid, pss, java, native, code, stack, gfx, other, sys, .. } => {
+            out.push(SampleEvent::MemoryUpdate {
+                pid: pid.to_string(),
+                timestamp: ts_of(ts),
+                total_pss: pss,
+                details: MemoryDetails {
+                    java_heap: java,
+                    native_heap: native,
+                    code,
+                    stack,
+                    graphics: gfx,
+                    private_other: other,
+                    system: sys,
+                    total_pss: pss,
+                },
+            });
+        }
+        AgentEvent::Fps { ts, pid, layer, fps, frames, jank } => {
+            out.push(SampleEvent::FpsUpdate {
+                pid: pid.to_string(),
+                timestamp: ts_of(ts),
+                layer,
+                fps,
+                frame_count: frames,
+                jank_count: jank,
+            });
+        }
+        AgentEvent::Exit { pid } => {
+            known_pids.remove(&pid);
+            out.push(SampleEvent::PidDisappeared { pid: pid.to_string() });
+        }
+        AgentEvent::Noproc => {
+            out.push(SampleEvent::NoProcess { error: "包名下无进程".to_string() });
+        }
+        AgentEvent::Err { msg } => eprintln!("[sampling] agent: {}", msg),
+    }
+    out
+}
+
+/// 后台采样循环（start_sampling 命令与自动启动共用）。
+/// 采样在设备端 agent 进行，本线程只阻塞读事件流并转发给前端。
+fn spawn_sampling(app: tauri::AppHandle, package: String, interval: u64, cpu: bool, memory: bool, fps: bool, running: Arc<Mutex<bool>>) {
+    eprintln!("[sampling] 启动: package={} interval={} cpu={} memory={} fps={}", package, interval, cpu, memory, fps);
+    std::thread::spawn(move || {
+        let bin = match agent::ensure_agent_built() {
+            Ok(b) => b,
+            Err(e) => {
+                eprintln!("[sampling] agent 构建失败: {}", e);
+                let mut running = running.lock().unwrap();
+                *running = false;
+                return;
+            }
+        };
+        if let Err(e) = agent::deploy_agent(&bin) {
+            eprintln!("[sampling] agent 部署失败: {}", e);
+            let mut running = running.lock().unwrap();
+            *running = false;
+            return;
+        }
+        let mut stream = match agent::spawn_agent(Some(&package), interval, cpu, memory, fps) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("[sampling] agent 启动失败: {}", e);
+                let mut running = running.lock().unwrap();
+                *running = false;
+                return;
+            }
+        };
+        let mut known_pids = std::collections::HashSet::new();
+        while *running.lock().unwrap() {
+            match stream.next_event() {
+                Ok(Some(Ok(ev))) => {
+                    for sev in map_event(ev, &mut known_pids) {
+                        eprintln!("[sampling] {}", brief_event(&sev));
+                        let _ = app.emit("sample", sev);
+                    }
+                }
+                Ok(Some(Err(e))) => eprintln!("[sampling] 协议解析失败: {}", e),
+                Ok(None) | Err(_) => break, // EOF：agent 退出/断连
+            }
+        }
+    });
+}
 
 /// 事件的单行摘要（替代 {:?} 全量 Debug——CpuUpdate 含全部线程列表，每轮数千字符）
 fn brief_event(ev: &SampleEvent) -> String {
@@ -29,30 +160,6 @@ fn brief_event(ev: &SampleEvent) -> String {
 
 struct AppState {
     running: Arc<Mutex<bool>>,
-}
-
-/// 后台采样循环（start_sampling 命令与自动启动共用）。
-/// 用 tauri::async_runtime::spawn：setup 回调不在 tokio runtime 上下文中，
-/// 直接 tokio::spawn 会 panic（no reactor running）。
-fn spawn_sampling(app: tauri::AppHandle, package: String, interval: u64, cpu: bool, memory: bool, fps: bool, running: Arc<Mutex<bool>>) {
-    eprintln!("[sampling] 启动: package={} interval={} cpu={} memory={} fps={}", package, interval, cpu, memory, fps);
-    tauri::async_runtime::spawn(async move {
-        let mut sampler = Sampler::new(&package, interval, cpu, memory, false, fps);
-        loop {
-            if !*running.lock().unwrap() {
-                eprintln!("[sampling] 停止：running=false");
-                break;
-            }
-            eprintln!("[sampling] 开始一轮 sample_once...");
-            let events = sampler.sample_once().await;
-            eprintln!("[sampling] 本轮产生 {} 个事件", events.len());
-            for ev in &events {
-                eprintln!("[sampling] {}", brief_event(ev));
-                let _ = app.emit("sample", ev);
-            }
-            sampler.tick_if_needed().await;
-        }
-    });
 }
 
 #[tauri::command]

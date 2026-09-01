@@ -1,12 +1,8 @@
-//! 设备端采样器（xperf-agent）的主机侧传输层。
+//! 设备端采样器（xperf-agent）的主机侧传输层——统一的采样引擎。
 //!
-//! 背景：低间隔（<500ms）采样时 adb 轮询的开销就超过间隔本身（单轮 CPU 采样
-//! 固定 6 次 adb 调用，每次 ~13ms 起）。agent 模式把采样循环搬到设备上
-//! （直接读 /proc），主机通过 `adb exec-out` 长连接读取 NDJSON 事件流。
+//! 采样循环在设备上常驻（直接读 /proc / 本地 dumpsys），主机通过
+//! `adb exec-out` 长连接读取 NDJSON 事件流，无每轮 adb 往返开销。
 //! 协议见 xperf-agent/main.rs 头注释。
-//!
-//! 当前覆盖：CPU（含线程）、内存（smaps_rollup 的 Pss/Rss）。
-//! FPS 不在此列——SurfaceFlinger 的 127 帧缓冲在 1s 轮询下已是帧级分辨率。
 
 use anyhow::Result;
 use serde::Deserialize;
@@ -16,17 +12,28 @@ use std::process::{Child, Command, Stdio};
 
 const DEVICE_AGENT_PATH: &str = "/data/local/tmp/xperf-agent";
 
-/// 采样间隔低于该值时 adb 轮询模式不可用，建议走 agent 模式
-pub const AGENT_INTERVAL_THRESHOLD_MS: u64 = 500;
-
 #[derive(Debug, Deserialize)]
 #[serde(tag = "t", rename_all = "lowercase")]
 pub enum AgentEvent {
     Hello { ncores: u32 },
     /// ts: 墙钟毫秒；cpu: 单核口径 %；th: [tid, 线程名, cpu%]（仅 >0.05% 的线程）
     Cpu { ts: u64, pid: u32, cpu: f32, th: Vec<(u32, String, f32)> },
-    /// pss/rss 单位 KB
-    Mem { ts: u64, pid: u32, pss: u64, rss: u64 },
+    /// pss/rss 及分类明细，单位 KB；分类字段仅 interval≥500ms（dumpsys meminfo 路径）有值
+    Mem {
+        ts: u64,
+        pid: u32,
+        pss: u64,
+        rss: u64,
+        #[serde(default)] java: u64,
+        #[serde(default)] native: u64,
+        #[serde(default)] code: u64,
+        #[serde(default)] stack: u64,
+        #[serde(default)] gfx: u64,
+        #[serde(default)] other: u64,
+        #[serde(default)] sys: u64,
+    },
+    /// 每个活跃图层一条；全静止时一条零帧样本
+    Fps { ts: u64, pid: u32, layer: String, fps: f32, frames: u32, jank: u32 },
     Exit { pid: u32 },
     Noproc,
     Err { msg: String },
@@ -116,6 +123,7 @@ pub fn spawn_agent(
     interval_ms: u64,
     cpu: bool,
     memory: bool,
+    fps: bool,
 ) -> Result<AgentStream> {
     let mut cmd_args = vec!["exec-out".to_string(), DEVICE_AGENT_PATH.to_string()];
     if let Some(pkg) = package {
@@ -127,6 +135,9 @@ pub fn spawn_agent(
     }
     if memory {
         cmd_args.push("--memory".to_string());
+    }
+    if fps {
+        cmd_args.push("--fps".to_string());
     }
     let mut child = Command::new("adb")
         .args(&cmd_args)
@@ -171,12 +182,50 @@ mod tests {
     #[test]
     fn test_parse_mem_exit_noproc_err() {
         let ev: AgentEvent = serde_json::from_str(r#"{"t":"mem","ts":1,"pid":2,"pss":483713,"rss":638728}"#).unwrap();
-        assert!(matches!(ev, AgentEvent::Mem { pss: 483713, rss: 638728, .. }));
+        match ev {
+            // 分类字段缺省应为 0（低间隔 smaps_rollup 路径不带分类）
+            AgentEvent::Mem { pss, rss, java, .. } => {
+                assert_eq!((pss, rss, java), (483713, 638728, 0));
+            }
+            _ => panic!("应为 Mem 事件"),
+        }
         let ev: AgentEvent = serde_json::from_str(r#"{"t":"exit","pid":29697}"#).unwrap();
         assert!(matches!(ev, AgentEvent::Exit { pid: 29697 }));
         let ev: AgentEvent = serde_json::from_str(r#"{"t":"noproc"}"#).unwrap();
         assert!(matches!(ev, AgentEvent::Noproc));
         let ev: AgentEvent = serde_json::from_str(r#"{"t":"err","msg":"round overrun"}"#).unwrap();
         assert!(matches!(ev, AgentEvent::Err { .. }));
+    }
+
+    #[test]
+    fn test_parse_fps() {
+        let ev: AgentEvent = serde_json::from_str(
+            r#"{"t":"fps","ts":1788258836663,"pid":29697,"layer":"SVM Container#0","fps":30.0,"frames":32,"jank":0}"#,
+        )
+        .unwrap();
+        match ev {
+            AgentEvent::Fps { pid, layer, fps, frames, .. } => {
+                assert_eq!(pid, 29697);
+                assert_eq!(layer, "SVM Container#0");
+                assert!((fps - 30.0).abs() < 0.01);
+                assert_eq!(frames, 32);
+            }
+            _ => panic!("应为 Fps 事件"),
+        }
+    }
+
+    #[test]
+    fn test_parse_mem_full_breakdown() {
+        // interval≥500ms 的 dumpsys meminfo 路径：分类字段齐全
+        let ev: AgentEvent = serde_json::from_str(
+            r#"{"t":"mem","ts":1,"pid":2,"pss":484880,"rss":638728,"java":9684,"native":117624,"code":36112,"stack":100,"gfx":0,"other":20000,"sys":30000}"#,
+        )
+        .unwrap();
+        match ev {
+            AgentEvent::Mem { pss, java, native, code, .. } => {
+                assert_eq!((pss, java, native, code), (484880, 9684, 117624, 36112));
+            }
+            _ => panic!("应为 Mem 事件"),
+        }
     }
 }
