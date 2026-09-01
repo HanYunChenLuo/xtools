@@ -1,11 +1,11 @@
 use crate::utils;
 use anyhow::Result;
 use chrono::{DateTime, Local};
-use colored::*;
+use serde::Serialize;
 use std::collections::VecDeque;
 
 // 定义内存详细类别结构
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct MemoryDetails {
     pub java_heap: u64,
     pub native_heap: u64,
@@ -109,17 +109,6 @@ pub async fn sample_memory(pid: &str) -> Result<(u64, DateTime<Local>, MemoryDet
             }
         }
     }
-
-    // Print detailed summary to console
-    println!(
-        "[{}] Memory Usage: {} KB (Java: {}, Native: {}, Code: {}, Graphics: {})",
-        timestamp.format("%H:%M:%S"),
-        memory_details.total_pss.to_string().blue(),
-        memory_details.java_heap.to_string().green(),
-        memory_details.native_heap.to_string().yellow(),
-        memory_details.code.to_string().cyan(),
-        memory_details.graphics.to_string().magenta()
-    );
 
     Ok((total_pss, timestamp, memory_details))
 }

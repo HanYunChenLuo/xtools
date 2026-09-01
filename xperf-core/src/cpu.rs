@@ -1,11 +1,11 @@
 use crate::utils;
 use anyhow::Result;
 use chrono::{DateTime, Local};
-use colored::*;
+use serde::Serialize;
 use std::cmp::Ordering;
 
 // 定义线程CPU使用信息结构体
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ThreadCpuInfo {
     pub tid: String,
     pub cpu_usage: f32,
@@ -250,13 +250,6 @@ pub async fn sample_cpu_phase2(
             .partial_cmp(&a.cpu_usage)
             .unwrap_or(std::cmp::Ordering::Equal)
     });
-
-    println!(
-        "[{}] Process CPU: {}% (pid: {})",
-        timestamp.format("%H:%M:%S"),
-        format!("{:.1}", process_cpu).blue(),
-        pid.yellow()
-    );
 
     Ok((process_cpu, timestamp, threads))
 }
