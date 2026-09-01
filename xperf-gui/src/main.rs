@@ -2,7 +2,27 @@
 
 use std::sync::{Arc, Mutex};
 use tauri::{Emitter, Manager, State};
-use xperf_core::Sampler;
+use xperf_core::{SampleEvent, Sampler};
+
+/// 事件的单行摘要（替代 {:?} 全量 Debug——CpuUpdate 含全部线程列表，每轮数千字符）
+fn brief_event(ev: &SampleEvent) -> String {
+    match ev {
+        SampleEvent::PidDiscovered { pid, start_time } => {
+            format!("PidDiscovered pid={} start={}", pid, start_time)
+        }
+        SampleEvent::PidDisappeared { pid } => format!("PidDisappeared pid={}", pid),
+        SampleEvent::CpuUpdate { pid, process_cpu, threads, .. } => {
+            format!("CpuUpdate pid={} cpu={:.1}% threads={}", pid, process_cpu, threads.len())
+        }
+        SampleEvent::MemoryUpdate { pid, total_pss, .. } => {
+            format!("MemoryUpdate pid={} total_pss={}KB", pid, total_pss)
+        }
+        SampleEvent::NoProcess { error } => format!("NoProcess: {}", error),
+        SampleEvent::SampleError { pid, stage, error } => {
+            format!("SampleError pid={:?} stage={}: {}", pid, stage, error)
+        }
+    }
+}
 
 struct AppState {
     running: Arc<Mutex<bool>>,
@@ -24,7 +44,7 @@ fn spawn_sampling(app: tauri::AppHandle, package: String, interval: u64, cpu: bo
             let events = sampler.sample_once().await;
             eprintln!("[sampling] 本轮产生 {} 个事件", events.len());
             for ev in &events {
-                eprintln!("[sampling] 事件: {:?}", ev);
+                eprintln!("[sampling] {}", brief_event(ev));
                 let _ = app.emit("sample", ev);
             }
             sampler.tick_if_needed().await;
