@@ -16,7 +16,7 @@ class LineChart {
     this.ctx = this.canvas.getContext('2d');
     this.title = title;
     this.unit = unit;
-    this.maxValue = maxValue; // 固定 Y 轴上限（如 CPU=100）；undefined = 自适应
+    this.maxValue = maxValue; // Y 轴下限（如 CPU=100），实际值超出时自动扩展；undefined = 自适应
     this.series = {}; // pid -> [{t, v}]
     this.resize();
     window.addEventListener('resize', () => this.resize());
@@ -62,10 +62,10 @@ class LineChart {
     }
     if (pids.length === 0 || !isFinite(tMin)) { this.drawAxes(L, T, W - R, H - B); return; }
     if (tMax - tMin < 1000) tMax = tMin + 1000;
-    // Y 轴范围：固定上限（CPU=100）或自适应（内存，基于实际最大值）
+    // Y 轴范围：固定下限（CPU=100，超出自动扩展）或自适应（内存，基于实际最大值）
     let yMax;
     if (this.maxValue !== undefined) {
-      yMax = this.maxValue;
+      yMax = Math.max(this.maxValue, vMax * 1.1);
     } else {
       yMax = Math.max(1, vMax) * 1.1;
     }

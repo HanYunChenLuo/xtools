@@ -124,10 +124,11 @@ sample_cpu(package, interval_ms)
 
   【第二次采样】（同上结构）
 
-  【计算】
-  total_delta  = sys_jiffies2 - sys_jiffies1
-  process_cpu% = (proc_jiffies_delta / total_delta) × 100
-  thread_cpu%  = (thread_jiffies_delta / total_delta) × 100（每线程独立计算）
+  【计算】（单核口径，与 adb top 一致：100% = 占满一个核，多线程可超 100%）
+  total_delta  = sys_jiffies2 - sys_jiffies1（所有核之和）
+  num_cores    = /proc/stat 中 cpuN 行数
+  process_cpu% = (proc_jiffies_delta / total_delta) × 100 × num_cores
+  thread_cpu%  = (thread_jiffies_delta / total_delta) × 100 × num_cores（每线程独立计算）
 
   └─ adb shell cat /proc/<pid>/task/*/comm  → 批量读取线程名
 ```

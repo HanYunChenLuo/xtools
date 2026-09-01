@@ -49,6 +49,18 @@ fn parse_total_cpu_jiffies(stat_output: &str) -> Option<u64> {
     Some(total)
 }
 
+/// 从 /proc/stat 统计 CPU 核数（cpu0/cpu1... 行数）。
+/// 总行 "cpu "（后跟空格）不匹配，仅匹配 "cpu" 后跟数字的每核行。
+fn parse_cpu_core_count(stat_output: &str) -> Option<usize> {
+    let count = stat_output
+        .lines()
+        .filter(|l| {
+            l.starts_with("cpu") && l.as_bytes().get(3).is_some_and(|b| b.is_ascii_digit())
+        })
+        .count();
+    (count > 0).then_some(count)
+}
+
 /// 从 /proc/<pid>/stat 解析进程/线程的 CPU jiffies (utime + stime)
 /// stat 文件第14列=utime, 第15列=stime（1-indexed）
 fn parse_proc_stat_jiffies(stat_output: &str) -> Option<u64> {
@@ -210,7 +222,7 @@ pub async fn sample_cpu_phase2(
             .map(|(tid, content)| (tid, parse_thread_name(&content)))
             .collect();
 
-    // 系统总 CPU delta
+    // 系统总 CPU delta（所有核之和）
     let total2 = parse_total_cpu_jiffies(&sys_stat2)
         .ok_or_else(|| anyhow::format_err!("无法解析 /proc/stat"))?;
     let total_delta = total2.saturating_sub(phase1.sys_total) as f32;
@@ -219,10 +231,15 @@ pub async fn sample_cpu_phase2(
         anyhow::bail!("CPU delta 为零，采样间隔过短");
     }
 
-    // 进程 CPU%
+    // 核数：total_delta 是所有核的总和，乘以核数换算成单核口径
+    //（100% = 占满一个核，多线程进程可超过 100%，与 adb top 一致）。
+    let num_cores = parse_cpu_core_count(&sys_stat2).unwrap_or(1) as f32;
+
+    // 进程 CPU%（单核口径）
     let proc2 = parse_proc_stat_jiffies(&proc_stat2)
         .ok_or_else(|| anyhow::format_err!("无法解析 /proc/{}/stat", pid))?;
-    let process_cpu = (proc2.saturating_sub(phase1.proc_jiffies) as f32 / total_delta) * 100.0;
+    let process_cpu =
+        (proc2.saturating_sub(phase1.proc_jiffies) as f32 / total_delta) * 100.0 * num_cores;
 
     // 每个线程的 CPU%：仅对两次采样都存在的线程求差，
     // 采样窗口内创建/退出的线程直接跳过（无法可靠计算 delta）。
@@ -230,7 +247,7 @@ pub async fn sample_cpu_phase2(
         .iter()
         .filter_map(|(tid, j2)| {
             let j1 = phase1.thread_jiffies.get(tid)?;
-            let cpu_usage = (j2.saturating_sub(*j1) as f32 / total_delta) * 100.0;
+            let cpu_usage = (j2.saturating_sub(*j1) as f32 / total_delta) * 100.0 * num_cores;
             let name = thread_names
                 .get(tid)
                 .cloned()
@@ -285,6 +302,25 @@ mod tests {
         // 非数字字段按 0 处理，不 panic
         let stat = "cpu  100 abc 200\n";
         assert_eq!(parse_total_cpu_jiffies(stat), Some(300));
+    }
+
+    // ---- parse_cpu_core_count ----
+
+    #[test]
+    fn test_parse_cpu_core_count_counts_per_core_lines() {
+        // 真实 /proc/stat：聚合行 + cpu0..cpu7 → 8 核
+        let mut stat = String::from("cpu  1000 0 0 0 0 0 0 0 0 0\n");
+        for i in 0..8 {
+            stat.push_str(&format!("cpu{} 100 0 0 0 0 0 0 0 0 0\n", i));
+        }
+        assert_eq!(parse_cpu_core_count(&stat), Some(8));
+    }
+
+    #[test]
+    fn test_parse_cpu_core_count_excludes_aggregate_line() {
+        // 只有聚合行（"cpu " 后跟空格）→ None
+        assert_eq!(parse_cpu_core_count("cpu  1000 0 0 0\n"), None);
+        assert_eq!(parse_cpu_core_count(""), None);
     }
 
     // ---- parse_proc_stat_jiffies ----
@@ -528,6 +564,42 @@ mod tests {
         // 无线程（mock 的 task 列表返回空）→ 线程列表为空
         assert!(threads.is_empty());
         utils::clear_adb_runner_for_test();
+    }
+
+    /// 多核设备：/proc/stat 含 cpuN 行时，CPU% 换算为单核口径（×核数）
+    fn multicore_runner(args: &[&str]) -> anyhow::Result<utils::ProcOutput> {
+        let phase = MOCK_PHASE.load(Ordering::SeqCst);
+        let stdout = if args[1] == "cat" && args[2].starts_with("/proc/stat") {
+            // 4 核：聚合行 + cpu0..cpu3；phase1: sys=1000, phase2: sys=2000 → delta=1000
+            let agg = if phase == 1 { 1000 } else { 2000 };
+            format!(
+                "cpu  {} 0 0 0\ncpu0 1 0 0 0\ncpu1 1 0 0 0\ncpu2 1 0 0 0\ncpu3 1 0 0 0\n",
+                agg
+            )
+        } else if args[1] == "cat" && args[2].ends_with("/stat") {
+            // proc delta=300
+            if phase == 1 {
+                stat_line("15803", "xiang.car.x.svm", 100, 200)
+            } else {
+                stat_line("15803", "xiang.car.x.svm", 400, 200)
+            }
+        } else {
+            String::new()
+        };
+        Ok(utils::ProcOutput { stdout })
+    }
+
+    #[tokio::test]
+    async fn test_sample_cpu_phase2_single_core_scale() {
+        utils::set_adb_runner_for_test(multicore_runner);
+        MOCK_PHASE.store(1, Ordering::SeqCst);
+        let p1 = sample_cpu_phase1("15803").await.unwrap();
+        MOCK_PHASE.store(2, Ordering::SeqCst);
+        let (cpu, _ts, _threads) = sample_cpu_phase2(&p1).await.unwrap();
+        // 占全部核比例 = 300/1000 = 30%；单核口径 ×4 核 = 120%
+        assert!((cpu - 120.0).abs() < 0.01, "expected 120.0%, got {}", cpu);
+        utils::clear_adb_runner_for_test();
+        MOCK_PHASE.store(1, Ordering::SeqCst);
     }
 
     #[tokio::test]

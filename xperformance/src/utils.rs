@@ -59,11 +59,14 @@ pub fn generate_cpu_chart(
     root.fill(&WHITE)?;
 
     let areas = root.split_evenly((1, 1));
+    // 单核口径下 CPU% 可超过 100%（多线程）：纵轴下限固定 100，超出自动扩展
+    let max_cpu = process_cpu.iter().cloned().fold(0f32, f32::max);
+    let y_max = if max_cpu > 100.0 { max_cpu * 1.1 } else { 100.0 };
     let mut process_chart = ChartBuilder::on(&areas[0])
         .margin(15)
         .x_label_area_size(40)
         .y_label_area_size(60)
-        .build_cartesian_2d(x_range.clone(), 0f32..100f32)?;
+        .build_cartesian_2d(x_range.clone(), 0f32..y_max)?;
 
     let mut mesh_config = process_chart.configure_mesh();
     mesh_config
