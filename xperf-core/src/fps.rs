@@ -36,19 +36,21 @@ pub struct FpsSample {
     pub jank_count: u32,
 }
 
-/// FPS 时序数据（用于退出时导出 CSV）
+/// FPS 时序数据（用于退出时导出 CSV；多图层并存时逐图层各占一行，靠 layer 列区分）
 #[derive(Default)]
 pub struct FpsTimeSeriesData {
     pub timestamps: Vec<DateTime<Local>>,
     pub fps: Vec<f32>,
     pub jank_counts: Vec<u32>,
+    pub layers: Vec<String>,
 }
 
 impl FpsTimeSeriesData {
-    pub fn add_data_point(&mut self, timestamp: DateTime<Local>, fps: f32, jank_count: u32) {
+    pub fn add_data_point(&mut self, timestamp: DateTime<Local>, fps: f32, jank_count: u32, layer: &str) {
         self.timestamps.push(timestamp);
         self.fps.push(fps);
         self.jank_counts.push(jank_count);
+        self.layers.push(layer.to_string());
     }
 }
 
@@ -68,8 +70,12 @@ impl FpsPidState {
         }
     }
 
-    /// 采样一轮。Ok(None) 表示首轮建基线（记录缓冲末尾时间戳，不出数）。
-    pub fn sample(&mut self, pid: &str, package: &str) -> Result<Option<FpsSample>> {
+    /// 采样一轮。返回该 PID 各图层的样本：
+    /// - 有帧的图层各自一条（多渲染面并存时不做取舍，避免次活跃面被掩盖、
+    ///   "最忙图层"逐轮跳动导致时序混叠）
+    /// - 全部图层零帧时只返回一条零帧样本（界面静止是真实状态，如实上报）
+    /// - 空 Vec 表示首轮建基线，不出数
+    pub fn sample(&mut self, pid: &str, package: &str) -> Result<Vec<FpsSample>> {
         if !self.discovery_attempted || (self.zero_rounds >= REDISCOVER_AFTER_ZERO_ROUNDS) {
             let names = discover_layers(pid, package);
             self.layers = names
@@ -83,27 +89,24 @@ impl FpsPidState {
             }
         }
 
-        let mut best: Option<FpsSample> = None;
+        let mut samples: Vec<FpsSample> = Vec::new();
         for layer in &mut self.layers {
-            let sample = sample_layer(layer)?;
-            if let Some(s) = sample {
-                if best.as_ref().is_none_or(|b| s.frame_count > b.frame_count) {
-                    best = Some(s);
-                }
+            if let Some(s) = sample_layer(layer)? {
+                samples.push(s);
             }
+        }
+        if samples.is_empty() {
+            return Ok(samples); // 首轮：所有图层都在建基线
         }
 
-        match best {
-            Some(s) if s.frame_count > 0 => {
-                self.zero_rounds = 0;
-                Ok(Some(s))
-            }
-            _ => {
-                self.zero_rounds += 1;
-                // 界面静止时帧数为 0 是真实状态，如实上报
-                Ok(best)
-            }
+        if samples.iter().any(|s| s.frame_count > 0) {
+            self.zero_rounds = 0;
+            samples.retain(|s| s.frame_count > 0); // 静止图层是噪声，不上报
+        } else {
+            self.zero_rounds += 1;
+            samples.truncate(1); // 全零：一条静止样本即可
         }
+        Ok(samples)
     }
 }
 

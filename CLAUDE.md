@@ -170,7 +170,7 @@ FpsPidState::sample(pid, package)        ← 每 PID 每轮一次
   └─ 每图层每轮：dumpsys SurfaceFlinger --latency '<layer>'
        解析最近 127 帧的 actualPresent（过滤 0=空槽、i64::MAX=已入队未上屏哨兵）
        与上轮缓冲末尾时间戳取差 → 本窗口新帧数 → FPS = 新帧数 / 窗口墙钟时长
-       取各图层中帧数最多的作为该 PID 的应用 FPS
+       有帧的图层各自上报一条 FpsUpdate（多渲染面不取舍、不混叠）；全零时报一条静止样本
 ```
 
 关键设计点：
@@ -181,7 +181,7 @@ FpsPidState::sample(pid, package)        ← 每 PID 每轮一次
 - 图层名含空格/`#`，adb argv 拼成 shell 串时必须自带单引号
 - 静止界面 FPS=0 如实上报（事件照常发，GUI 折线落底）
 
-`--fps` 退出时导出 `log/<pkg>/<ts>/fps/<pkg>_fps_data_pid<pid>.csv`（Timestamp,FPS,Jank）。GUI 暂未接 FPS（`Sampler::new` 第六参数传 false）。
+`--fps` 退出时导出 `log/<pkg>/<ts>/fps/<pkg>_fps_data_pid<pid>.csv`（Timestamp,FPS,Jank,Layer）。GUI 有 FPS 勾选框 + 折线图（自适应纵轴，多图层逐层一条线，图层名作图例）。
 
 
 ---

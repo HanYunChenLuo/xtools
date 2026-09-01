@@ -101,9 +101,9 @@ class LineChart {
         j === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
       });
       ctx.stroke();
-      // 图例
+      // 图例（key 即展示名：CPU/内存用 "PID xxx"，FPS 用图层名）
       ctx.fillStyle = COLORS[i % COLORS.length];
-      ctx.fillText('PID ' + pid, W - R - 70 - i * 70, 20);
+      ctx.fillText(pid, W - R - 70 - i * 70, 20);
     });
   }
   drawAxes(l, t, r, b) {
@@ -118,6 +118,7 @@ class LineChart {
 
 const cpuChart = new LineChart('cpuChart', 'Process CPU (%)', '%', 100);
 const memChart = new LineChart('memChart', 'Memory Total PSS (KB)', 'KB');
+const fpsChart = new LineChart('fpsChart', 'FPS', 'fps'); // 自适应纵轴（30/60/120 档各异）
 _diag('charts initialized');
 
 // pid -> { cpu, mem, new }
@@ -166,13 +167,22 @@ listen('sample', (e) => {
   } else if (ev.CpuUpdate) {
     const { pid, timestamp, process_cpu } = ev.CpuUpdate;
     if (!pidData[pid]) { pidData[pid] = { cpu: [], mem: [], new: true }; renderPidList(); }
-    cpuChart.push(pid, new Date(timestamp).getTime(), +process_cpu.toFixed(2));
+    cpuChart.push('PID ' + pid, new Date(timestamp).getTime(), +process_cpu.toFixed(2));
     try { cpuChart.draw(); } catch (err) { _diag('cpuChart.draw ERROR: ' + err.message); }
   } else if (ev.MemoryUpdate) {
     const { pid, timestamp, total_pss } = ev.MemoryUpdate;
     if (!pidData[pid]) { pidData[pid] = { cpu: [], mem: [], new: true }; renderPidList(); }
-    memChart.push(pid, new Date(timestamp).getTime(), total_pss);
+    memChart.push('PID ' + pid, new Date(timestamp).getTime(), total_pss);
     try { memChart.draw(); } catch (err) { _diag('memChart.draw ERROR: ' + err.message); }
+  } else if (ev.FpsUpdate) {
+    const { pid, timestamp, layer, fps } = ev.FpsUpdate;
+    if (!pidData[pid]) { pidData[pid] = { cpu: [], mem: [], new: true }; renderPidList(); }
+    // 自动启动带 --fps 时前端勾选框未同步，收到首个 FPS 事件自动展开图表
+    const fpsBox = document.getElementById('fps');
+    if (!fpsBox.checked) { fpsBox.checked = true; toggleCharts(); }
+    // 多渲染面并存时逐图层一条折线（如游戏主 Surface + 相机预览），key 用图层名
+    fpsChart.push(layer, new Date(timestamp).getTime(), +fps.toFixed(1));
+    try { fpsChart.draw(); } catch (err) { _diag('fpsChart.draw ERROR: ' + err.message); }
   } else if (ev.NoProcess) {
     document.getElementById('status').textContent = '无进程: ' + ev.NoProcess.error;
   }
@@ -186,12 +196,13 @@ document.getElementById('startBtn').addEventListener('click', async () => {
   const interval = parseInt(document.getElementById('interval').value, 10);
   const cpu = document.getElementById('cpu').checked;
   const memory = document.getElementById('memory').checked;
+  const fps = document.getElementById('fps').checked;
   for (const k of Object.keys(pidData)) delete pidData[k];
   renderPidList();
-  cpuChart.series = {}; memChart.series = {};
+  cpuChart.series = {}; memChart.series = {}; fpsChart.series = {};
   try {
     _diag('startBtn invoking start_sampling: pkg=' + package + ' interval=' + interval);
-    await invoke('start_sampling', { package, interval, cpu, memory });
+    await invoke('start_sampling', { package, interval, cpu, memory, fps });
     _diag('start_sampling RETURNED OK');
     document.getElementById('startBtn').disabled = true;
     document.getElementById('stopBtn').disabled = false;
@@ -212,17 +223,20 @@ document.getElementById('stopBtn').addEventListener('click', async () => {
 });
 _diag('UI handlers bound');
 
-// ---- 图表随 CPU/Memory 勾选状态显示/隐藏 ----
+// ---- 图表随 CPU/Memory/FPS 勾选状态显示/隐藏 ----
 function toggleCharts() {
   const cpuOn = document.getElementById('cpu').checked;
   const memOn = document.getElementById('memory').checked;
+  const fpsOn = document.getElementById('fps').checked;
   document.getElementById('cpuChartBox').classList.toggle('hidden', !cpuOn);
   document.getElementById('memChartBox').classList.toggle('hidden', !memOn);
+  document.getElementById('fpsChartBox').classList.toggle('hidden', !fpsOn);
   // 容器显隐变化后 chart 尺寸需刷新
-  setTimeout(() => { cpuChart.resize(); memChart.resize(); }, 50);
+  setTimeout(() => { cpuChart.resize(); memChart.resize(); fpsChart.resize(); }, 50);
 }
 document.getElementById('cpu').addEventListener('change', toggleCharts);
 document.getElementById('memory').addEventListener('change', toggleCharts);
+document.getElementById('fps').addEventListener('change', toggleCharts);
 toggleCharts();
 
 // ---- 包名列表（可搜索下拉）----

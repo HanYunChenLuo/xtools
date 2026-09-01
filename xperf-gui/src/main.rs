@@ -34,10 +34,10 @@ struct AppState {
 /// 后台采样循环（start_sampling 命令与自动启动共用）。
 /// 用 tauri::async_runtime::spawn：setup 回调不在 tokio runtime 上下文中，
 /// 直接 tokio::spawn 会 panic（no reactor running）。
-fn spawn_sampling(app: tauri::AppHandle, package: String, interval: u64, cpu: bool, memory: bool, running: Arc<Mutex<bool>>) {
-    eprintln!("[sampling] 启动: package={} interval={} cpu={} memory={}", package, interval, cpu, memory);
+fn spawn_sampling(app: tauri::AppHandle, package: String, interval: u64, cpu: bool, memory: bool, fps: bool, running: Arc<Mutex<bool>>) {
+    eprintln!("[sampling] 启动: package={} interval={} cpu={} memory={} fps={}", package, interval, cpu, memory, fps);
     tauri::async_runtime::spawn(async move {
-        let mut sampler = Sampler::new(&package, interval, cpu, memory, false, false);
+        let mut sampler = Sampler::new(&package, interval, cpu, memory, false, fps);
         loop {
             if !*running.lock().unwrap() {
                 eprintln!("[sampling] 停止：running=false");
@@ -61,6 +61,7 @@ async fn start_sampling(
     interval: u64,
     cpu: bool,
     memory: bool,
+    fps: bool,
     state: State<'_, AppState>,
     app: tauri::AppHandle,
 ) -> Result<(), String> {
@@ -72,7 +73,7 @@ async fn start_sampling(
         *running = true;
     }
 
-    spawn_sampling(app, package, interval, cpu, memory, state.running.clone());
+    spawn_sampling(app, package, interval, cpu, memory, fps, state.running.clone());
 
     Ok(())
 }
@@ -134,6 +135,7 @@ fn main() {
     let auto_interval: u64 = get_opt("--interval").and_then(|v| v.parse().ok()).unwrap_or(1000);
     let auto_cpu = args.iter().any(|a| a == "--cpu");
     let auto_memory = args.iter().any(|a| a == "--memory");
+    let auto_fps = args.iter().any(|a| a == "--fps");
 
     tauri::Builder::default()
         .manage(AppState {
@@ -152,6 +154,7 @@ fn main() {
                         auto_interval,
                         auto_cpu || !auto_memory, // 默认至少 CPU
                         auto_memory || !auto_cpu, // 默认至少 memory
+                        auto_fps,
                         state.running.clone(),
                     );
                 }
