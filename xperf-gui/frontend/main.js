@@ -11,11 +11,12 @@ _diag('__TAURI__ ok');
 const COLORS = ['#89b4fa','#a6e3a1','#f9e2af','#f38ba8','#cba6f7','#94e2d5','#fab387','#74c7ec','#f5c2e7','#a6adc8'];
 
 class LineChart {
-  constructor(canvasId, title, unit) {
+  constructor(canvasId, title, unit, maxValue) {
     this.canvas = document.getElementById(canvasId);
     this.ctx = this.canvas.getContext('2d');
     this.title = title;
     this.unit = unit;
+    this.maxValue = maxValue; // 固定 Y 轴上限（如 CPU=100）；undefined = 自适应
     this.series = {}; // pid -> [{t, v}]
     this.resize();
     window.addEventListener('resize', () => this.resize());
@@ -61,7 +62,15 @@ class LineChart {
     }
     if (pids.length === 0 || !isFinite(tMin)) { this.drawAxes(L, T, W - R, H - B); return; }
     if (tMax - tMin < 1000) tMax = tMin + 1000;
-    vMax = vMax * 1.1 || 1;
+    // Y 轴范围：固定上限（CPU=100）或自适应（内存，基于实际最大值）
+    let yMax;
+    if (this.maxValue !== undefined) {
+      yMax = this.maxValue;
+    } else {
+      yMax = Math.max(1, vMax) * 1.1;
+    }
+    // 刻度标签精度：按 yMax 大小选位数，避免 toFixed(0) 四舍五入导致重复
+    const labelPrec = yMax >= 100 ? 0 : (yMax >= 10 ? 1 : 2);
     // 网格 + Y 轴刻度
     ctx.strokeStyle = '#313244';
     ctx.fillStyle = '#6c7086';
@@ -69,7 +78,7 @@ class LineChart {
     for (let i = 0; i <= 4; i++) {
       const y = T + (H - B - T) * i / 4;
       ctx.beginPath(); ctx.moveTo(L, y); ctx.lineTo(W - R, y); ctx.stroke();
-      ctx.fillText((vMax * (1 - i / 4)).toFixed(0), 8, y + 4);
+      ctx.fillText((yMax * (1 - i / 4)).toFixed(labelPrec), 8, y + 4);
     }
     // X 轴时间刻度
     const span = tMax - tMin;
@@ -88,7 +97,7 @@ class LineChart {
       ctx.beginPath();
       pts.forEach((p, j) => {
         const x = L + (W - R - L) * (p.t - tMin) / span;
-        const y = T + (H - B - T) * (1 - p.v / vMax);
+        const y = T + (H - B - T) * (1 - p.v / yMax);
         j === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
       });
       ctx.stroke();
@@ -107,7 +116,7 @@ class LineChart {
   }
 }
 
-const cpuChart = new LineChart('cpuChart', 'Process CPU (%)', '%');
+const cpuChart = new LineChart('cpuChart', 'Process CPU (%)', '%', 100);
 const memChart = new LineChart('memChart', 'Memory Total PSS (KB)', 'KB');
 _diag('charts initialized');
 

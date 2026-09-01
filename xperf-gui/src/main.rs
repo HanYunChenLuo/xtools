@@ -75,11 +75,11 @@ fn diag_log(message: String) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
-/// 列出设备上已安装的第三方应用包名（供前端搜索选择）。
-/// 用 `pm list packages -3`（-3 = 仅第三方，避免系统应用噪声）。
+/// 列出设备上已安装的全部应用包名（含系统应用，共几百个），供前端搜索选择。
+/// 用 `pm list packages`（不带 -3，-3 只列第三方会遗漏系统应用）。
 #[tauri::command]
 fn list_packages() -> Result<Vec<String>, String> {
-    let out = xperf_core::run_adb_command(&["shell", "pm", "list", "packages", "-3"])
+    let out = xperf_core::run_adb_command(&["shell", "pm", "list", "packages"])
         .map_err(|e| e.to_string())?;
     let mut pkgs: Vec<String> = out
         .stdout
