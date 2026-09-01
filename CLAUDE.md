@@ -25,7 +25,9 @@ cargo test -p xrm tests::test_dangerous_operation_detection
 cargo check --workspace
 ```
 
-Release binaries are written to `target/release/`.
+Release binaries are written to `target/release/`。
+
+Workspace 成员：`xperf-core`（采样核心）、`xperformance`（CLI）、`xperf-gui`（Tauri GUI）、`xperf-agent`（设备端低间隔采样器，交叉编译 `cargo build -p xperf-agent --target aarch64-linux-android --release`，链接器配置在 `.cargo/config.toml`）、`xrm`（安全删除）。
 
 ---
 
@@ -182,6 +184,23 @@ FpsPidState::sample(pid, package)        ← 每 PID 每轮一次
 - 静止界面 FPS=0 如实上报（事件照常发，GUI 折线落底）
 
 `--fps` 退出时导出 `log/<pkg>/<ts>/fps/<pkg>_fps_data_pid<pid>.csv`（Timestamp,FPS,Jank,Layer）。GUI 有 FPS 勾选框 + 折线图（自适应纵轴，多图层逐层一条线，图层名作图例）。
+
+---
+
+### agent 模式（设备端低间隔采样，xperf-agent）
+
+**为什么需要**：adb 轮询单轮固定 6+ 次调用（每次 ~13ms 起，`dumpsys meminfo` ~100ms），interval < 500ms 时轮询开销就超过间隔本身。agent 模式把采样循环搬到设备上常驻，直接读 /proc（微秒级），结果以 NDJSON 经 `adb exec-out` 长连接流式回传（协议见 `xperf-agent/main.rs` 头注释）。
+
+**触发**：CLI `--agent` 显式启用，或 `--interval < 500` 自动切换。首次自动交叉编译（需 NDK，链接器配置在 `.cargo/config.toml`）+ push 到 `/data/local/tmp/xperf-agent`。
+
+**与轮询模式的差异**：
+- CPU 口径相同（jiffies 差值 ×核数，单核基准），但窗口是相邻两轮（agent 常驻保有状态，无 phase1/phase2 结构）
+- 内存改读 `/proc/<pid>/smaps_rollup`（Pss/Rss，~1ms），不用 dumpsys meminfo（低间隔下太慢且扰动大）；因此 agent 模式的内存明细只有 total_pss，其余分类为 0
+- 不支持 --fps：127 帧缓冲在 1s 轮询下已是帧级分辨率，低间隔无收益
+- 终端按 ~1s 聚合打印（avg/max），全量明细在退出 CSV；CSV 时间戳带毫秒（`%.3f`）
+- 主机断连/Ctrl-C → exec-out 关闭 → agent 写 stdout 失败自行退出
+
+**验证基线**：svm @ 50ms 间隔，78 样本均值 15.03%，与轮询模式/adb top 一致；50ms 窗口可见 25-47% 的瞬时毛刺（1s 轮询看不到）。
 
 
 ---

@@ -1,3 +1,4 @@
+pub mod agent;
 pub mod cpu;
 pub mod fps;
 pub mod memory;

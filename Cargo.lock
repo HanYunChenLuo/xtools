@@ -5200,6 +5200,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "xperf-agent"
+version = "0.1.5"
+
+[[package]]
 name = "xperf-core"
 version = "0.1.5"
 dependencies = [
@@ -5207,6 +5211,7 @@ dependencies = [
  "chrono",
  "colored",
  "serde",
+ "serde_json",
  "tokio",
 ]
 

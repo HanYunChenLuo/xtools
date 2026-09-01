@@ -1,0 +1,5 @@
+# xperf-agent 设备端二进制的交叉编译链接器（NDK clang）。
+# 注意：绝对路径绑定本机 NDK 25.1.8937393；换机器/换 NDK 版本需同步修改，
+# 或设环境变量 CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER 覆盖。
+[target.aarch64-linux-android]
+linker = "/home/han/Android/Sdk/ndk/25.1.8937393/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android26-clang"
