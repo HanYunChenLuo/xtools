@@ -1,8 +1,10 @@
 pub mod cpu;
+pub mod fps;
 pub mod memory;
 pub mod utils;
 
 pub use cpu::{CpuSample1, ThreadCpuInfo};
+pub use fps::{FpsPidState, FpsTimeSeriesData};
 pub use memory::{MemoryDetails, MemoryTimeSeriesData};
 pub use utils::{get_all_processes, run_adb_command, run_command, ProcessInfo, ProcOutput};
 
@@ -19,6 +21,7 @@ pub struct PidStats {
     pub cpu_time: Option<DateTime<Local>>, // 该 PID 达到峰值 CPU 的时间（None = 尚无采样）
     pub memory_usage: u64, // 该 PID 的峰值内存 KB
     pub memory_time: Option<DateTime<Local>>, // 该 PID 达到峰值内存的时间（None = 尚无采样）
+    pub fps_data: FpsTimeSeriesData, // 该 PID 的 FPS 时序
     pub start_time: String, // 该 PID 的启动时间
     pub active: bool, // 是否仍在运行（动态跟随：消失的 PID 置 false 但保留数据）
 }
@@ -64,6 +67,15 @@ pub enum SampleEvent {
         total_pss: u64,
         details: MemoryDetails,
     },
+    /// FPS 采样结果（该 PID 最活跃图层的帧率；界面静止时 fps=0 为真实状态）
+    FpsUpdate {
+        pid: String,
+        timestamp: DateTime<Local>,
+        layer: String,
+        fps: f32,
+        frame_count: u32,
+        jank_count: u32,
+    },
     /// 包名下无任何进程
     NoProcess { error: String },
     /// 采样中的非致命错误（如单次 ADB 失败）
@@ -80,19 +92,30 @@ pub struct Sampler {
     cpu: bool,
     memory: bool,
     thread: bool,
+    fps: bool,
     pid_stats: HashMap<String, PidStats>,
+    fps_states: HashMap<String, FpsPidState>,
     restart_count: u32,
 }
 
 impl Sampler {
-    pub fn new(package: &str, interval_ms: u64, cpu: bool, memory: bool, thread: bool) -> Self {
+    pub fn new(
+        package: &str,
+        interval_ms: u64,
+        cpu: bool,
+        memory: bool,
+        thread: bool,
+        fps: bool,
+    ) -> Self {
         Self {
             package: package.to_string(),
             interval_ms,
             cpu,
             memory,
             thread,
+            fps,
             pid_stats: HashMap::new(),
+            fps_states: HashMap::new(),
             restart_count: 0,
         }
     }
@@ -111,7 +134,8 @@ impl Sampler {
     /// 1. get_all_processes 动态跟随（新 PID 加入并 emit PidDiscovered）
     /// 2. CPU 采样（phase1 → sleep → phase2），emit CpuUpdate
     /// 3. 内存采样，emit MemoryUpdate
-    /// 4. 进程消失时 emit PidDisappeared 并标记 active=false
+    /// 4. FPS 采样（SurfaceFlinger 图层帧时间戳），emit FpsUpdate
+    /// 5. 进程消失时 emit PidDisappeared 并标记 active=false
     pub async fn sample_once(&mut self) -> Vec<SampleEvent> {
         let mut events = Vec::new();
 
@@ -262,6 +286,42 @@ impl Sampler {
                                 error: e.to_string(),
                             });
                         }
+                    }
+                }
+            }
+        }
+
+        // 4. FPS 采样（SurfaceFlinger 图层帧时间戳，覆盖 SurfaceView/游戏直渲染场景）
+        if self.fps && !active_pids.is_empty() {
+            for pid in &active_pids {
+                let state = self
+                    .fps_states
+                    .entry(pid.clone())
+                    .or_default();
+                let result = state.sample(pid, &self.package);
+                match result {
+                    Ok(Some(sample)) => {
+                        let s = self
+                            .pid_stats
+                            .get_mut(pid)
+                            .expect("active pid must be in pid_stats");
+                        s.fps_data.add_data_point(sample.timestamp, sample.fps, sample.jank_count);
+                        events.push(SampleEvent::FpsUpdate {
+                            pid: pid.clone(),
+                            timestamp: sample.timestamp,
+                            layer: sample.layer,
+                            fps: sample.fps,
+                            frame_count: sample.frame_count,
+                            jank_count: sample.jank_count,
+                        });
+                    }
+                    Ok(None) => {} // 首轮建基线，不出数
+                    Err(e) => {
+                        events.push(SampleEvent::SampleError {
+                            pid: Some(pid.clone()),
+                            stage: "fps".to_string(),
+                            error: e.to_string(),
+                        });
                     }
                 }
             }

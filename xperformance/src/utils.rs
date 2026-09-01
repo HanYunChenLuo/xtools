@@ -186,6 +186,23 @@ pub fn export_cpu_data_to_csv(
     Ok(())
 }
 
+/// 导出 FPS 时序数据到 CSV
+pub fn export_fps_data_to_csv(path: &PathBuf, data: &xperf_core::FpsTimeSeriesData) -> Result<()> {
+    let mut file = fs::File::create(path)?;
+    writeln!(file, "Timestamp,FPS,Jank")?;
+    for i in 0..data.timestamps.len() {
+        writeln!(
+            file,
+            "{},{:.2},{}",
+            data.timestamps[i].format("%Y-%m-%d %H:%M:%S"),
+            data.fps[i],
+            data.jank_counts[i]
+        )?;
+    }
+    file.flush()?;
+    Ok(())
+}
+
 pub fn create_timestamp_subdir(package: &str) -> Result<PathBuf> {
     let cell = TIMESTAMP_DIR.get_or_init(|| Mutex::new(None));
     let mut guard = cell.lock().unwrap();

@@ -158,6 +158,34 @@ sample_memory(package)
 
 ---
 
+### FPS 采样流程（fps.rs）
+
+为什么不用 gfxinfo：`dumpsys gfxinfo framestats` 只统计 View 层级（HWUI）绘制的帧；游戏/相机/SurfaceView 直渲染应用的帧不上 gfxinfo。所有 buffer 最终都经 SurfaceFlinger 合成，因此对**图层**取帧时间戳是通用方案。
+
+```
+FpsPidState::sample(pid, package)        ← 每 PID 每轮一次
+  ├─ discover_layers(pid, package)       ← 首轮 + 连续 10 轮零帧后重做（Surface 重建会换名 #0→#1）
+  │    ├─ dumpsys SurfaceFlinger（全量）  → 按 BufferStateLayer 块 metadata 的 ownerPID 归属匹配
+  │    └─ 兜底：dumpsys SurfaceFlinger --list → 按包名匹配（去掉 "<hex> " 别名前缀，去重）
+  └─ 每图层每轮：dumpsys SurfaceFlinger --latency '<layer>'
+       解析最近 127 帧的 actualPresent（过滤 0=空槽、i64::MAX=已入队未上屏哨兵）
+       与上轮缓冲末尾时间戳取差 → 本窗口新帧数 → FPS = 新帧数 / 窗口墙钟时长
+       取各图层中帧数最多的作为该 PID 的应用 FPS
+```
+
+关键设计点：
+- **图层名可能不含包名**（如 svm 的渲染层叫 `SVM Container`），只能靠 ownerPID 归属识别
+- **不用 `--latency-clear`**：实测部分设备（如此车机）clear 只清空缓冲而不返回数据；改用 `--latency` 逐轮差值
+- 缓冲 127 帧 ≈ 2.1s@60fps：采样间隔大于该值时老帧被挤出，计数为下界（interval ≤ 1s 精确）
+- **jank 不按 vsync 阈值**（30fps 相机流在 60Hz 屏上帧间隔 33ms 会被误判全卡）：用间隔 > 2×窗口中位间隔，<3 帧不计
+- 图层名含空格/`#`，adb argv 拼成 shell 串时必须自带单引号
+- 静止界面 FPS=0 如实上报（事件照常发，GUI 折线落底）
+
+`--fps` 退出时导出 `log/<pkg>/<ts>/fps/<pkg>_fps_data_pid<pid>.csv`（Timestamp,FPS,Jank）。GUI 暂未接 FPS（`Sampler::new` 第六参数传 false）。
+
+
+---
+
 ### 输出文件触发时机
 
 | 场景 | 触发条件 | 输出位置 |

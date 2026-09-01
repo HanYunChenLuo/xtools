@@ -17,6 +17,9 @@ fn brief_event(ev: &SampleEvent) -> String {
         SampleEvent::MemoryUpdate { pid, total_pss, .. } => {
             format!("MemoryUpdate pid={} total_pss={}KB", pid, total_pss)
         }
+        SampleEvent::FpsUpdate { pid, fps, jank_count, layer, .. } => {
+            format!("FpsUpdate pid={} fps={:.1} jank={} layer={}", pid, fps, jank_count, layer)
+        }
         SampleEvent::NoProcess { error } => format!("NoProcess: {}", error),
         SampleEvent::SampleError { pid, stage, error } => {
             format!("SampleError pid={:?} stage={}: {}", pid, stage, error)
@@ -34,7 +37,7 @@ struct AppState {
 fn spawn_sampling(app: tauri::AppHandle, package: String, interval: u64, cpu: bool, memory: bool, running: Arc<Mutex<bool>>) {
     eprintln!("[sampling] 启动: package={} interval={} cpu={} memory={}", package, interval, cpu, memory);
     tauri::async_runtime::spawn(async move {
-        let mut sampler = Sampler::new(&package, interval, cpu, memory, false);
+        let mut sampler = Sampler::new(&package, interval, cpu, memory, false, false);
         loop {
             if !*running.lock().unwrap() {
                 eprintln!("[sampling] 停止：running=false");
