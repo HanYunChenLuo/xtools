@@ -304,12 +304,17 @@ fn parse_gpu_busy(content: &str) -> Option<(u64, u64)> {
     Some((busy, total))
 }
 
-/// GPU 采样路径，按优先级探测：
-/// kgsl（GVM 直通，利用率+时钟）→ QNX telnet（hypervisor：QNX host 侧 kgsl slog，真利用率+每进程 busy）
-/// → dumpsys gpu（保底：每 PID 显存，~11ms）。
+/// GPU 采样路径，按平台/探测结果选择：
+/// - Kgsl：标准 Android / SS2，sysfs gpubusy 直通（GVM 内有 kgsl）
+/// - Qnx：SS3/8295，QNX host 侧 kgsl slog（GVM 内无 kgsl，telnet 读 QNX）
+/// - TopGpu：SS2MAX/8155，topgpu 工具（push 到 /data/，读 sysfs 或 ftrace）
+/// - Ligfx：SS4/8797，PVM 侧 logcat -s ligfxprofilerd（每帧 Utilization + 每进程 busy）
+/// - DumpMem：保底，dumpsys gpu 每 PID 显存
 enum GpuPath {
     Kgsl(Kgsl),
     Qnx,
+    TopGpu,
+    Ligfx,
     DumpMem,
 }
 
@@ -334,24 +339,54 @@ fn set_qnx_host(ip: &str) {
     let _ = IP.set(ip.to_string());
 }
 
-/// GPU 路径探测（带平台提示跳过项）
-fn detect_gpu_path_ex(skip_kgsl: bool, skip_qnx: bool) -> Option<GpuPath> {
-    if !skip_kgsl {
-        if let Some(k) = detect_kgsl() {
-            return Some(GpuPath::Kgsl(k));
+/// GPU 路径探测（带平台提示）
+/// platform: "ss3" → QNX | "ss2max" → TopGpu | "ss4" → Ligfx | "android" → Kgsl | None → 自动探测
+fn detect_gpu_path_ex(platform: Option<&str>) -> Option<GpuPath> {
+    match platform {
+        Some("ss3") => {
+            // SS3：跳过 kgsl，QNX 优先，失败则 dumpsys 保底
+            if qnx_gpu_available() {
+                Some(GpuPath::Qnx)
+            } else {
+                dumpsys(&["gpu"]).and_then(|s| parse_gpu_mem_snapshot(&s).map(|_| GpuPath::DumpMem))
+            }
+        }
+        Some("ss2max") | Some("ss2pro") => {
+            // SS2 系列：kgsl sysfs 优先（直通），失败则 topgpu 工具，再失败 dumpsys 保底
+            if let Some(k) = detect_kgsl() {
+                Some(GpuPath::Kgsl(k))
+            } else if topgpu_available() {
+                Some(GpuPath::TopGpu)
+            } else {
+                dumpsys(&["gpu"]).and_then(|s| parse_gpu_mem_snapshot(&s).map(|_| GpuPath::DumpMem))
+            }
+        }
+        Some("ss4") => {
+            // SS4：ligfxprofilerd logcat 优先，失败则 kgsl（可能有），再失败 dumpsys 保底
+            if ligfx_available() {
+                Some(GpuPath::Ligfx)
+            } else if let Some(k) = detect_kgsl() {
+                Some(GpuPath::Kgsl(k))
+            } else {
+                dumpsys(&["gpu"]).and_then(|s| parse_gpu_mem_snapshot(&s).map(|_| GpuPath::DumpMem))
+            }
+        }
+        _ => {
+            // 自动探测 / android：kgsl 优先，QNX 次之，dumpsys 保底
+            if let Some(k) = detect_kgsl() {
+                Some(GpuPath::Kgsl(k))
+            } else if qnx_gpu_available() {
+                Some(GpuPath::Qnx)
+            } else {
+                dumpsys(&["gpu"]).and_then(|s| parse_gpu_mem_snapshot(&s).map(|_| GpuPath::DumpMem))
+            }
         }
     }
-    if !skip_qnx && qnx_gpu_available() {
-        return Some(GpuPath::Qnx);
-    }
-    // 保底：dumpsys gpu 显存
-    let out = dumpsys(&["gpu"])?;
-    parse_gpu_mem_snapshot(&out).map(|_| GpuPath::DumpMem)
 }
 
 #[allow(dead_code)]
 fn detect_gpu_path() -> Option<GpuPath> {
-    detect_gpu_path_ex(false, false)
+    detect_gpu_path_ex(None)
 }
 
 /// QNX 通道可用性：busybox 存在 + QNX telnet 端口可连
@@ -462,7 +497,139 @@ fn spawn_qnx_gpu(period_ms: u64) -> Option<(std::process::Child, std::process::C
     Some((child, stdin, reader))
 }
 
-/// 解析 dumpsys gpu 的显存快照："Global total: N" + "Proc <pid> total: N"（字节）。
+// ---------- SS2MAX topgpu 工具通道 ----------
+// topgpu 是 SS2/8155 平台的 GPU 负载工具（push 到 /data/），读 sysfs gpu_busy_percentage
+// 或 adreno_cmdbatch ftrace 事件，输出系统 GPU 使用率 + 各进程使用率。
+// 格式（每采样周期一行）：
+//   sys gpu: 20.0%
+//   pid 1234 'com.app' gpu: 16.0% (80.0% of sys)
+
+/// topgpu 工具可用性：/data/local/tmp/topgpu 或 /data/topgpu 存在且可执行
+fn topgpu_available() -> bool {
+    for p in ["/data/local/tmp/topgpu", "/data/topgpu"] {
+        if fs::metadata(p).is_ok() {
+            return true;
+        }
+    }
+    false
+}
+
+/// 启动 topgpu 子进程（持续输出流），返回 (child, reader)
+/// period_s: 采样周期（秒），topgpu 接受整数秒
+fn spawn_topgpu(period_s: u64) -> Option<(std::process::Child, std::io::BufReader<std::process::ChildStdout>)> {
+    use std::io::BufReader;
+    use std::process::{Command, Stdio};
+    let path = ["/data/local/tmp/topgpu", "/data/topgpu"]
+        .into_iter()
+        .find(|p| fs::metadata(p).is_ok())?;
+    let mut child = Command::new(path)
+        .arg(period_s.to_string())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let stdout = child.stdout.take()?;
+    Some((child, BufReader::new(stdout)))
+}
+
+/// 解析 topgpu 输出行
+/// "sys gpu: 20.0%" → Sys(20.0)
+/// "pid 1234 'com.app' gpu: 16.0% (80.0% of sys)" → Proc("com.app", 16.0)
+enum TopGpuSample {
+    Sys(f32),
+    Proc(String, f32),
+}
+
+fn parse_topgpu_line(line: &str) -> Option<TopGpuSample> {
+    if let Some(rest) = line.strip_prefix("sys gpu:") {
+        let v: f32 = rest.trim().trim_end_matches('%').trim().parse().ok()?;
+        return Some(TopGpuSample::Sys(v));
+    }
+    if line.starts_with("pid ") && line.contains("gpu:") {
+        // pid 1234 'com.app' gpu: 16.0% (80.0% of sys)
+        let name_start = line.find('\'')? + 1;
+        let name_end = line[name_start..].find('\'')? + name_start;
+        let name = line[name_start..name_end].to_string();
+        let gpu_pos = line.find("gpu:")? + 4;
+        let busy: f32 = line[gpu_pos..].split('%').next()?.trim().parse().ok()?;
+        return Some(TopGpuSample::Proc(name, busy));
+    }
+    None
+}
+
+// ---------- SS4 ligfxprofilerd logcat 通道 ----------
+// SS4/8797 平台 GPU 统计由 ligfxprofilerd 服务输出到 logcat，每帧一行系统行 + N 行进程行：
+//   [GPU0] Frame N: Frequency: 1000 Hz, ..., Busy=33.75%, ..., Utilization=33.75%
+//   [GPU0]   GVM_com.lixiang.eid-8925: Busy=15.38%, ..., Utilization=15.38%
+// 业务侧只需关注 Utilization 字段。
+
+/// ligfxprofilerd 可用性：logcat 能拉到 ligfxprofilerd 标签的日志
+fn ligfx_available() -> bool {
+    // 快速探测：logcat -d -s ligfxprofilerd 取最近日志，有内容即可用
+    std::process::Command::new("logcat")
+        .args(["-d", "-s", "ligfxprofilerd", "-m", "1"])
+        .output()
+        .ok()
+        .map(|o| !o.stdout.is_empty())
+        .unwrap_or(false)
+}
+
+/// 启动 ligfxprofilerd logcat 流，返回 (child, reader)
+fn spawn_ligfx() -> Option<(std::process::Child, std::io::BufReader<std::process::ChildStdout>)> {
+    use std::io::BufReader;
+    use std::process::{Command, Stdio};
+    let mut child = Command::new("logcat")
+        .args(["-s", "ligfxprofilerd"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let stdout = child.stdout.take()?;
+    Some((child, BufReader::new(stdout)))
+}
+
+/// 解析 ligfxprofilerd logcat 行
+/// "[GPU0] Frame N: Frequency: 1000 Hz, ..., Busy=33.75%, ..., Utilization=33.75%"
+///   → LigfxSys { mhz: 1000, busy: 33.75, util: 33.75 }
+/// "[GPU0]   GVM_com.lixiang.eid-8925: Busy=15.38%, ..., Utilization=15.38%"
+///   → LigfxProc { name: "com.lixiang.eid", busy: 15.38, util: 15.38 }
+enum LigfxSample {
+    Sys { mhz: u32, busy: f32, util: f32 },
+    Proc { name: String, busy: f32, #[allow(dead_code)] util: f32 },
+}
+
+fn parse_ligfx_line(line: &str) -> Option<LigfxSample> {
+    if !line.contains("ligfxprofilerd") {
+        return None;
+    }
+    // 系统行：含 "Frame N:" 和 "Frequency:"
+    if line.contains("Frame ") && line.contains("Frequency:") {
+        let mhz = line.split("Frequency:").nth(1)?.split_whitespace().next()?.parse::<u32>().ok()?;
+        let busy = parse_pct_after(line, "Busy=")?;
+        let util = parse_pct_after(line, "Utilization=")?;
+        return Some(LigfxSample::Sys { mhz, busy, util });
+    }
+    // 进程行：含 "GVM_" 前缀的进程名
+    if line.contains("GVM_") {
+        // GVM_com.lixiang.eid-8925: Busy=15.38%, ..., Utilization=15.38%
+        let gvm_pos = line.find("GVM_")?;
+        let after = &line[gvm_pos + 4..]; // 去掉 "GVM_"
+        let name_end = after.find(':').unwrap_or(after.len());
+        let name = after[..name_end].split('-').next()?.trim().to_string();
+        let busy = parse_pct_after(line, "Busy=")?;
+        let util = parse_pct_after(line, "Utilization=")?;
+        return Some(LigfxSample::Proc { name, busy, util });
+    }
+    None
+}
+
+/// 从 "key=12.34%" 格式中提取 f32
+fn parse_pct_after(line: &str, key: &str) -> Option<f32> {
+    let pos = line.find(key)? + key.len();
+    line[pos..].split('%').next()?.trim().parse().ok()
+}
+
+
 /// 返回 None 表示无 Memory snapshot 段（该设备不支持）。
 fn parse_gpu_mem_snapshot(out: &str) -> Option<(u64, Vec<(u32, u64)>)> {
     if !out.contains("Memory snapshot") {
@@ -838,15 +1005,13 @@ fn main() {
         freq_enabled = false;
     }
     let gpu_path = if args.gpu {
-        // 平台提示：android → 跳过 QNX 探测，直接走 kgsl/dumpsys；
-        // ss3 → 跳过 kgsl 探测，直接走 QNX；其余 → 自动探测
-        let skip_kgsl = matches!(args.platform.as_deref(), Some("ss3"));
-        let skip_qnx = matches!(args.platform.as_deref(), Some("android" | "ss2max" | "ss2pro"));
-        let g = detect_gpu_path_ex(skip_kgsl, skip_qnx);
+        let g = detect_gpu_path_ex(args.platform.as_deref());
         match &g {
-            None => emit("{\"t\":\"err\",\"msg\":\"kgsl / QNX 通道 / dumpsys gpu 均不可用，--gpu 已禁用\"}"),
-            Some(GpuPath::Qnx) => emit("{\"t\":\"err\",\"msg\":\"kgsl sysfs 不存在，--gpu 走 QNX host 通道（真利用率 + 每进程 busy + 频率）\"}"),
-            Some(GpuPath::DumpMem) => emit("{\"t\":\"err\",\"msg\":\"kgsl 与 QNX 通道均不可用，--gpu 降级为每 PID GPU 显存（dumpsys gpu）\"}"),
+            None => emit("{\"t\":\"err\",\"msg\":\"GPU 数据源均不可用，--gpu 已禁用\"}"),
+            Some(GpuPath::Qnx) => emit("{\"t\":\"err\",\"msg\":\"--gpu 走 QNX host 通道（真利用率 + 每进程 busy + 频率）\"}"),
+            Some(GpuPath::TopGpu) => emit("{\"t\":\"err\",\"msg\":\"--gpu 走 topgpu 工具通道（SS2 平台）\"}"),
+            Some(GpuPath::Ligfx) => emit("{\"t\":\"err\",\"msg\":\"--gpu 走 ligfxprofilerd logcat 通道（SS4 平台）\"}"),
+            Some(GpuPath::DumpMem) => emit("{\"t\":\"err\",\"msg\":\"--gpu 降级为每 PID GPU 显存（dumpsys gpu）\"}"),
             Some(GpuPath::Kgsl(_)) => {}
         }
         g
@@ -953,6 +1118,76 @@ fn main() {
             }
         }
     }
+    // TopGpu 路径（SS2MAX）：独立读线程解析 topgpu 输出流
+    if matches!(gpu_path, Some(GpuPath::TopGpu)) {
+        let period_s = (args.interval_ms / 1000).max(1);
+        match spawn_topgpu(period_s) {
+            Some((mut child, mut reader)) => {
+                let pid_names2 = pid_names.clone();
+                std::thread::spawn(move || {
+                    use std::io::BufRead;
+                    let mut line = String::new();
+                    loop {
+                        line.clear();
+                        match reader.read_line(&mut line) {
+                            Ok(0) | Err(_) => { let _ = child.kill(); return; }
+                            Ok(_) => match parse_topgpu_line(&line) {
+                                Some(TopGpuSample::Sys(busy)) => emit(&format!(
+                                    "{{\"t\":\"gpu\",\"ts\":{},\"busy\":{:.2},\"mhz\":0}}", now_ms(), busy
+                                )),
+                                Some(TopGpuSample::Proc(name, busy)) => {
+                                    let pid = pid_names2.lock().unwrap().get(&name).copied();
+                                    if let Some(pid) = pid {
+                                        emit(&format!(
+                                            "{{\"t\":\"gpuproc\",\"ts\":{},\"pid\":{},\"busy\":{:.2}}}",
+                                            now_ms(), pid, busy
+                                        ));
+                                    }
+                                }
+                                None => {}
+                            },
+                        }
+                    }
+                });
+            }
+            None => emit("{\"t\":\"err\",\"msg\":\"topgpu 启动失败，--gpu 停止\"}"),
+        }
+    }
+    // Ligfx 路径（SS4）：独立读线程解析 logcat ligfxprofilerd 流
+    if matches!(gpu_path, Some(GpuPath::Ligfx)) {
+        match spawn_ligfx() {
+            Some((mut child, mut reader)) => {
+                let pid_names2 = pid_names.clone();
+                std::thread::spawn(move || {
+                    use std::io::BufRead;
+                    let mut line = String::new();
+                    loop {
+                        line.clear();
+                        match reader.read_line(&mut line) {
+                            Ok(0) | Err(_) => { let _ = child.kill(); return; }
+                            Ok(_) => match parse_ligfx_line(&line) {
+                                Some(LigfxSample::Sys { mhz, busy, util }) => emit(&format!(
+                                    "{{\"t\":\"gpu\",\"ts\":{},\"busy\":{:.2},\"util\":{:.2},\"mhz\":{}}}",
+                                    now_ms(), busy, util, mhz
+                                )),
+                                Some(LigfxSample::Proc { name, busy, util: _ }) => {
+                                    let pid = pid_names2.lock().unwrap().get(&name).copied();
+                                    if let Some(pid) = pid {
+                                        emit(&format!(
+                                            "{{\"t\":\"gpuproc\",\"ts\":{},\"pid\":{},\"busy\":{:.2}}}",
+                                            now_ms(), pid, busy
+                                        ));
+                                    }
+                                }
+                                None => {}
+                            },
+                        }
+                    }
+                });
+            }
+            None => emit("{\"t\":\"err\",\"msg\":\"ligfxprofilerd logcat 启动失败，--gpu 停止\"}"),
+        }
+    }
     let start = Instant::now();
     let mut round: u64 = 0;
     // 进程列表重扫间隔：约 1s 一次（低间隔下每轮扫 /proc 太贵）
@@ -991,8 +1226,8 @@ fn main() {
                 // 每轮重扫都报：让主机读循环在无进程期间也能定期收到行（保持 Ctrl-C 响应）
                 emit("{\"t\":\"noproc\"}");
             }
-            // QNX GPU 路径：进程行按 comm 名归因，重扫时同步映射表
-            if matches!(gpu_path, Some(GpuPath::Qnx)) {
+            // QNX/TopGpu/Ligfx GPU 路径：进程行按 comm 名归因，重扫时同步映射表
+            if matches!(gpu_path, Some(GpuPath::Qnx) | Some(GpuPath::TopGpu) | Some(GpuPath::Ligfx)) {
                 let mut m = pid_names.lock().unwrap();
                 m.clear();
                 for &pid in &active_pids {
@@ -1069,6 +1304,34 @@ fn main() {
                 }
             }
             Some(GpuPath::DumpMem) => {
+                if round.is_multiple_of(gpumem_every) && !active_pids.is_empty() {
+                    if let Some((global, procs)) = dumpsys(&["gpu"]).as_deref().and_then(parse_gpu_mem_snapshot) {
+                        for &pid in &active_pids {
+                            let bytes = procs.iter().find(|(p, _)| *p == pid).map(|(_, b)| *b).unwrap_or(0);
+                            emit(&format!(
+                                "{{\"t\":\"gpumem\",\"ts\":{},\"pid\":{},\"bytes\":{},\"global\":{}}}",
+                                ts, pid, bytes, global
+                            ));
+                        }
+                    }
+                }
+            }
+            Some(GpuPath::TopGpu) => {
+                // TopGpu 路径：由独立读线程异步发事件；补采 dumpsys gpu 显存
+                if round.is_multiple_of(gpumem_every) && !active_pids.is_empty() {
+                    if let Some((global, procs)) = dumpsys(&["gpu"]).as_deref().and_then(parse_gpu_mem_snapshot) {
+                        for &pid in &active_pids {
+                            let bytes = procs.iter().find(|(p, _)| *p == pid).map(|(_, b)| *b).unwrap_or(0);
+                            emit(&format!(
+                                "{{\"t\":\"gpumem\",\"ts\":{},\"pid\":{},\"bytes\":{},\"global\":{}}}",
+                                ts, pid, bytes, global
+                            ));
+                        }
+                    }
+                }
+            }
+            Some(GpuPath::Ligfx) => {
+                // Ligfx 路径：由独立读线程异步发事件；补采 dumpsys gpu 显存
                 if round.is_multiple_of(gpumem_every) && !active_pids.is_empty() {
                     if let Some((global, procs)) = dumpsys(&["gpu"]).as_deref().and_then(parse_gpu_mem_snapshot) {
                         for &pid in &active_pids {
@@ -1409,6 +1672,42 @@ mod tests {
         assert_eq!(procs, vec![(778, 628928512), (29697, 154370048)]);
         // 无 Memory snapshot 段 → None（该设备不支持降级路径）
         assert!(parse_gpu_mem_snapshot("garbage\n").is_none());
+    }
+
+    #[test]
+    fn test_parse_topgpu_line() {
+        assert!(matches!(parse_topgpu_line("sys gpu: 20.0%"), Some(TopGpuSample::Sys(v)) if (v - 20.0).abs() < 0.1));
+        match parse_topgpu_line("pid 1234 'com.app' gpu: 16.0% (80.0% of sys)") {
+            Some(TopGpuSample::Proc(name, busy)) => {
+                assert_eq!(name, "com.app");
+                assert!((busy - 16.0).abs() < 0.1);
+            }
+            other => panic!("应为 Proc: {:?}", other.map(|_| ())),
+        }
+        assert!(parse_topgpu_line("garbage").is_none());
+    }
+
+    #[test]
+    fn test_parse_ligfx_line() {
+        let sys = "05-13 16:55:14.656 21047 I ligfxprofilerd: [GPU0] Frame 4579: Frequency: 1000 Hz, Tasks: 3 total, GSL Timestamp: 27217418, Global: Busy=33.75%, Queued=57.43%, Utilization=33.75%";
+        match parse_ligfx_line(sys) {
+            Some(LigfxSample::Sys { mhz, busy, util }) => {
+                assert_eq!(mhz, 1000);
+                assert!((busy - 33.75).abs() < 0.1);
+                assert!((util - 33.75).abs() < 0.1);
+            }
+            other => panic!("应为 Sys: {:?}", other.map(|_| ())),
+        }
+        let proc = "05-13 16:55:14.656 21047 I ligfxprofilerd: [GPU0]   GVM_com.lixiang.eid-8925: Busy=15.38%, Queued=46.98%, Utilization=15.38%";
+        match parse_ligfx_line(proc) {
+            Some(LigfxSample::Proc { name, busy, util }) => {
+                assert_eq!(name, "com.lixiang.eid");
+                assert!((busy - 15.38).abs() < 0.1);
+                assert!((util - 15.38).abs() < 0.1);
+            }
+            other => panic!("应为 Proc: {:?}", other.map(|_| ())),
+        }
+        assert!(parse_ligfx_line("random logcat line").is_none());
     }
 
     #[test]
