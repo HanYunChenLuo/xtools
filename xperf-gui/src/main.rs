@@ -129,7 +129,22 @@ fn spawn_sampling(app: tauri::AppHandle, package: String, interval: u64, cpu: bo
                     }
                 }
                 Ok(Some(Err(e))) => eprintln!("[sampling] 协议解析失败: {}", e),
-                Ok(None) | Err(_) => break, // EOF：agent 退出/断连
+                // EOF/读错误：adb 长连接断开或 agent 退出 → 等待设备恢复并重连（不停止采样）
+                Ok(None) | Err(_) => {
+                    eprintln!("[sampling] 连接断开，等待设备恢复…");
+                    let running2 = running.clone();
+                    match agent::reconnect_agent(
+                        Some(&package), interval, cpu, memory, fps,
+                        &move || *running2.lock().unwrap(),
+                    ) {
+                        Some(s) => {
+                            stream = s;
+                            eprintln!("[sampling] 已重连，恢复采样");
+                            continue;
+                        }
+                        None => break, // 用户停止
+                    }
+                }
             }
         }
     });
