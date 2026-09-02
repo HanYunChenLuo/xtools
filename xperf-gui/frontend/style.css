@@ -1,11 +1,11 @@
 * { box-sizing: border-box; margin: 0; padding: 0; }
 body { font-family: -apple-system, "Segoe UI", "Noto Sans CJK SC", "PingFang SC", sans-serif; display: flex; height: 100vh; -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility; }
 .hidden { display: none !important; }
-#sidebar { width: 260px; padding: 16px; background: #1e1e2e; color: #cdd6f4; overflow-y: auto; }
+#sidebar { width: 280px; padding: 16px; background: #1e1e2e; color: #cdd6f4; overflow-y: auto; overflow-x: hidden; }
 #sidebar h2 { margin-bottom: 16px; color: #89b4fa; }
 #sidebar label { display: block; margin: 8px 0; font-size: 13px; }
 #sidebar input[type=text], #sidebar input[type=number] { width: 100%; padding: 4px; margin-top: 2px; background: #313244; color: #cdd6f4; border: 1px solid #45475a; border-radius: 3px; }
-.checkboxes { display: flex; gap: 12px; margin: 8px 0; }
+.checkboxes { display: flex; flex-wrap: wrap; gap: 8px 12px; margin: 8px 0; }
 #sidebar button { width: 100%; padding: 8px; margin: 4px 0; border: none; border-radius: 4px; cursor: pointer; font-size: 14px; }
 #sidebar button.small { width: 100%; padding: 5px; font-size: 12px; background: #45475a; color: #cdd6f4; }
 #startBtn { background: #a6e3a1; color: #1e1e2e; }
