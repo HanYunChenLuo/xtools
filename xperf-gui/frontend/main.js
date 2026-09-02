@@ -210,15 +210,16 @@ setInterval(renderThreads, 500);
 
 let eventCount = 0;
 function updateTitle() {
-  // 统计图表真实数据源（cpuChart.series / memChart.series）
-  let cpuPoints = 0, memPoints = 0;
+  // 统计图表真实数据源
+  let cpuPoints = 0, memPoints = 0, fpsPoints = 0;
   for (const s of Object.values(cpuChart.series)) cpuPoints += s.length;
   for (const s of Object.values(memChart.series)) memPoints += s.length;
+  for (const s of Object.values(fpsChart.series)) fpsPoints += s.length;
   const pidCount = new Set([...Object.keys(cpuChart.series), ...Object.keys(memChart.series)]).size;
-  document.title = `XPerformance | ok | events:${eventCount} | pids:${pidCount} | cpu:${cpuPoints},mem:${memPoints}`;
+  document.title = `XPerformance | ok | events:${eventCount} | pids:${pidCount} | cpu:${cpuPoints},mem:${memPoints},fps:${fpsPoints}`;
   // 每 20 个事件上报一次图表数据积压（证明图表已累积数据点）
   if (eventCount % 20 === 0) {
-    _diag(`frontend state: events=${eventCount} pids=${pidCount} cpuPoints=${cpuPoints} memPoints=${memPoints}`);
+    _diag(`frontend state: events=${eventCount} pids=${pidCount} cpuPoints=${cpuPoints} memPoints=${memPoints} fpsPoints=${fpsPoints} fpsBox=${document.getElementById('fps').checked} fpsHidden=${document.getElementById('fpsChartBox').classList.contains('hidden')}`);
   }
 }
 window.addEventListener('error', (e) => {
@@ -387,6 +388,7 @@ document.getElementById('startBtn').addEventListener('click', async () => {
     _diag('startBtn invoking start_sampling: pkg=' + package + ' interval=' + interval);
     await invoke('start_sampling', { package, interval, cpu, memory, fps, freq, thermal, gpu, io, net });
     _diag('start_sampling RETURNED OK');
+    samplingRunning = true;
     document.getElementById('startBtn').disabled = true;
     document.getElementById('stopBtn').disabled = false;
     document.getElementById('status').textContent = '监控中: ' + package;
@@ -399,6 +401,7 @@ document.getElementById('startBtn').addEventListener('click', async () => {
 document.getElementById('stopBtn').addEventListener('click', async () => {
   _diag('stopBtn CLICKED');
   await invoke('stop_sampling');
+  samplingRunning = false;
   _diag('stop_sampling returned');
   document.getElementById('startBtn').disabled = false;
   document.getElementById('stopBtn').disabled = true;
@@ -411,7 +414,7 @@ function toggleCharts() {
   const pairs = [
     ['cpu', 'cpuChartBox'], ['memory', 'memChartBox'], ['fps', 'fpsChartBox'],
     ['freq', 'freqChartBox'], ['thermal', 'tempChartBox'], ['gpu', 'gpuChartBox'],
-    ['gpu', 'gpumemChartBox'], // --gpu 降级路径（hypervisor 平台）的显存图与 busy 图同开关
+    ['gpu', 'gpumemChartBox'], // --gpu 保底路径（hypervisor 平台）的显存图与 busy 图同开关
     ['io', 'ioChartBox'], ['net', 'netChartBox'],
   ];
   for (const [id, boxId] of pairs) {
@@ -422,8 +425,35 @@ function toggleCharts() {
   // 容器显隐变化后 chart 尺寸需刷新
   setTimeout(() => { for (const c of allCharts) c.resize(); }, 50);
 }
+
+// ---- 勾选即生效：监控运行中改指标勾选 → 重启采样会话应用新 flag 集 ----
+let samplingRunning = false;
+let restartTimer = null;
+function currentFlags() {
+  const g = (id) => document.getElementById(id).checked;
+  return {
+    package: document.getElementById('package').value,
+    interval: parseInt(document.getElementById('interval').value, 10),
+    cpu: g('cpu'), memory: g('memory'), fps: g('fps'), freq: g('freq'),
+    thermal: g('thermal'), gpu: g('gpu'), io: g('io'), net: g('net'),
+  };
+}
+async function restartSampling() {
+  await invoke('stop_sampling');
+  const f = currentFlags();
+  _diag('restart sampling with flags: ' + JSON.stringify(f));
+  await invoke('start_sampling', f);
+  document.getElementById('status').textContent = '监控中: ' + f.package;
+}
+function onMetricToggle() {
+  toggleCharts();
+  if (!samplingRunning) return;
+  // 连续切换去抖 500ms，避免一次改多项时反复重启 agent
+  if (restartTimer) clearTimeout(restartTimer);
+  restartTimer = setTimeout(() => { restartTimer = null; restartSampling().catch((e) => _diag('restart ERROR: ' + e)); }, 500);
+}
 for (const id of ['cpu', 'memory', 'fps', 'freq', 'thermal', 'gpu', 'io', 'net']) {
-  document.getElementById(id).addEventListener('change', toggleCharts);
+  document.getElementById(id).addEventListener('change', onMetricToggle);
 }
 toggleCharts();
 
@@ -477,6 +507,7 @@ loadPackages();
 // ---- 初始化同步按钮状态（自动启动时开始按钮应禁用）----
 invoke('is_running').then((running) => {
   if (running) {
+    samplingRunning = true;
     document.getElementById('startBtn').disabled = true;
     document.getElementById('stopBtn').disabled = false;
     document.getElementById('status').textContent = '监控中';

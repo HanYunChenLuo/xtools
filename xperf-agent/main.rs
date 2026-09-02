@@ -107,8 +107,8 @@ fn parse_args() -> Result<Args, String> {
     if !(cpu || memory || fps || freq || io || net || gpu || thermal) {
         return Err("需要至少一个采样开关（--cpu/--memory/--fps/--freq/--io/--net/--gpu/--thermal）".into());
     }
-    if interval_ms == 0 {
-        return Err("--interval 不能为 0".into());
+    if interval_ms < 50 {
+        return Err("--interval 最小 50ms（更低会撞上 jiffies 粒度（10ms）且采样开销占比过高）".into());
     }
     Ok(Args { package, pids, interval_ms, cpu, memory, fps, freq, io, net, gpu, thermal })
 }

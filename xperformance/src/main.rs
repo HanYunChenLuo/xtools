@@ -57,8 +57,8 @@ struct Args {
     #[arg(long)]
     net: bool,
 
-    /// Sampling interval in milliseconds (default: 1000)
-    #[arg(short, long, default_value_t = 1000)]
+    /// Sampling interval in milliseconds (default: 1000, min: 50)
+    #[arg(short, long, default_value_t = 1000, value_parser = clap::value_parser!(u64).range(50..))]
     interval: u64,
 }
 

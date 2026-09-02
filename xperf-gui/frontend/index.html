@@ -14,8 +14,16 @@
       <datalist id="pkgList"></datalist>
       <button id="refreshPkgs" class="small">刷新包列表</button>
     </label>
-    <label>Interval (ms):
-      <input id="interval" type="number" value="1000" min="50" />
+    <label>采样间隔:
+      <select id="interval">
+        <option value="50">50ms（极限，高采样开销）</option>
+        <option value="100">100ms（高频）</option>
+        <option value="200">200ms</option>
+        <option value="500">500ms</option>
+        <option value="1000" selected>1000ms（默认）</option>
+        <option value="2000">2000ms</option>
+        <option value="5000">5000ms（长测低扰动）</option>
+      </select>
     </label>
     <div class="checkboxes">
       <label><input id="cpu" type="checkbox" checked /> CPU</label>
