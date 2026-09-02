@@ -10,6 +10,8 @@ use std::sync::Arc;
 use tokio::time::Instant;
 
 mod utils;
+mod alerts;
+mod coldstart;
 use utils as cli_utils;
 
 use xperf_core::ThreadCpuInfo;
@@ -60,6 +62,14 @@ struct Args {
     /// Sampling interval in milliseconds (default: 1000, min: 50)
     #[arg(short, long, default_value_t = 1000, value_parser = clap::value_parser!(u64).range(50..))]
     interval: u64,
+
+    /// 阈值告警（逗号分隔，如 cpu>80,mem>500,fps<30,gpu>90；超阈值实时打印告警，退出时输出达标报告）
+    #[arg(long, value_delimiter = ',')]
+    threshold: Vec<String>,
+
+    /// 冷启动时间测量：am start -W 指定 Activity（如 .MainActivity），输出 TotalTime/WaitTime/Complete
+    #[arg(long)]
+    cold_start: Option<String>,
 }
 
 fn check_adb() -> Result<()> {
@@ -100,6 +110,35 @@ async fn monitor_process(args: &Args) -> Result<(), Box<dyn std::error::Error>> 
     monitor_process_agent(args, flags).await
 }
 
+/// 冷启动测量（独立于采样，先执行再开始监控）
+fn run_cold_start(args: &Args) {
+    if let Some(ref activity) = args.cold_start {
+        println!("{}", "========== 冷启动测量 ==========".green().bold());
+        match coldstart::measure(&args.package, activity) {
+            Ok(r) => println!("{}", r.summary().cyan()),
+            Err(e) => println!("{}", format!("冷启动测量失败: {}", e).yellow()),
+        }
+        println!("{}", "================================".green().bold());
+    }
+}
+
+/// 阈值检查：超阈值时实时打印告警并记录统计
+fn check_threshold(
+    thresholds: &[alerts::Threshold],
+    stats: &Arc<std::sync::Mutex<alerts::AlertStats>>,
+    metric: &str,
+    value: f32,
+    t: &DateTime<Local>,
+) {
+    let triggered = alerts::check_value(thresholds, metric, value);
+    if triggered.is_empty() { return; }
+    let time_str = t.format("%H:%M:%S").to_string();
+    for t in triggered {
+        println!("{}", format!("[{}] ⚠️ 告警: {} {:.1} {} {}", time_str, t.metric, value, t.op, t.value).red().bold());
+        stats.lock().unwrap().record(&t.raw, value, &time_str);
+    }
+}
+
 fn metric_flags(args: &Args) -> xperf_core::MetricFlags {
     xperf_core::MetricFlags {
         cpu: args.cpu,
@@ -127,6 +166,11 @@ async fn monitor_process_agent(args: &Args, flags: xperf_core::MetricFlags) -> R
     println!("agent 已部署并启动（间隔 {}ms）", args.interval);
 
     let verbose = args.interval >= 500;
+    let thresholds = alerts::parse_thresholds(&args.threshold);
+    let alert_stats = Arc::new(std::sync::Mutex::new(alerts::AlertStats::default()));
+    if !thresholds.is_empty() {
+        println!("阈值规则: {}", thresholds.iter().map(|t| &t.raw).cloned().collect::<Vec<_>>().join(", "));
+    }
 
     let running = Arc::new(AtomicBool::new(true));
     let r = running.clone();
@@ -244,6 +288,7 @@ async fn monitor_process_agent(args: &Args, flags: xperf_core::MetricFlags) -> R
                     s.cpu_usage = cpu;
                     s.cpu_time = Some(t);
                 }
+                check_threshold(&thresholds, &alert_stats, "cpu", cpu, &t);
                 if args.thread {
                     let per_pid = thread_time_series.entry(pid.to_string()).or_default();
                     for t2 in threads {
@@ -308,6 +353,7 @@ async fn monitor_process_agent(args: &Args, flags: xperf_core::MetricFlags) -> R
                     s.memory_usage = pss;
                     s.memory_time = Some(t);
                 }
+                check_threshold(&thresholds, &alert_stats, "mem", pss as f32 / 1024.0, &t); // MB
                 let a = aggs.entry(pid).or_default();
                 a.pss = pss;
                 a.rss = rss;
@@ -334,6 +380,7 @@ async fn monitor_process_agent(args: &Args, flags: xperf_core::MetricFlags) -> R
                 s.active = true;
                 s.fps_data.add_data_point(t, fps, jank, &layer);
                 csv.fps_row(&args.package, pid, t, &layer, fps, jank);
+                check_threshold(&thresholds, &alert_stats, "fps", fps, &t);
                 let a = aggs.entry(pid).or_default();
                 a.fps = Some((layer, fps, jank));
             }
@@ -414,6 +461,7 @@ async fn monitor_process_agent(args: &Args, flags: xperf_core::MetricFlags) -> R
                 csv.gpu_row(&args.package, t, busy, util, mhz, maxmhz);
                 extra.push_gpu(t, busy, util, mhz);
                 latest_gpu = Some((busy, mhz));
+                check_threshold(&thresholds, &alert_stats, "gpu", busy, &t);
             }
             AgentEvent::GpuProc { ts, pid, busy } => {
                 let Some(t) = DateTime::from_timestamp_millis(ts as i64)
@@ -545,6 +593,11 @@ async fn monitor_process_agent(args: &Args, flags: xperf_core::MetricFlags) -> R
     drop(stream); // 杀掉设备端 agent（Drop 里 kill）
     generate_final_outputs(args, &pid_stats, &thread_time_series, &extra)?;
     println!("Process Restarts: {}", restart_count.to_string().red());
+    // 验证报告
+    if !thresholds.is_empty() {
+        let stats = alert_stats.lock().unwrap();
+        println!("{}", alerts::generate_report(&thresholds, &stats));
+    }
     Ok(())
 }
 
@@ -975,6 +1028,7 @@ fn generate_memory_summary_chart(
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
+    run_cold_start(&args);
     if let Err(e) = monitor_process(&args).await {
         eprintln!("Monitor error: {}", e);
     }
