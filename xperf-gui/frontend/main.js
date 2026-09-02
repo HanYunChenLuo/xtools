@@ -447,6 +447,7 @@ async function restartSampling() {
 }
 function onMetricToggle() {
   toggleCharts();
+  updateEffectiveRates();
   if (!samplingRunning) return;
   // 连续切换去抖 500ms，避免一次改多项时反复重启 agent
   if (restartTimer) clearTimeout(restartTimer);
@@ -456,6 +457,39 @@ for (const id of ['cpu', 'memory', 'fps', 'freq', 'thermal', 'gpu', 'io', 'net']
   document.getElementById(id).addEventListener('change', onMetricToggle);
 }
 toggleCharts();
+
+// ---- 实际采样周期展示：各指标限频不同，动态计算并显示 ----
+function fmtPeriod(ms) {
+  if (ms >= 1000) return (ms / 1000) + 's';
+  return ms + 'ms';
+}
+function updateEffectiveRates() {
+  const interval = parseInt(document.getElementById('interval').value, 10);
+  // 与 agent 端限频逻辑一致（见 xperf-agent/main.rs）
+  const metrics = [
+    { id: 'cpu',      name: 'CPU',   period: interval },
+    { id: 'memory',   name: '内存',   period: interval },
+    { id: 'fps',      name: 'FPS',   period: Math.ceil(500 / interval) * interval },
+    { id: 'freq',     name: '频率',   period: interval },
+    { id: 'thermal',  name: '温度',   period: Math.ceil(2000 / interval) * interval },
+    { id: 'gpu',      name: 'GPU',   period: Math.max(100, Math.min(interval, 1000)) },
+    { id: 'io',       name: 'IO',    period: interval },
+    { id: 'net',      name: '网络',   period: interval },
+  ];
+  const enabled = metrics.filter(m => document.getElementById(m.id).checked);
+  if (enabled.length === 0) {
+    document.getElementById('effectiveRates').innerHTML = '';
+    return;
+  }
+  const parts = enabled.map(m => {
+    const same = m.period === interval;
+    return `<span class="${same ? 'rate-same' : 'rate-limited'}">${m.name}: ${fmtPeriod(m.period)}</span>`;
+  });
+  document.getElementById('effectiveRates').innerHTML =
+    '<span class="rate-label">实际周期</span> ' + parts.join(' · ');
+}
+document.getElementById('interval').addEventListener('change', updateEffectiveRates);
+updateEffectiveRates();
 
 // ---- 时间窗口：跟随最新 / 全部历史 ----
 document.getElementById('timeWindow').addEventListener('change', (e) => {

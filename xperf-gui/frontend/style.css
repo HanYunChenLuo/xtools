@@ -28,3 +28,7 @@ body { font-family: -apple-system, "Segoe UI", "Noto Sans CJK SC", "PingFang SC"
 .panel table { width: 100%; border-collapse: collapse; font-size: 12px; }
 .panel th { text-align: left; color: #6c7086; font-weight: 500; padding: 2px 8px 2px 0; }
 .panel td { padding: 2px 8px 2px 0; font-variant-numeric: tabular-nums; }
+.effective-rates { font-size: 11px; color: #6c7086; margin: 4px 0 8px; line-height: 1.6; }
+.effective-rates .rate-label { font-weight: 600; }
+.effective-rates .rate-same { color: #a6e3a1; }
+.effective-rates .rate-limited { color: #f9e2af; }
