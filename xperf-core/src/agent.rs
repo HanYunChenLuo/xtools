@@ -76,6 +76,8 @@ pub enum AgentEvent {
     Net { ts: u64, rx: f32, tx: f32 },
     /// GPU：busy 为窗口内 busy 占比 %；mhz 为当前时钟（0 = 无时钟源）
     Gpu { ts: u64, busy: f32, mhz: u32 },
+    /// --gpu 降级路径（GPU 在 hypervisor 后的平台）：每 PID GPU 显存字节 + 整机 global
+    GpuMem { ts: u64, pid: u32, bytes: u64, global: u64 },
     /// 温度与热降频：status 为 Android ThermalStatus（-1=未知）；sensors 为 [名称, 类型, °C]
     Temp { ts: u64, status: i32, #[serde(default)] sensors: Vec<(String, i32, f32)> },
     Exit { pid: u32 },
@@ -263,6 +265,14 @@ mod tests {
         match ev {
             AgentEvent::Gpu { busy, mhz, .. } => assert_eq!((busy, mhz), (37.5, 585)),
             _ => panic!("应为 Gpu 事件"),
+        }
+        let ev: AgentEvent =
+            serde_json::from_str(r#"{"t":"gpumem","ts":1,"pid":29697,"bytes":154370048,"global":2639089664}"#).unwrap();
+        match ev {
+            AgentEvent::GpuMem { pid, bytes, global, .. } => {
+                assert_eq!((pid, bytes, global), (29697, 154370048, 2639089664));
+            }
+            _ => panic!("应为 GpuMem 事件"),
         }
         let ev: AgentEvent = serde_json::from_str(
             r#"{"t":"temp","ts":1,"status":0,"sensors":[["soc0",0,42.5],["skin",3,41.0]]}"#,

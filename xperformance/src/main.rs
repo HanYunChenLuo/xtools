@@ -152,6 +152,7 @@ async fn monitor_process_agent(args: &Args, flags: xperf_core::MetricFlags) -> R
         has_mem: bool,
         fps: Option<(String, f32, u32)>, // 最新 (图层, fps, jank)
         io: Option<(f32, f32)>,          // 最新 (读 KB/s, 写 KB/s)
+        gpumem: Option<(f32, f32)>,      // 最新 (进程 MB, 整机 MB)
     }
     let mut aggs: std::collections::HashMap<u32, Agg> = Default::default();
     // 设备级指标的最新值（聚合模式每秒打印一次）
@@ -405,6 +406,27 @@ async fn monitor_process_agent(args: &Args, flags: xperf_core::MetricFlags) -> R
                 extra.push_gpu(t, busy, mhz);
                 latest_gpu = Some((busy, mhz));
             }
+            AgentEvent::GpuMem { ts, pid, bytes, global } => {
+                let Some(t) = DateTime::from_timestamp_millis(ts as i64)
+                    .map(|t| t.with_timezone(&Local))
+                else {
+                    continue;
+                };
+                let mb = bytes as f32 / 1e6;
+                let global_mb = global as f32 / 1e6;
+                if verbose {
+                    println!(
+                        "[{}] GPU Mem: {} MB（整机 {} MB）[pid {}]",
+                        t.format("%H:%M:%S"),
+                        format!("{:.1}", mb).blue(),
+                        format!("{:.0}", global_mb).blue(),
+                        pid.to_string().yellow()
+                    );
+                }
+                csv.gpumem_row(&args.package, pid, t, mb, global_mb);
+                extra.push_gpumem(pid, t, mb, global_mb);
+                aggs.entry(pid).or_default().gpumem = Some((mb, global_mb));
+            }
             AgentEvent::Temp { ts, status, sensors } => {
                 let Some(t) = DateTime::from_timestamp_millis(ts as i64)
                     .map(|t| t.with_timezone(&Local))
@@ -457,6 +479,9 @@ async fn monitor_process_agent(args: &Args, flags: xperf_core::MetricFlags) -> R
                 }
                 if let Some((r, w)) = a.io {
                     parts.push(format!("IO R {} / W {} KB/s", format!("{:.1}", r).blue(), format!("{:.1}", w).yellow()));
+                }
+                if let Some((mb, gmb)) = a.gpumem {
+                    parts.push(format!("GPU Mem {} MB（整机 {:.0}）", format!("{:.1}", mb).blue(), gmb));
                 }
                 if !parts.is_empty() {
                     println!("[{}] {} (pid: {})", ts, parts.join(" | "), pid.to_string().yellow());
@@ -548,6 +573,29 @@ fn generate_extra_charts(timestamp_dir: &Path, package: &str, extra: &cli_utils:
         match cli_utils::generate_multi_line_chart(&dir.join("gpu_chart.png"), &format!("GPU Busy - {}", package), "%", &series) {
             Ok(p) => println!("✓ GPU chart generated: {}", p.display()),
             Err(e) => println!("Failed to generate gpu chart: {}", e),
+        }
+    }
+    // GPU 显存（--gpu 降级路径）：每 PID 一条线 + 整机一条
+    if extra.gpumem.values().any(|v| v.len() > 1) {
+        let dir = timestamp_dir.join("gpumem");
+        let _ = std::fs::create_dir_all(&dir);
+        let mut series: Vec<cli_utils::NamedSeries> = Vec::new();
+        let mut pids: Vec<u32> = extra.gpumem.keys().copied().collect();
+        pids.sort_unstable();
+        let mut global: Option<cli_utils::SeriesPoints> = None;
+        for pid in pids {
+            let samples = &extra.gpumem[&pid];
+            series.push((format!("PID {}", pid), samples.iter().map(|(t, mb, _)| (*t, *mb)).collect()));
+            if global.is_none() {
+                global = Some(samples.iter().map(|(t, _, g)| (*t, *g)).collect());
+            }
+        }
+        if let Some(g) = global {
+            series.push(("global".to_string(), g));
+        }
+        match cli_utils::generate_multi_line_chart(&dir.join("gpumem_chart.png"), &format!("GPU Memory - {}", package), "MB", &series) {
+            Ok(p) => println!("✓ GPU mem chart generated: {}", p.display()),
+            Err(e) => println!("Failed to generate gpu mem chart: {}", e),
         }
     }
     if extra.net.len() > 1 {

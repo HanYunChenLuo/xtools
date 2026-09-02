@@ -117,6 +117,8 @@ pub enum SampleEvent {
     TempUpdate { timestamp: DateTime<Local>, status: i32, sensors: Vec<(String, i32, f32)> },
     /// GPU：busy 为窗口占比 %；mhz 为当前时钟（0 = 无时钟源）
     GpuUpdate { timestamp: DateTime<Local>, busy: f32, mhz: u32 },
+    /// GPU 显存（--gpu 降级路径，hypervisor 平台）：每 PID 字节数 + 整机 global
+    GpuMemUpdate { pid: String, timestamp: DateTime<Local>, bytes: u64, global: u64 },
     /// 每 PID IO 速率 KB/s：r/w=逻辑读写，dr/dw=磁盘读写
     IoUpdate { pid: String, timestamp: DateTime<Local>, r: f32, w: f32, dr: f32, dw: f32 },
     /// 整机网络速率 KB/s（聚合物理口，排除回环/隧道；per-app 无数据源）

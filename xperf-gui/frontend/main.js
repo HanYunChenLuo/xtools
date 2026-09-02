@@ -154,9 +154,10 @@ const fpsChart = new LineChart('fpsChart', 'FPS', 'fps'); // 自适应纵轴（3
 const freqChart = new LineChart('freqChart', 'CPU Frequency (MHz)', 'MHz'); // 每核一条线
 const tempChart = new LineChart('tempChart', 'Temperature (°C)', '°C'); // 每传感器一条线；thermal status 写入标题
 const gpuChart = new LineChart('gpuChart', 'GPU Busy (%)', '%', 100);
+const gpumemChart = new LineChart('gpumemChart', 'GPU Memory (MB)', 'MB'); // --gpu 降级路径（hypervisor 平台）：每 PID 一条
 const ioChart = new LineChart('ioChart', 'IO (KB/s)', 'KB/s'); // 每 PID 读/写各一条
 const netChart = new LineChart('netChart', 'Network 整机 (KB/s)', 'KB/s');
-const allCharts = [cpuChart, memChart, fpsChart, freqChart, tempChart, gpuChart, ioChart, netChart];
+const allCharts = [cpuChart, memChart, fpsChart, freqChart, tempChart, gpuChart, gpumemChart, ioChart, netChart];
 _diag('charts initialized');
 
 // pid -> { cpu, mem, new }
@@ -171,6 +172,7 @@ const fpsHist = {};
 const tempHist = {}; // 传感器名 -> [{t, v, status}]
 const ioHist = {};   // pid -> [{t, r, w, dr, dw}]
 const gpuHist = [];  // [{t, busy, mhz}]
+const gpumemHist = {}; // pid -> [{t, mb, gmb}]（--gpu 降级路径）
 let maxkhz = [];     // AgentHello 带的每核最大频率（KHz）
 
 function fmtTime(t) { return new Date(t).toTimeString().slice(0, 8); }
@@ -305,6 +307,18 @@ listen('sample', (e) => {
     gpuChart.push('busy', t, +busy.toFixed(2));
     gpuHist.push({ t, busy, mhz });
     try { gpuChart.draw(); } catch (err) { _diag('gpuChart.draw ERROR: ' + err.message); }
+  } else if (ev.GpuMemUpdate) {
+    // --gpu 降级路径（hypervisor 平台）：每 PID GPU 显存
+    const { pid, timestamp, bytes, global } = ev.GpuMemUpdate;
+    if (!pidData[pid]) { pidData[pid] = { cpu: [], mem: [], new: true }; renderPidList(); }
+    autoCheck('gpu');
+    const t = new Date(timestamp).getTime();
+    const mb = bytes / 1e6;
+    gpumemChart.push('PID ' + pid, t, +mb.toFixed(1));
+    gpumemChart.push('global', t, Math.round(global / 1e6));
+    if (!gpumemHist[pid]) gpumemHist[pid] = [];
+    gpumemHist[pid].push({ t, mb, gmb: global / 1e6 });
+    try { gpumemChart.draw(); } catch (err) { _diag('gpumemChart.draw ERROR: ' + err.message); }
   } else if (ev.IoUpdate) {
     const { pid, timestamp, r, w, dr, dw } = ev.IoUpdate;
     if (!pidData[pid]) { pidData[pid] = { cpu: [], mem: [], new: true }; renderPidList(); }
@@ -350,6 +364,7 @@ document.getElementById('startBtn').addEventListener('click', async () => {
   for (const k of Object.keys(fpsHist)) delete fpsHist[k];
   for (const k of Object.keys(tempHist)) delete tempHist[k];
   for (const k of Object.keys(ioHist)) delete ioHist[k];
+  for (const k of Object.keys(gpumemHist)) delete gpumemHist[k];
   gpuHist.length = 0;
   renderPeaks();
   renderPidList();
@@ -382,6 +397,7 @@ function toggleCharts() {
   const pairs = [
     ['cpu', 'cpuChartBox'], ['memory', 'memChartBox'], ['fps', 'fpsChartBox'],
     ['freq', 'freqChartBox'], ['thermal', 'tempChartBox'], ['gpu', 'gpuChartBox'],
+    ['gpu', 'gpumemChartBox'], // --gpu 降级路径（hypervisor 平台）的显存图与 busy 图同开关
     ['io', 'ioChartBox'], ['net', 'netChartBox'],
   ];
   for (const [id, boxId] of pairs) {
@@ -406,17 +422,18 @@ document.getElementById('timeWindow').addEventListener('change', (e) => {
 // ---- 导出 CSV：把前端持有的完整会话历史发给后端写盘 ----
 document.getElementById('exportBtn').addEventListener('click', async () => {
   const pkg = document.getElementById('package').value || 'unknown';
-  const cpu = {}, mem = {}, fps = {}, freq = {}, temp = {}, io = {};
+  const cpu = {}, mem = {}, fps = {}, freq = {}, temp = {}, io = {}, gpumem = {};
   for (const [k, pts] of Object.entries(cpuChart.series)) cpu[k.replace('PID ', '')] = pts.map(p => [p.t, p.v]);
   for (const [k, pts] of Object.entries(memChart.series)) mem[k.replace('PID ', '')] = pts.map(p => [p.t, p.v]);
   for (const [layer, pts] of Object.entries(fpsHist)) fps[layer] = pts.map(p => [p.t, p.fps, p.jank]);
   for (const [core, pts] of Object.entries(freqChart.series)) freq[core] = pts.map(p => [p.t, p.v]);
   for (const [sensor, pts] of Object.entries(tempHist)) temp[sensor] = pts.map(p => [p.t, p.v, p.status]);
   for (const [pid, pts] of Object.entries(ioHist)) io[pid] = pts.map(p => [p.t, p.r, p.w, p.dr, p.dw]);
+  for (const [pid, pts] of Object.entries(gpumemHist)) gpumem[pid] = pts.map(p => [p.t, p.mb, p.gmb]);
   const gpu = gpuHist.map(p => [p.t, p.busy, p.mhz]);
   const net = (netChart.series['RX'] || []).map((p, i) => [p.t, p.v, (netChart.series['TX'] || [])[i]?.v ?? 0]);
   try {
-    const dir = await invoke('export_csv', { package: pkg, cpu, mem, fps, freq, temp, gpu, io, net });
+    const dir = await invoke('export_csv', { package: pkg, cpu, mem, fps, freq, temp, gpu, io, net, gpumem });
     document.getElementById('status').textContent = '已导出: ' + dir;
   } catch (e) {
     document.getElementById('status').textContent = '导出失败: ' + e;

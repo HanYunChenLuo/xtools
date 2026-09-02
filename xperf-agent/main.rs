@@ -14,7 +14,8 @@
 //!   {"t":"freq","ts":<wall_ms>,"khz":[2592000,...]}              // 每核当前频率，下标对应 hello 的 maxkhz
 //!   {"t":"io","ts":<wall_ms>,"pid":29697,"r":12.3,"w":4.5,"dr":0.0,"dw":1.2}  // KB/s；r/w=rchar/wchar 逻辑读写，dr/dw=read_bytes/write_bytes 磁盘读写
 //!   {"t":"net","ts":<wall_ms>,"rx":123.4,"tx":56.7}              // KB/s 整机口径（聚合物理口，排除回环/隧道；per-app 无数据源）
-//!   {"t":"gpu","ts":<wall_ms>,"busy":37.5,"mhz":585}             // kgsl gpubusy 差值占比；GPU 在 hypervisor 后的平台无 sysfs，探测失败则不启用
+//!   {"t":"gpu","ts":<wall_ms>,"busy":37.5,"mhz":585}             // kgsl gpubusy 差值占比；GPU 在 hypervisor 后的平台无 sysfs
+//!   {"t":"gpumem","ts":<wall_ms>,"pid":29697,"bytes":628928512,"global":2639089664}  // --gpu 降级路径：dumpsys gpu 每 PID GPU 显存（GPU 利用率的替代指标）
 //!   {"t":"temp","ts":<wall_ms>,"status":0,"sensors":[["soc0",4,42.5],...]}    // status=Android ThermalStatus（-1=未知）；sensors=[名称,类型,°C]
 //!   {"t":"exit","pid":29697}
 //!   {"t":"noproc"}
@@ -285,6 +286,49 @@ fn parse_gpu_busy(content: &str) -> Option<(u64, u64)> {
     let busy = it.next()?.parse().ok()?;
     let total = it.next()?.parse().ok()?;
     Some((busy, total))
+}
+
+/// GPU 采样路径：kgsl（利用率+时钟）→ 降级 dumpsys gpu（每 PID 显存）。
+/// GPU 在 hypervisor 后的车机平台无 kgsl，但 dumpsys gpu 的显存快照仍可用（~11ms）。
+enum GpuPath {
+    Kgsl(Kgsl),
+    DumpMem,
+}
+
+fn detect_gpu_path() -> Option<GpuPath> {
+    if let Some(k) = detect_kgsl() {
+        return Some(GpuPath::Kgsl(k));
+    }
+    // 降级探测：dumpsys gpu 有 "Memory snapshot" 段即可用
+    let out = dumpsys(&["gpu"])?;
+    parse_gpu_mem_snapshot(&out).map(|_| GpuPath::DumpMem)
+}
+
+/// 解析 dumpsys gpu 的显存快照："Global total: N" + "Proc <pid> total: N"（字节）。
+/// 返回 None 表示无 Memory snapshot 段（该设备不支持）。
+fn parse_gpu_mem_snapshot(out: &str) -> Option<(u64, Vec<(u32, u64)>)> {
+    if !out.contains("Memory snapshot") {
+        return None;
+    }
+    let mut global = None;
+    let mut procs = Vec::new();
+    for line in out.lines() {
+        let line = line.trim();
+        if let Some(rest) = line.strip_prefix("Global total:") {
+            global = rest.trim().parse().ok();
+        } else if let Some(rest) = line.strip_prefix("Proc ") {
+            // "778 total: 628928512"
+            if let Some((pid_s, rest2)) = rest.split_once(' ') {
+                if let (Ok(pid), Some(bytes)) = (
+                    pid_s.parse::<u32>(),
+                    rest2.trim().strip_prefix("total:").and_then(|s| s.trim().parse::<u64>().ok()),
+                ) {
+                    procs.push((pid, bytes));
+                }
+            }
+        }
+    }
+    Some((global?, procs))
 }
 
 /// 解析 dumpsys thermalservice：
@@ -631,12 +675,14 @@ fn main() {
         emit("{\"t\":\"err\",\"msg\":\"cpufreq sysfs 不可用，--freq 已禁用\"}");
         freq_enabled = false;
     }
-    let kgsl = if args.gpu {
-        let k = detect_kgsl();
-        if k.is_none() {
-            emit("{\"t\":\"err\",\"msg\":\"kgsl sysfs 不存在（GPU 可能在 hypervisor 之后），--gpu 已禁用\"}");
+    let gpu_path = if args.gpu {
+        let g = detect_gpu_path();
+        match &g {
+            None => emit("{\"t\":\"err\",\"msg\":\"kgsl 与 dumpsys gpu 均不可用，--gpu 已禁用\"}"),
+            Some(GpuPath::DumpMem) => emit("{\"t\":\"err\",\"msg\":\"kgsl sysfs 不存在（GPU 在 hypervisor 之后），--gpu 降级为每 PID GPU 显存（dumpsys gpu）\"}"),
+            Some(GpuPath::Kgsl(_)) => {}
         }
-        k
+        g
     } else {
         None
     };
@@ -693,6 +739,8 @@ fn main() {
     // 温度限频：dumpsys thermalservice ~50ms 级，≥2s 一轮（温度变化慢；低间隔下避免频繁拖长节拍轮）
     let thermal_every = 2000u64.div_ceil(args.interval_ms).max(1);
     let mut thermal_warned = false;
+    // GPU 显存降级路径限频：dumpsys gpu ~11ms，≥1s 一轮
+    let gpumem_every = 1000u64.div_ceil(args.interval_ms).max(1);
 
     loop {
         round += 1;
@@ -757,18 +805,35 @@ fn main() {
             }
         }
 
-        // GPU：kgsl gpubusy 计数器差值 → 窗口占比 %（首轮建基线不出数）
-        if let Some(g) = &kgsl {
-            if let Some((busy, total)) = read_gpu_busy(g.busy_path) {
-                if let Some((pb, pt)) = prev_gpu.replace((busy, total)) {
-                    let dtotal = total.saturating_sub(pt);
-                    if dtotal > 0 {
-                        let pct = busy.saturating_sub(pb) as f32 / dtotal as f32 * 100.0;
-                        let mhz = g.clk_path.and_then(read_u64_file).map(|hz| hz / 1_000_000).unwrap_or(0);
-                        emit(&format!("{{\"t\":\"gpu\",\"ts\":{},\"busy\":{:.2},\"mhz\":{}}}", ts, pct, mhz));
+        // GPU：kgsl gpubusy 计数器差值 → 窗口占比 %（首轮建基线不出数）；
+        // 降级路径（hypervisor 平台）：dumpsys gpu 每 PID 显存（限频 ≥1s）
+        match &gpu_path {
+            Some(GpuPath::Kgsl(g)) => {
+                if let Some((busy, total)) = read_gpu_busy(g.busy_path) {
+                    if let Some((pb, pt)) = prev_gpu.replace((busy, total)) {
+                        let dtotal = total.saturating_sub(pt);
+                        if dtotal > 0 {
+                            let pct = busy.saturating_sub(pb) as f32 / dtotal as f32 * 100.0;
+                            let mhz = g.clk_path.and_then(read_u64_file).map(|hz| hz / 1_000_000).unwrap_or(0);
+                            emit(&format!("{{\"t\":\"gpu\",\"ts\":{},\"busy\":{:.2},\"mhz\":{}}}", ts, pct, mhz));
+                        }
                     }
                 }
             }
+            Some(GpuPath::DumpMem) => {
+                if round.is_multiple_of(gpumem_every) && !active_pids.is_empty() {
+                    if let Some((global, procs)) = dumpsys(&["gpu"]).as_deref().and_then(parse_gpu_mem_snapshot) {
+                        for &pid in &active_pids {
+                            let bytes = procs.iter().find(|(p, _)| *p == pid).map(|(_, b)| *b).unwrap_or(0);
+                            emit(&format!(
+                                "{{\"t\":\"gpumem\",\"ts\":{},\"pid\":{},\"bytes\":{},\"global\":{}}}",
+                                ts, pid, bytes, global
+                            ));
+                        }
+                    }
+                }
+            }
+            None => {}
         }
 
         // 温度/热降频：dumpsys thermalservice，限频 ≥2s 一轮
@@ -1080,6 +1145,22 @@ mod tests {
     fn test_parse_gpu_busy() {
         assert_eq!(parse_gpu_busy("12345 67890\n"), Some((12345, 67890)));
         assert_eq!(parse_gpu_busy("12345\n"), None);
+    }
+
+    #[test]
+    fn test_parse_gpu_mem_snapshot() {
+        // 真机 dumpsys gpu 输出（hypervisor 平台）
+        let out = "Stable Game Driver: unsupported\n\
+                   Pre-release Game Driver: unsupported\n\n\
+                   Memory snapshot for GPU 0:\n\
+                   Global total: 2639089664\n\
+                   Proc 778 total: 628928512\n\
+                   Proc 29697 total: 154370048\n";
+        let (global, procs) = parse_gpu_mem_snapshot(out).unwrap();
+        assert_eq!(global, 2639089664);
+        assert_eq!(procs, vec![(778, 628928512), (29697, 154370048)]);
+        // 无 Memory snapshot 段 → None（该设备不支持降级路径）
+        assert!(parse_gpu_mem_snapshot("garbage\n").is_none());
     }
 
     #[test]
