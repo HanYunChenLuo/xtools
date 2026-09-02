@@ -2,22 +2,20 @@
 
 > 本文件记录跨会话的待办事项（backlog）。每次会话的历史总结见 `SESSION.md`。
 > 完成一项就把状态改为 ✅ 并注明完成的 commit；新增想法随时追加。
-> 最后更新：2026-09-01
+> 最后更新：2026-09-02
 
 ## 当前状态速览
 
 - 采样架构：**设备端 agent（xperf-agent）为 CLI/GUI 唯一采样路径**，无 adb 轮询
-- 指标覆盖：CPU（单核口径，与 adb top 一致）、内存（dumpsys meminfo / smaps_rollup）、FPS（SurfaceFlinger 图层，多图层分色）
-- 测试：75 全绿，clippy 零警告
+- 指标覆盖：CPU（单核口径，与 adb top 一致）、内存（dumpsys meminfo / smaps_rollup）、FPS（SurfaceFlinger 图层，多图层分色，agent 内限频 ≥500ms 与 CPU/内存解耦）
+- 落盘：CLI 边采边流式写 CSV（逐行 flush，崩溃只丢尾部）；内存时序抽稀上限 2×30k 点，只服务退出图表
+- 测试：80 全绿（含并行），clippy 零警告
 - 设备：车机 6eb792dfb0f（adbd 已 root），测试包 `com.lixiang.car.x.svm`
 
 ---
 
 ## A. 已知缺陷（优先级最高）
 
-- [ ] **agent 低间隔 + FPS 互相拖累**：50ms 间隔下每轮跑 dumpsys SurfaceFlinger，实测约半数轮次 overrun。FPS 应在 agent 内限频（每 N 轮采一次，≥500ms 节奏，与 CPU/内存解耦）。
-- [ ] **数据只在退出时落盘**：长测中途崩溃丢全部数据。应边采边追加写 CSV（或按 N 分钟滚动落盘）。
-- [ ] **时序数据无上限**：`CpuTimeSeriesData`（及 agent 模式的 memory 时序）长测持续膨胀。需要容量上限或流式落盘后释放内存。
 - [ ] **断连即终止**：agent EOF 直接退出，无 ADB 重连恢复。
 - [ ] **GUI 能力缺口**：无线程视图（CLI 有 --thread）、无峰值面板、无数据导出、600 点窗口（约 10 分钟）无法回看历史。
 - [ ] **死代码**：`LOG_FILE_PATH` 从未初始化，`append_to_log` 永远静默失败——要么接通要么删除。
@@ -49,3 +47,6 @@
 - ✅ FPS 采集：SurfaceFlinger 图层方案，多图层分色折线，GUI 接入（b551ae7、8c098e6、35f5f40）
 - ✅ agent 设备端采样统一架构（f6fec7e、50627d6）
 - ✅ 采样日志单行摘要（c7c6fe8）
+- ✅ agent FPS 限频解耦 ≥500ms + 启动预热 + 空发现节流重试，50ms 同采 0 overrun（93f6439）
+- ✅ 并行测试数据竞争修复：ADB_TEST_LOCK 串行锁（df61bc4）
+- ✅ CLI 边采边流式落盘 CSV + 时序抽稀上限（02c18bd）

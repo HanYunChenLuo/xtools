@@ -88,8 +88,10 @@ process_cpu% = (proc_jiffies_delta / total_jiffies_delta) × 100 × num_cores
 为什么不用 gfxinfo：`dumpsys gfxinfo framestats` 只统计 View 层级（HWUI）绘制的帧；游戏/相机/SurfaceView 直渲染应用的帧不上 gfxinfo。所有 buffer 最终都经 SurfaceFlinger 合成，因此对**图层**取帧时间戳是通用方案。
 
 ```
-fps_sample_round(pid)                    ← agent 内每 PID 每轮一次
-  ├─ sf_discover_layers(pid, package)    ← 首轮 + 连续 10 轮零帧后重做（Surface 重建会换名 #0→#1）
+fps_sample_round(pid)                    ← agent 内每 PID 每 FPS 轮一次（限频 ≥500ms，见下）
+  ├─ sf_discover_layers(pid, package)    ← 首个 FPS 轮 + 连续 10 个 FPS 轮零帧后重做（Surface 重建会换名 #0→#1）；
+  │    │                                    发现为空也记零帧轮（进程刚重启 Surface 未建时按阈值节流重试，
+  │    │                                    全量 dump ~1.5s 不能每轮试）
   │    ├─ dumpsys SurfaceFlinger（全量）  → 按 BufferStateLayer 块 metadata 的 ownerPID 归属匹配
   │    └─ 兜底：dumpsys SurfaceFlinger --list → 按包名匹配（去掉 "<hex> " 别名前缀，去重）
   └─ 每图层每轮：dumpsys SurfaceFlinger --latency '<layer>'（设备端本地调用，无 adb 往返）
@@ -98,14 +100,19 @@ fps_sample_round(pid)                    ← agent 内每 PID 每轮一次
        有帧的图层各发一行（多渲染面不取舍、不混叠）；全零时发一条静止样本
 ```
 
+**FPS 限频（与 CPU/内存节拍解耦）**：`fps_every_n_rounds(interval)` = ⌈500/interval⌉，每 N 轮采一次，
+有效周期 ≥500ms。50ms 间隔下每轮跑 dumpsys SurfaceFlinger 实测约半数轮次 overrun；限频后
+同采 CPU+FPS 10 秒 0 overrun。图层发现的全量 dump（此车机 ~1.5s）在节拍时钟启动前的预热
+阶段执行，避免首轮 backlog 追帧期 CPU 窗口不齐。
+
 关键设计点：
 - **图层名可能不含包名**（如 svm 的渲染层叫 `SVM Container`），只能靠 ownerPID 归属识别
 - **不用 `--latency-clear`**：实测部分设备（如此车机）clear 只清空缓冲而不返回数据；改用 `--latency` 逐轮差值
 - 缓冲 127 帧 ≈ 2.1s@60fps：采样间隔大于该值时老帧被挤出，计数为下界（interval ≤ 1s 精确）
-- **jank 不按 vsync 阈值**（30fps 相机流在 60Hz 屏上帧间隔 33ms 会被误判全卡）：用间隔 > 2×窗口中位间隔，<3 帧不计；低间隔（<~200ms）窗口帧数太少，jank 恒 0 属预期
+- **jank 不按 vsync 阈值**（30fps 相机流在 60Hz 屏上帧间隔 33ms 会被误判全卡）：用间隔 > 2×窗口中位间隔，<3 帧不计；FPS 窗口限频 ≥500ms 后帧数足够，jank 统计有效
 - 静止界面 FPS=0 如实上报（事件照常发，GUI 折线落底）
 
-`--fps` 退出时导出 `log/<pkg>/<ts>/fps/<pkg>_fps_data_pid<pid>.csv`（Timestamp,FPS,Jank,Layer）。GUI 有 FPS 勾选框 + 折线图（自适应纵轴，多图层逐层一条线，图层短名作图例）。
+`--fps` 流式写入 `log/<pkg>/<ts>/fps/<pkg>_fps_data_pid<pid>.csv`（Timestamp,FPS,Jank,Layer）。GUI 有 FPS 勾选框 + 折线图（自适应纵轴，多图层逐层一条线，图层短名作图例）。
 
 ---
 
@@ -134,12 +141,15 @@ fps_sample_round(pid)                    ← agent 内每 PID 每轮一次
 
 | 场景 | 触发条件 | 输出位置 |
 |------|---------|---------|
-| CPU 图表 + CSV（退出时） | 程序退出，数据点 > 1 | `log/<pkg>/<ts>/cpu/` |
-| 内存图表 + CSV（退出时） | 同上 | `log/<pkg>/<ts>/memory/` |
-| FPS CSV（退出时） | `--fps`，有数据 | `log/<pkg>/<ts>/fps/<pkg>_fps_data_pid<pid>.csv` |
-| 线程 CSV + 时序图（退出时） | `--thread --cpu`，有数据 | `log/<pkg>/<ts>/thread/` |
+| CPU/内存/FPS/线程 CSV | **采样时流式追加**（每个样本到达即写并 flush，崩溃只丢尾部） | `log/<pkg>/<ts>/{cpu,memory,fps,thread}/` |
+| CPU 图表（每 PID + 汇总） | 程序退出，数据点 > 1 | `log/<pkg>/<ts>/cpu/` |
+| 内存图表（每 PID + 汇总） | 同上 | `log/<pkg>/<ts>/memory/` |
+| 线程时序图 | `--thread --cpu`，退出时有数据 | `log/<pkg>/<ts>/thread/` |
 
-**注意**：`create_timestamp_subdir()` 使用 `OnceLock<Mutex>` 缓存目录路径，整个会话只创建一个时间戳目录。
+- 内存中的时序序列只服务退出图表：超过 2×30k 点时每 2 取 1 原地抽稀（`CHART_SERIES_CAP`，保完整时间范围、分辨率随运行时长自适应降级）；CSV 始终全量。
+- `CpuTimeSeriesData.top_threads` 已无读者，CLI agent 路径不再写入（线程明细走 thread_time_series + 流式 CSV）。
+
+**注意**：`create_timestamp_subdir()` 使用 `OnceLock<Mutex>` 缓存目录路径，整个会话只创建一个时间戳目录（首个样本落盘时创建）。
 
 
 ---
