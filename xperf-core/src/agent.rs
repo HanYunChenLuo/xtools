@@ -4,6 +4,7 @@
 //! `adb exec-out` 长连接读取 NDJSON 事件流，无每轮 adb 往返开销。
 //! 协议见 xperf-agent/main.rs 头注释。
 
+use crate::platform::Platform;
 use anyhow::Result;
 use serde::Deserialize;
 use std::io::{BufRead, BufReader};
@@ -233,13 +234,26 @@ pub fn deploy_agent(local: &Path) -> Result<()> {
 }
 
 /// 启动设备端采样器，返回事件流。Ctrl-C/断连时 agent 因 stdout 写失败自行退出。
-pub fn spawn_agent(package: Option<&str>, interval_ms: u64, flags: MetricFlags) -> Result<AgentStream> {
+/// platform: 平台提示（如 "ss3"），传入时 agent 跳过对应探测
+pub fn spawn_agent(
+    package: Option<&str>,
+    interval_ms: u64,
+    flags: MetricFlags,
+    platform: Option<&dyn Platform>,
+) -> Result<AgentStream> {
     let mut cmd_args = vec!["exec-out".to_string(), DEVICE_AGENT_PATH.to_string()];
     if let Some(pkg) = package {
         cmd_args.extend(["--package".to_string(), pkg.to_string()]);
     }
     cmd_args.extend(["--interval".to_string(), interval_ms.to_string()]);
     cmd_args.extend(flags.to_agent_args());
+    // 平台参数：让 agent 跳过运行时探测，直接用平台指定路径
+    if let Some(p) = platform {
+        cmd_args.extend(["--platform".to_string(), p.id().as_str().to_string()]);
+        if let Some(qnx) = p.qnx_host() {
+            cmd_args.extend(["--qnx-host".to_string(), qnx.to_string()]);
+        }
+    }
     let mut child = Command::new("adb")
         .args(&cmd_args)
         .stdout(Stdio::piped())
@@ -272,6 +286,7 @@ pub fn reconnect_agent(
     package: Option<&str>,
     interval_ms: u64,
     flags: MetricFlags,
+    platform: Option<&dyn Platform>,
     is_running: &dyn Fn() -> bool,
 ) -> Option<AgentStream> {
     loop {
@@ -281,7 +296,7 @@ pub fn reconnect_agent(
         if device_online() {
             match ensure_agent_built()
                 .and_then(|bin| deploy_agent(&bin))
-                .and_then(|_| spawn_agent(package, interval_ms, flags))
+                .and_then(|_| spawn_agent(package, interval_ms, flags, platform))
             {
                 Ok(s) => return Some(s),
                 Err(e) => eprintln!("agent 重连失败: {}，继续等待…", e),

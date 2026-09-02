@@ -121,7 +121,9 @@ async fn monitor_process_agent(args: &Args, flags: xperf_core::MetricFlags) -> R
 
     let bin = agent::ensure_agent_built()?;
     agent::deploy_agent(&bin)?;
-    let mut stream = agent::spawn_agent(Some(&args.package), args.interval, flags)?;
+    let platform = xperf_core::detect_platform_live();
+    println!("平台: {} ({})", platform.name(), platform.description());
+    let mut stream = agent::spawn_agent(Some(&args.package), args.interval, flags, Some(&*platform))?;
     println!("agent 已部署并启动（间隔 {}ms）", args.interval);
 
     let verbose = args.interval >= 500;
@@ -175,7 +177,7 @@ async fn monitor_process_agent(args: &Args, flags: xperf_core::MetricFlags) -> R
                 println!("{}", "连接断开，等待设备恢复…（Ctrl-C 退出）".yellow());
                 let r = running.clone();
                 match agent::reconnect_agent(
-                    Some(&args.package), args.interval, flags,
+                    Some(&args.package), args.interval, flags, Some(&*platform),
                     &move || r.load(Ordering::SeqCst),
                 ) {
                     Some(s) => {

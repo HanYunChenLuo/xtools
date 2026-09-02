@@ -2,12 +2,14 @@ pub mod agent;
 pub mod cpu;
 pub mod fps;
 pub mod memory;
+pub mod platform;
 pub mod utils;
 
 pub use agent::MetricFlags;
 pub use cpu::{CpuSample1, ThreadCpuInfo};
 pub use fps::{FpsPidState, FpsTimeSeriesData};
 pub use memory::{MemoryDetails, MemoryTimeSeriesData};
+pub use platform::{detect_platform, detect_platform_live, from_id, Platform, PlatformId};
 pub use utils::{get_all_processes, run_adb_command, run_command, ProcessInfo, ProcOutput};
 
 use chrono::{DateTime, Local};
