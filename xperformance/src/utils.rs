@@ -287,6 +287,7 @@ pub struct CsvStream {
     fps: HashMap<u32, BufWriter<fs::File>>,
     thread: HashMap<(u32, u32), BufWriter<fs::File>>, // (pid, tid)
     io: HashMap<u32, BufWriter<fs::File>>,            // pid
+    gpumem: HashMap<u32, BufWriter<fs::File>>,        // pid
     misc: HashMap<&'static str, BufWriter<fs::File>>, // freq/thermal/gpu/net（设备级单文件，按指标名一个 writer）
     broken: bool, // 写盘失败后停用（防逐行刷屏告警）
 }
@@ -424,6 +425,16 @@ impl CsvStream {
             "net", "net_data.csv".to_string(), "Timestamp,RX (KB/s),TX (KB/s)", &row,
         );
     }
+
+    /// GPU 显存（--gpu 降级路径）：每 PID 一个文件，列为进程 MB 与整机 MB
+    pub fn gpumem_row(&mut self, pkg: &str, pid: u32, t: DateTime<Local>, mb: f32, global_mb: f32) {
+        let row = format!("{},{:.1},{:.0}", t.format(CSV_TS_FMT), mb, global_mb);
+        stream_write(
+            &mut self.broken, &mut self.root, pkg, &mut self.gpumem, pid,
+            "gpumem", format!("gpumem_{}_data.csv", pid),
+            "Timestamp,Process GPU Mem (MB),Global GPU Mem (MB)", &row,
+        );
+    }
 }
 
 // ---------- B 类指标时序（退出图表用）----------
@@ -452,6 +463,8 @@ pub struct ExtraSeries {
     pub io: HashMap<u32, VecDeque<IoSample>>,
     /// (ts, rx, tx) KB/s（整机口径）
     pub net: VecDeque<(DateTime<Local>, f32, f32)>,
+    /// pid → (ts, 进程 MB, 整机 MB)（--gpu 降级路径，hypervisor 平台）
+    pub gpumem: HashMap<u32, VecDeque<(DateTime<Local>, f32, f32)>>,
 }
 
 impl ExtraSeries {
@@ -481,6 +494,10 @@ impl ExtraSeries {
 
     pub fn push_net(&mut self, t: DateTime<Local>, rx: f32, tx: f32) {
         Self::push_capped(&mut self.net, (t, rx, tx));
+    }
+
+    pub fn push_gpumem(&mut self, pid: u32, t: DateTime<Local>, mb: f32, global_mb: f32) {
+        Self::push_capped(self.gpumem.entry(pid).or_default(), (t, mb, global_mb));
     }
 }
 

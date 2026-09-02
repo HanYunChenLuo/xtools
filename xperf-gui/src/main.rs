@@ -22,7 +22,8 @@ fn map_event(
         AgentEvent::Cpu { pid, .. }
         | AgentEvent::Mem { pid, .. }
         | AgentEvent::Fps { pid, .. }
-        | AgentEvent::Io { pid, .. } => Some(*pid),
+        | AgentEvent::Io { pid, .. }
+        | AgentEvent::GpuMem { pid, .. } => Some(*pid),
         _ => None,
     };
     if let Some(p) = pid {
@@ -90,6 +91,9 @@ fn map_event(
         }
         AgentEvent::Gpu { ts, busy, mhz } => {
             out.push(SampleEvent::GpuUpdate { timestamp: ts_of(ts), busy, mhz });
+        }
+        AgentEvent::GpuMem { ts, pid, bytes, global } => {
+            out.push(SampleEvent::GpuMemUpdate { pid: pid.to_string(), timestamp: ts_of(ts), bytes, global });
         }
         AgentEvent::Io { ts, pid, r, w, dr, dw } => {
             out.push(SampleEvent::IoUpdate { pid: pid.to_string(), timestamp: ts_of(ts), r, w, dr, dw });
@@ -192,6 +196,9 @@ fn brief_event(ev: &SampleEvent) -> String {
             format!("TempUpdate status={} sensors={}", status, sensors.len())
         }
         SampleEvent::GpuUpdate { busy, mhz, .. } => format!("GpuUpdate busy={:.1}% mhz={}", busy, mhz),
+        SampleEvent::GpuMemUpdate { pid, bytes, .. } => {
+            format!("GpuMemUpdate pid={} mem={:.1}MB", pid, *bytes as f64 / 1e6)
+        }
         SampleEvent::IoUpdate { pid, r, w, .. } => format!("IoUpdate pid={} r={:.1} w={:.1} KB/s", pid, r, w),
         SampleEvent::NetUpdate { rx, tx, .. } => format!("NetUpdate rx={:.1} tx={:.1} KB/s", rx, tx),
         SampleEvent::SampleError { pid, stage, error } => {
@@ -280,6 +287,8 @@ fn is_running(state: State<'_, AppState>) -> Result<bool, String> {
 
 /// IO 导出行：(ms, r, w, dr, dw) KB/s
 type IoExportPoints = Vec<(f64, f64, f64, f64, f64)>;
+/// GPU 显存导出行：(ms, 进程 MB, 整机 MB)
+type GpuMemExportPoints = Vec<(f64, f64, f64)>;
 
 /// 导出前端持有的完整会话历史为 CSV（GUI 不流式落盘，数据在前端内存中）。
 /// 写到 log/<pkg>/<导出时刻>/ 下的各指标子目录，返回目录路径。
@@ -298,6 +307,7 @@ fn export_csv(
     gpu: Vec<(f64, f64, u32)>,
     io: std::collections::HashMap<String, IoExportPoints>,
     net: Vec<(f64, f64, f64)>,
+    gpumem: std::collections::HashMap<String, GpuMemExportPoints>,
 ) -> Result<String, String> {
     use std::io::Write;
     let dir = std::path::PathBuf::from("log")
@@ -408,6 +418,18 @@ fn export_csv(
         }
         wrote = true;
     }
+    if !gpumem.is_empty() {
+        let d = dir.join("gpumem");
+        std::fs::create_dir_all(&d).map_err(|e| e.to_string())?;
+        for (pid, pts) in &gpumem {
+            let mut f = std::fs::File::create(d.join(format!("gpumem_{}_data.csv", pid))).map_err(|e| e.to_string())?;
+            writeln!(f, "Timestamp,Process GPU Mem (MB),Global GPU Mem (MB)").map_err(|e| e.to_string())?;
+            for (t, mb, gmb) in pts {
+                writeln!(f, "{},{:.1},{:.0}", fmt_ts(*t), mb, gmb).map_err(|e| e.to_string())?;
+            }
+        }
+        wrote = true;
+    }
     if !wrote {
         return Err("暂无可导出的数据".into());
     }
@@ -497,7 +519,9 @@ mod tests {
         let mut io = std::collections::HashMap::new();
         io.insert("1234".to_string(), vec![(1700000000000.0, 12.0, 3.0, 0.0, 1.0)]);
         let net = vec![(1700000000000.0, 123.0, 45.0)];
-        let dir = export_csv(pkg.clone(), cpu, Default::default(), fps, freq, temp, gpu, io, net).unwrap();
+        let mut gpumem = std::collections::HashMap::new();
+        gpumem.insert("1234".to_string(), vec![(1700000000000.0, 154.4, 2639.1)]);
+        let dir = export_csv(pkg.clone(), cpu, Default::default(), fps, freq, temp, gpu, io, net, gpumem).unwrap();
         let cpu_csv = std::fs::read_to_string(format!("{}/cpu/cpu_1234_data.csv", dir)).unwrap();
         assert!(cpu_csv.starts_with("Timestamp,Process CPU (%)\n"));
         assert!(cpu_csv.contains(",12.50\n"));
@@ -519,6 +543,9 @@ mod tests {
         let net_csv = std::fs::read_to_string(format!("{}/net/net_data.csv", dir)).unwrap();
         assert!(net_csv.starts_with("Timestamp,RX (KB/s),TX (KB/s)\n"));
         assert!(net_csv.contains(",123.00,45.00\n"));
+        let gpumem_csv = std::fs::read_to_string(format!("{}/gpumem/gpumem_1234_data.csv", dir)).unwrap();
+        assert!(gpumem_csv.starts_with("Timestamp,Process GPU Mem (MB),Global GPU Mem (MB)\n"));
+        assert!(gpumem_csv.contains(",154.4,2639\n"));
         std::fs::remove_dir_all(std::path::PathBuf::from("log").join(&pkg)).ok();
     }
 
@@ -526,6 +553,7 @@ mod tests {
     fn test_export_csv_empty_errors() {
         let r = export_csv(
             "x".into(),
+            Default::default(),
             Default::default(),
             Default::default(),
             Default::default(),
