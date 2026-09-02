@@ -176,6 +176,19 @@ const gpumemHist = {}; // pid -> [{t, mb, gmb}]（--gpu 保底路径）
 const gpuprocHist = {}; // pid -> [{t, busy}]（--gpu QNX 路径每进程 busy%）
 let maxkhz = [];     // AgentHello 带的每核最大频率（KHz）
 
+// ---- 实时数值面板：各指标最新值，500ms 节流渲染 ----
+const liveData = {}; // key -> { label, value, unit, color }
+function setLive(key, label, value, unit, color) {
+  liveData[key] = { label, value, unit, color: color || '#cdd6f4' };
+}
+function renderLive() {
+  const rows = Object.entries(liveData).map(([key, d]) =>
+    `<tr><td>${d.label}</td><td style="color:${d.color}">${d.value}${d.unit}</td></tr>`);
+  document.getElementById('liveTable').innerHTML =
+    '<tr><th>指标</th><th>当前值</th></tr>' + rows.join('');
+}
+setInterval(renderLive, 500);
+
 function fmtTime(t) { return new Date(t).toTimeString().slice(0, 8); }
 
 function renderPeaks() {
@@ -257,13 +270,25 @@ listen('sample', (e) => {
     cpuChart.push('PID ' + pid, t, +process_cpu.toFixed(2));
     trackPeak(pid, 'cpu', process_cpu, t);
     latestThreads[pid] = threads;
+    setLive('cpu', 'CPU (pid ' + pid + ')', process_cpu.toFixed(1), '%', '#89b4fa');
+    // 线程 top1
+    if (threads.length > 0) {
+      const top1 = threads.reduce((a, b) => a.cpu_usage > b.cpu_usage ? a : b);
+      setLive('cpu_top', '  └ ' + top1.name, top1.cpu_usage.toFixed(1), '%', '#6c7086');
+    }
     try { cpuChart.draw(); } catch (err) { _diag('cpuChart.draw ERROR: ' + err.message); }
   } else if (ev.MemoryUpdate) {
-    const { pid, timestamp, total_pss } = ev.MemoryUpdate;
+    const { pid, timestamp, total_pss, details } = ev.MemoryUpdate;
     if (!pidData[pid]) { pidData[pid] = { cpu: [], mem: [], new: true }; renderPidList(); }
     const t = new Date(timestamp).getTime();
     memChart.push('PID ' + pid, t, total_pss);
     trackPeak(pid, 'mem', total_pss, t);
+    setLive('mem', '内存 PSS (pid ' + pid + ')', (total_pss / 1024).toFixed(1), ' MB', '#a6e3a1');
+    if (details) {
+      setLive('mem_native', '  └ Native', (details.native_heap / 1024).toFixed(1), ' MB', '#6c7086');
+      setLive('mem_java', '  └ Java', (details.java_heap / 1024).toFixed(1), ' MB', '#6c7086');
+      setLive('mem_code', '  └ Code', (details.code / 1024).toFixed(1), ' MB', '#6c7086');
+    }
     try { memChart.draw(); } catch (err) { _diag('memChart.draw ERROR: ' + err.message); }
   } else if (ev.FpsUpdate) {
     const { pid, timestamp, layer, fps, jank_count } = ev.FpsUpdate;
@@ -278,6 +303,8 @@ listen('sample', (e) => {
     fpsChart.push(shortLayer, t, +fps.toFixed(1));
     if (!fpsHist[shortLayer]) fpsHist[shortLayer] = [];
     fpsHist[shortLayer].push({ t, fps, jank: jank_count });
+    setLive('fps', 'FPS (' + shortLayer + ')', fps.toFixed(1), '', '#f38ba8');
+    setLive('fps_jank', '  └ Jank', jank_count, '', '#6c7086');
     try { fpsChart.draw(); } catch (err) { _diag('fpsChart.draw ERROR: ' + err.message); }
   } else if (ev.NoProcess) {
     document.getElementById('status').textContent = '无进程: ' + ev.NoProcess.error;
@@ -289,6 +316,11 @@ listen('sample', (e) => {
     autoCheck('freq');
     const t = new Date(timestamp).getTime();
     khz.forEach((k, i) => freqChart.push('cpu' + i, t, k / 1000)); // KHz → MHz
+    // 频率展示：平均 + 最高核
+    const mhz = khz.map(k => k / 1000);
+    const avg = mhz.reduce((a, b) => a + b, 0) / mhz.length;
+    setLive('freq', 'CPU 频率', avg.toFixed(0), ' MHz', '#f9e2af');
+    setLive('freq_max', '  └ 最高核', Math.max(...mhz).toFixed(0), ' MHz', '#6c7086');
     try { freqChart.draw(); } catch (err) { _diag('freqChart.draw ERROR: ' + err.message); }
   } else if (ev.TempUpdate) {
     const { timestamp, status, sensors } = ev.TempUpdate;
@@ -299,7 +331,9 @@ listen('sample', (e) => {
       tempChart.push(name, t, value);
       if (!tempHist[name]) tempHist[name] = [];
       tempHist[name].push({ t, v: value, status });
+      setLive('temp_' + name, '温度 ' + name, value.toFixed(1), ' °C', '#fab387');
     }
+    setLive('temp_status', '  └ 热状态', status >= 0 ? status : '?', '', '#6c7086');
     try { tempChart.draw(); } catch (err) { _diag('tempChart.draw ERROR: ' + err.message); }
   } else if (ev.GpuUpdate) {
     const { timestamp, busy, util, mhz, maxmhz } = ev.GpuUpdate;
@@ -310,6 +344,9 @@ listen('sample', (e) => {
     gpuChart.push('busy', t, +busy.toFixed(2));
     if (util > 0 || maxmhz > 0) gpuChart.push('util', t, +util.toFixed(2));
     gpuHist.push({ t, busy, util, mhz });
+    setLive('gpu_busy', 'GPU busy', busy.toFixed(1), '%', '#cba6f7');
+    if (maxmhz > 0) setLive('gpu_freq', '  └ 频率', mhz + '/' + maxmhz, ' MHz', '#6c7086');
+    if (util > 0) setLive('gpu_util', '  └ util', util.toFixed(1), '%', '#6c7086');
     try { gpuChart.draw(); } catch (err) { _diag('gpuChart.draw ERROR: ' + err.message); }
   } else if (ev.GpuProcUpdate) {
     // QNX 路径：每进程 GPU busy%
@@ -320,6 +357,7 @@ listen('sample', (e) => {
     gpuChart.push('PID ' + pid, t, +busy.toFixed(2));
     if (!gpuprocHist[pid]) gpuprocHist[pid] = [];
     gpuprocHist[pid].push({ t, busy });
+    setLive('gpu_proc_' + pid, 'GPU busy (pid ' + pid + ')', busy.toFixed(1), '%', '#cba6f7');
     try { gpuChart.draw(); } catch (err) { _diag('gpuChart.draw ERROR: ' + err.message); }
   } else if (ev.GpuMemUpdate) {
     // --gpu 降级路径（hypervisor 平台）：每 PID GPU 显存
@@ -332,6 +370,8 @@ listen('sample', (e) => {
     gpumemChart.push('global', t, Math.round(global / 1e6));
     if (!gpumemHist[pid]) gpumemHist[pid] = [];
     gpumemHist[pid].push({ t, mb, gmb: global / 1e6 });
+    setLive('gpumem_' + pid, 'GPU 显存 (pid ' + pid + ')', mb.toFixed(0), ' MB', '#94e2d5');
+    setLive('gpumem_global', '  └ 整机', (global / 1e6).toFixed(0), ' MB', '#6c7086');
     try { gpumemChart.draw(); } catch (err) { _diag('gpumemChart.draw ERROR: ' + err.message); }
   } else if (ev.IoUpdate) {
     const { pid, timestamp, r, w, dr, dw } = ev.IoUpdate;
@@ -342,6 +382,7 @@ listen('sample', (e) => {
     ioChart.push(`PID ${pid} W`, t, +w.toFixed(2));
     if (!ioHist[pid]) ioHist[pid] = [];
     ioHist[pid].push({ t, r, w, dr, dw });
+    setLive('io_' + pid, 'IO 读/写 (pid ' + pid + ')', r.toFixed(1) + ' / ' + w.toFixed(1), ' KB/s', '#fab387');
     try { ioChart.draw(); } catch (err) { _diag('ioChart.draw ERROR: ' + err.message); }
   } else if (ev.NetUpdate) {
     const { timestamp, rx, tx } = ev.NetUpdate;
@@ -349,6 +390,7 @@ listen('sample', (e) => {
     const t = new Date(timestamp).getTime();
     netChart.push('RX', t, +rx.toFixed(2));
     netChart.push('TX', t, +tx.toFixed(2));
+    setLive('net', '网络 RX/TX', rx.toFixed(1) + ' / ' + tx.toFixed(1), ' KB/s', '#74c7ec');
     try { netChart.draw(); } catch (err) { _diag('netChart.draw ERROR: ' + err.message); }
   }
   updateTitle();
@@ -380,6 +422,7 @@ document.getElementById('startBtn').addEventListener('click', async () => {
   for (const k of Object.keys(ioHist)) delete ioHist[k];
   for (const k of Object.keys(gpumemHist)) delete gpumemHist[k];
   for (const k of Object.keys(gpuprocHist)) delete gpuprocHist[k];
+  for (const k of Object.keys(liveData)) delete liveData[k];
   gpuHist.length = 0;
   renderPeaks();
   renderPidList();
