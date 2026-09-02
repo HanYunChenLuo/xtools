@@ -132,15 +132,81 @@ pub fn agent_binary_path() -> PathBuf {
         .join("target/aarch64-linux-android/release/xperf-agent")
 }
 
-/// 若本机尚未交叉编译 agent 二进制则自动构建（链接器见 .cargo/config.toml）
+/// 探测本机 Android NDK 的 aarch64 链接器（host 感知：Linux=~/Android/Sdk/ndk，
+/// macOS=~/Library/Android/sdk/ndk，或 ANDROID_NDK_HOME/ANDROID_HOME 环境变量）。
+/// 返回 aarch64-linux-android26-clang 路径（无 26 时取其它 API 级别中最高者）。
+fn find_ndk_linker() -> Option<PathBuf> {
+    let mut roots: Vec<PathBuf> = Vec::new();
+    // 直接指向 NDK 版本目录的环境变量（如 ~/Android/Sdk/ndk/25.1.8937393）
+    for var in ["ANDROID_NDK_HOME", "ANDROID_NDK_ROOT", "NDK_HOME"] {
+        if let Ok(v) = std::env::var(var) {
+            roots.push(PathBuf::from(v));
+        }
+    }
+    // 指向 SDK 根的环境变量 → ndk/ 子目录下可能有多版本
+    let mut sdk_roots: Vec<PathBuf> = Vec::new();
+    for var in ["ANDROID_HOME", "ANDROID_SDK_ROOT"] {
+        if let Ok(v) = std::env::var(var) {
+            sdk_roots.push(PathBuf::from(v));
+        }
+    }
+    if let Some(home) = std::env::var_os("HOME") {
+        let home = PathBuf::from(home);
+        sdk_roots.push(home.join("Android/Sdk")); // Linux 默认
+        sdk_roots.push(home.join("Library/Android/sdk")); // macOS 默认
+    }
+    for sdk in sdk_roots {
+        if let Ok(rd) = std::fs::read_dir(sdk.join("ndk")) {
+            let mut vers: Vec<PathBuf> = rd.filter_map(|e| e.ok().map(|e| e.path())).collect();
+            vers.sort();
+            vers.reverse(); // 版本号降序，优先新版
+            roots.extend(vers);
+        }
+    }
+    // 每个候选：toolchains/llvm/prebuilt/<host-tag>/bin/aarch64-linux-android<api>-clang
+    let mut fallback: Option<(u32, PathBuf)> = None;
+    for ver in roots {
+        let prebuilt = ver.join("toolchains/llvm/prebuilt");
+        let Ok(hosts) = std::fs::read_dir(&prebuilt) else { continue };
+        for host in hosts.filter_map(|e| e.ok()) {
+            let bin = host.path().join("bin");
+            let Ok(entries) = std::fs::read_dir(&bin) else { continue };
+            for e in entries.filter_map(|e| e.ok()) {
+                let name = e.file_name().to_string_lossy().to_string();
+                let Some(api) = name
+                    .strip_prefix("aarch64-linux-android")
+                    .and_then(|s| s.strip_suffix("-clang"))
+                    .and_then(|s| s.parse::<u32>().ok())
+                else {
+                    continue;
+                };
+                if api == 26 {
+                    return Some(e.path()); // 与工作区基线一致，直接命中
+                }
+                if fallback.as_ref().is_none_or(|(a, _)| api > *a) {
+                    fallback = Some((api, e.path()));
+                }
+            }
+        }
+    }
+    fallback.map(|(_, p)| p)
+}
+
+/// 若本机尚未交叉编译 agent 二进制则自动构建（链接器：config.toml 默认值，
+/// 探测到本机 NDK 时用 CARGO_TARGET_..._LINKER 环境变量覆盖，Mac/Linux 均可）
 pub fn ensure_agent_built() -> Result<PathBuf> {
     let bin = agent_binary_path();
     if !bin.exists() {
         eprintln!("agent 二进制不存在，正在交叉编译（aarch64-linux-android）...");
-        let status = Command::new("cargo")
-            .args(["build", "-p", "xperf-agent", "--target", "aarch64-linux-android", "--release"])
-            .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap())
-            .status()?;
+        let mut cmd = Command::new("cargo");
+        cmd.args(["build", "-p", "xperf-agent", "--target", "aarch64-linux-android", "--release"])
+            .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap());
+        // .cargo/config.toml 写死了 Linux NDK 路径；探测到本机 NDK 时用环境变量覆盖（优先级更高）
+        if let Some(linker) = find_ndk_linker() {
+            eprintln!("使用 NDK 链接器: {}", linker.display());
+            cmd.env("CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER", &linker);
+        }
+        let status = cmd.status()?;
         if !status.success() {
             anyhow::bail!("交叉编译 xperf-agent 失败（需要 Android NDK，见 .cargo/config.toml）");
         }
@@ -228,6 +294,17 @@ pub fn reconnect_agent(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn test_find_ndk_linker() {
+        // 装了 NDK 的机器（如本开发机）必须能探测到 android26-clang；没装则跳过
+        let has_ndk = PathBuf::from("/home/han/Android/Sdk/ndk/25.1.8937393").exists();
+        if has_ndk {
+            let linker = find_ndk_linker().expect("本机有 NDK，必须探测到链接器");
+            assert!(linker.ends_with("aarch64-linux-android26-clang"), "命中: {}", linker.display());
+        }
+    }
+
+
 
     #[test]
     fn test_parse_hello() {
