@@ -234,6 +234,7 @@ listen('sample', (e) => {
   } else if (ev.PidDisappeared) {
     const pid = ev.PidDisappeared.pid;
     if (pidData[pid]) { pidData[pid].stopped = true; renderPidList(); }
+    delete latestThreads[pid]; // 进程已死，Top 线程表不再展示其残留线程
   } else if (ev.CpuUpdate) {
     const { pid, timestamp, process_cpu, threads } = ev.CpuUpdate;
     if (!pidData[pid]) { pidData[pid] = { cpu: [], mem: [], new: true }; renderPidList(); }
@@ -315,6 +316,8 @@ function toggleCharts() {
   document.getElementById('cpuChartBox').classList.toggle('hidden', !cpuOn);
   document.getElementById('memChartBox').classList.toggle('hidden', !memOn);
   document.getElementById('fpsChartBox').classList.toggle('hidden', !fpsOn);
+  // 线程数据来自 CpuUpdate：CPU 关闭时线程面板同步隐藏
+  document.getElementById('threadPanel').classList.toggle('hidden', !cpuOn);
   // 容器显隐变化后 chart 尺寸需刷新
   setTimeout(() => { cpuChart.resize(); memChart.resize(); fpsChart.resize(); }, 50);
 }
