@@ -3,7 +3,7 @@ use chrono::{DateTime, Local};
 use plotters::element::PathElement;
 use plotters::prelude::*;
 use std::collections::{HashMap, VecDeque};
-use std::fs::{self, OpenOptions};
+use std::fs;
 use std::io::{BufWriter, Write};
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
@@ -15,33 +15,14 @@ const CSV_TS_FMT: &str = "%Y-%m-%d %H:%M:%S%.3f";
 
 // 存储当前执行期间的timestamp目录路径
 static TIMESTAMP_DIR: OnceLock<Mutex<Option<PathBuf>>> = OnceLock::new();
-static LOG_FILE_PATH: OnceLock<Mutex<Option<PathBuf>>> = OnceLock::new();
 
 pub fn create_log_dir_if_needed(package: &str) -> Result<PathBuf> {
     let log_dir = PathBuf::from("log").join(package);
     if !log_dir.exists() {
         fs::create_dir_all(&log_dir)?;
         println!("Created log directory: {}", log_dir.display());
-        let _ = append_to_log(&format!("Created log directory: {}", log_dir.display()));
     }
     Ok(log_dir)
-}
-
-pub fn append_to_log(content: &str) -> Result<()> {
-    let cell = LOG_FILE_PATH.get_or_init(|| Mutex::new(None));
-    let guard = cell.lock().unwrap();
-    let path = match guard.as_ref() {
-        Some(p) => p.clone(),
-        None => anyhow::bail!("Log file not initialized"),
-    };
-    drop(guard);
-
-    let mut file = OpenOptions::new().create(true).append(true).open(&path)?;
-    let timestamp = Local::now().format("%Y-%m-%d %H:%M:%S");
-    writeln!(file, "\n[{}]", timestamp)?;
-    writeln!(file, "{}", content)?;
-    file.flush()?;
-    Ok(())
 }
 
 pub fn generate_cpu_chart(
@@ -181,9 +162,7 @@ pub fn create_timestamp_subdir(package: &str) -> Result<PathBuf> {
 
     if !timestamp_dir.exists() {
         std::fs::create_dir_all(&timestamp_dir)?;
-        let msg = format!("Created timestamp directory: {}", timestamp_dir.display());
-        println!("{}", msg);
-        let _ = append_to_log(&msg);
+        println!("Created timestamp directory: {}", timestamp_dir.display());
     }
 
     *guard = Some(timestamp_dir.clone());
