@@ -338,6 +338,19 @@ fn fps_sample_round(st: &mut FpsState, pid: u32, package: &str, ts: u64) {
         let presents = dumpsys(&["SurfaceFlinger", "--latency", &layer.name])
             .map(|s| parse_latency_output(&s))
             .unwrap_or_default();
+        if presents.is_empty() {
+            match layer.last {
+                // 已有基线但本轮读空（dumpsys 失败/缓冲被清）：记零帧样本（zero_rounds
+                // 记账与重发现照常）但**保留基线不动**——否则基线被 None 覆盖后，
+                // 下轮会把整个 127 帧缓冲误计为新帧，FPS 瞬时虚高数倍。
+                Some((_, Some(_))) => {
+                    samples.push((layer.name.clone(), 0.0, 0, 0));
+                }
+                // 无基线（新图层）：建基线
+                _ => layer.last = Some((now, None)),
+            }
+            continue;
+        }
         let latest = presents.last().copied();
         let Some((last_t, last_p)) = layer.last.replace((now, latest)) else {
             continue; // 首轮建基线

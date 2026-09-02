@@ -204,7 +204,7 @@ async fn monitor_process_agent(args: &Args) -> Result<(), Box<dyn std::error::Er
                             }
                             let series = per_pid.entry(t2.name.clone()).or_default();
                             // 与 xperf-core 时序同策略：超 2×CAP 每 2 取 1 抽稀，长测内存有界
-                            if series.len() >= 2 * 30_000 {
+                            if series.len() >= 2 * xperf_core::CHART_SERIES_CAP {
                                 let mut i = 0;
                                 series.retain(|_| {
                                     let keep = i % 2 == 0;

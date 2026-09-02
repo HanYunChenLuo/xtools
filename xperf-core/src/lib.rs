@@ -17,7 +17,7 @@ use std::collections::{HashMap, VecDeque};
 /// 内存序列只服务退出时的图表渲染——超过 2×CAP 时每 2 取 1 抽稀，
 /// 保留完整时间范围、分辨率随运行时长自适应降级，长测内存有界。
 /// CAP=30_000：50ms 间隔下约 25 分钟全精度；1s 间隔下永远达不到上限。
-pub(crate) const CHART_SERIES_CAP: usize = 30_000;
+pub const CHART_SERIES_CAP: usize = 30_000;
 
 /// 每 2 取 1 原地抽稀（保留首尾，容量减半）
 pub(crate) fn decimate<T>(dq: &mut VecDeque<T>) {
