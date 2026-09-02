@@ -107,7 +107,11 @@ fps_sample_round(pid)                    ← agent 内每 PID 每轮一次
 
 **为什么**：adb 轮询单轮固定 6+ 次调用（每次 ~13ms 起，`dumpsys meminfo` ~100ms），低间隔下开销超过间隔本身，且每次 adb 调用都扰动被测系统。agent 常驻设备直接读 /proc（微秒级），NDJSON 经 `adb exec-out` 长连接流式回传（PerfDog Agent 同构思路，但免装 APK：纯静态二进制）。当前 CLI/GUI 的**唯一**采样路径。
 
-**部署**：首次运行自动交叉编译（需 NDK，链接器配置在 `.cargo/config.toml`）+ push 到 `/data/local/tmp/xperf-agent`（大小不一致才重推）。
+**部署**：
+- 本机二进制：`target/aarch64-linux-android/release/xperf-agent`（不存在时自动执行 `cargo build -p xperf-agent --target aarch64-linux-android --release`；需 NDK，链接器配置在 `.cargo/config.toml`，当前绑定 NDK 25.1.8937393 / API 26）
+- 设备端路径：`/data/local/tmp/xperf-agent`
+- 更新机制（`agent::deploy_agent`）：比对本机文件大小与设备上 `stat -c %s`，不一致或不存在才 `adb push` + `chmod 755`，避免每次重复推送
+- 手动重建推送：`cargo build -p xperf-agent --target aarch64-linux-android --release && adb push target/aarch64-linux-android/release/xperf-agent /data/local/tmp/`
 
 **要点**：
 - 绝对节拍：`start + round × interval`，漂移时发 err 行（"round N overrun"）
