@@ -120,6 +120,8 @@ async fn monitor_process_agent(args: &Args) -> Result<(), Box<dyn std::error::Er
     }
     let mut aggs: std::collections::HashMap<u32, Agg> = Default::default();
     let mut last_print = Instant::now();
+    // 边采边落盘：样本到达即追加 CSV，崩溃只丢未 flush 尾部
+    let mut csv = cli_utils::CsvStream::default();
 
     while running.load(Ordering::SeqCst) {
         let Some(ev) = stream.next_event()? else { break }; // EOF：agent 退出/断连
@@ -168,7 +170,9 @@ async fn monitor_process_agent(args: &Args) -> Result<(), Box<dyn std::error::Er
                 }
                 let s = pid_stats.entry(pid.to_string()).or_default();
                 s.active = true;
-                s.cpu_data.add_data_point(t, cpu, threads.clone());
+                // top_threads 无读者（线程数据走下方 thread_time_series + 流式 CSV），不存
+                s.cpu_data.add_data_point(t, cpu, Vec::new());
+                csv.cpu_row(&args.package, pid, t, cpu);
                 if s.cpu_time.is_none() || cpu > s.cpu_usage {
                     s.cpu_usage = cpu;
                     s.cpu_time = Some(t);
@@ -177,7 +181,20 @@ async fn monitor_process_agent(args: &Args) -> Result<(), Box<dyn std::error::Er
                     let per_pid = thread_time_series.entry(pid.to_string()).or_default();
                     for t2 in threads {
                         if t2.cpu_usage > 0.0 {
-                            per_pid.entry(t2.name.clone()).or_default().push(t2);
+                            if let Ok(tid) = t2.tid.parse::<u32>() {
+                                csv.thread_row(&args.package, pid, tid, &t2.name, t, t2.cpu_usage);
+                            }
+                            let series = per_pid.entry(t2.name.clone()).or_default();
+                            // 与 xperf-core 时序同策略：超 2×CAP 每 2 取 1 抽稀，长测内存有界
+                            if series.len() >= 2 * 30_000 {
+                                let mut i = 0;
+                                series.retain(|_| {
+                                    let keep = i % 2 == 0;
+                                    i += 1;
+                                    keep
+                                });
+                            }
+                            series.push(t2);
                         }
                     }
                 }
@@ -208,9 +225,7 @@ async fn monitor_process_agent(args: &Args) -> Result<(), Box<dyn std::error::Er
                 }
                 let s = pid_stats.entry(pid.to_string()).or_default();
                 s.active = true;
-                // 直接推入时序（绕过轮询模式遗留的 300 点上限，保高频数据完整）
-                s.memory_data.timestamps.push_back(t);
-                s.memory_data.memory_details.push_back(xperf_core::MemoryDetails {
+                let details = xperf_core::MemoryDetails {
                     java_heap: java,
                     native_heap: native,
                     code,
@@ -219,7 +234,9 @@ async fn monitor_process_agent(args: &Args) -> Result<(), Box<dyn std::error::Er
                     private_other: other,
                     system: sys,
                     total_pss: pss,
-                });
+                };
+                s.memory_data.add_data_point(t, details.clone());
+                csv.mem_row(&args.package, pid, t, &details);
                 if s.memory_time.is_none() || pss > s.memory_usage {
                     s.memory_usage = pss;
                     s.memory_time = Some(t);
@@ -249,6 +266,7 @@ async fn monitor_process_agent(args: &Args) -> Result<(), Box<dyn std::error::Er
                 let s = pid_stats.entry(pid.to_string()).or_default();
                 s.active = true;
                 s.fps_data.add_data_point(t, fps, jank, &layer);
+                csv.fps_row(&args.package, pid, t, &layer, fps, jank);
                 let a = aggs.entry(pid).or_default();
                 a.fps = Some((layer, fps, jank));
             }
@@ -316,12 +334,7 @@ fn generate_final_outputs(
                 if per_pid_series.is_empty() {
                     continue;
                 }
-                let threads: Vec<ThreadCpuInfo> =
-                    per_pid_series.values().flat_map(|v| v.iter().cloned()).collect();
-                match cli_utils::export_thread_data_to_csv(thread_dir.clone(), pid, &threads, false) {
-                    Ok(filenames) => println!("✓ Final thread data (pid {}) exported to {} CSV files", pid, filenames.len()),
-                    Err(e) => println!("Failed to export final thread data for pid {}: {}", pid, e),
-                }
+                // 线程 CSV 已在采样时流式落盘，这里只出时序图
                 match cli_utils::generate_thread_time_series_chart(thread_dir.clone(), &args.package, pid, per_pid_series) {
                     Ok(name) if !name.is_empty() => println!("✓ Final thread time series chart (pid {}) generated: {}", pid, name),
                     Ok(_) => {}
@@ -371,11 +384,7 @@ fn generate_final_outputs(
                     }
                     Err(e) => println!("Failed to generate CPU chart for pid {}: {}", pid, e),
                 }
-                let csv_path = cpu_dir.join(format!("cpu_{}_data.csv", pid));
-                match cli_utils::export_cpu_data_to_csv(&csv_path, &s.cpu_data.timestamps, &s.cpu_data.process_cpu) {
-                    Ok(_) => println!("✓ CPU data exported to CSV (pid {}): {}", pid, csv_path.display()),
-                    Err(e) => println!("Failed to export CPU data for pid {}: {}", pid, e),
-                }
+                // CPU CSV 已在采样时流式落盘（cpu/cpu_<pid>_data.csv）
                 cpu_series_for_summary.push((pid.clone(), &s.cpu_data.timestamps, &s.cpu_data.process_cpu));
             }
             if cpu_series_for_summary.len() >= 2 {
@@ -409,11 +418,7 @@ fn generate_final_outputs(
                 match generate_memory_charts(&memory_dir, &args.package, pid, &s.memory_data) {
                     Ok(paths) => {
                         for path in paths {
-                            if path.to_string_lossy().ends_with(".png") {
-                                println!("✓ Memory chart generated (pid {}): {}", pid, path.display());
-                            } else if path.to_string_lossy().ends_with(".csv") {
-                                println!("✓ Memory data exported to CSV (pid {}): {}", pid, path.display());
-                            }
+                            println!("✓ Memory chart generated (pid {}): {}", pid, path.display());
                         }
                     }
                     Err(e) => println!("Failed to generate memory charts for pid {}: {}", pid, e),
@@ -428,24 +433,7 @@ fn generate_final_outputs(
             }
         }
     }
-    if args.fps {
-        let fps_dir = timestamp_dir.join("fps");
-        let mut has_fps = false;
-        for s in pid_stats.values() {
-            if !s.fps_data.timestamps.is_empty() { has_fps = true; break; }
-        }
-        if has_fps {
-            std::fs::create_dir_all(&fps_dir)?;
-            for (pid, s) in pid_stats {
-                if s.fps_data.timestamps.is_empty() { continue; }
-                let csv_path = fps_dir.join(format!("{}_fps_data_pid{}.csv", args.package, pid));
-                match cli_utils::export_fps_data_to_csv(&csv_path, &s.fps_data) {
-                    Ok(_) => println!("✓ FPS data exported to CSV (pid {}): {}", pid, csv_path.display()),
-                    Err(e) => println!("Failed to export FPS data for pid {}: {}", pid, e),
-                }
-            }
-        }
-    }
+    // FPS CSV 已在采样时流式落盘（fps/<pkg>_fps_data_pid<pid>.csv），CLI 不出 FPS 图表
     Ok(())
 }
 
@@ -543,23 +531,7 @@ fn generate_memory_charts(
     root.present()?;
     chart_paths.push(path_clone);
 
-    let csv_path = output_dir.join(format!("memory_{}_data.csv", pid));
-    if let Ok(file) = std::fs::File::create(&csv_path) {
-        let mut writer = std::io::BufWriter::new(file);
-        use std::io::Write;
-        let _ = writeln!(writer, "Timestamp,Total PSS,Java Heap,Native Heap,Code,Stack,Graphics,Private Other,System");
-        for (t, d) in memory_data.timestamps.iter().zip(memory_data.memory_details.iter()) {
-            let _ = writeln!(
-                writer,
-                "{},{},{},{},{},{},{},{},{}",
-                t.format("%Y-%m-%d %H:%M:%S%.3f"),
-                d.total_pss, d.java_heap, d.native_heap, d.code, d.stack, d.graphics, d.private_other, d.system
-            );
-        }
-        let _ = writer.flush();
-        chart_paths.push(csv_path);
-    }
-
+    // 内存 CSV 已在采样时流式落盘（memory/memory_<pid>_data.csv）
     Ok(chart_paths)
 }
 

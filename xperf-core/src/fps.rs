@@ -47,6 +47,12 @@ pub struct FpsTimeSeriesData {
 
 impl FpsTimeSeriesData {
     pub fn add_data_point(&mut self, timestamp: DateTime<Local>, fps: f32, jank_count: u32, layer: &str) {
+        if self.timestamps.len() >= 2 * crate::CHART_SERIES_CAP {
+            crate::decimate_vec(&mut self.timestamps);
+            crate::decimate_vec(&mut self.fps);
+            crate::decimate_vec(&mut self.jank_counts);
+            crate::decimate_vec(&mut self.layers);
+        }
         self.timestamps.push(timestamp);
         self.fps.push(fps);
         self.jank_counts.push(jank_count);
