@@ -151,6 +151,47 @@ pub fn spawn_agent(
     })
 }
 
+/// 任一 adb 设备是否在线
+fn device_online() -> bool {
+    Command::new("adb")
+        .arg("devices")
+        .output()
+        .map(|o| {
+            o.status.success()
+                && String::from_utf8_lossy(&o.stdout).lines().skip(1).any(|l| !l.trim().is_empty())
+        })
+        .unwrap_or(false)
+}
+
+/// 断连恢复：事件流 EOF（adb 长连接断开 / agent 进程退出）后调用。
+/// 每 500ms 轮询设备状态，设备回来后重新部署并启动 agent。
+/// `is_running` 返回 false（用户停止 / Ctrl-C）时返回 None；重连成功返回新事件流。
+/// 调用方持有的采样状态（时序、峰值等）不受影响，新 agent 的首轮仅重建基线。
+pub fn reconnect_agent(
+    package: Option<&str>,
+    interval_ms: u64,
+    cpu: bool,
+    memory: bool,
+    fps: bool,
+    is_running: &dyn Fn() -> bool,
+) -> Option<AgentStream> {
+    loop {
+        if !is_running() {
+            return None;
+        }
+        if device_online() {
+            match ensure_agent_built()
+                .and_then(|bin| deploy_agent(&bin))
+                .and_then(|_| spawn_agent(package, interval_ms, cpu, memory, fps))
+            {
+                Ok(s) => return Some(s),
+                Err(e) => eprintln!("agent 重连失败: {}，继续等待…", e),
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

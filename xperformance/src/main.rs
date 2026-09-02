@@ -124,7 +124,25 @@ async fn monitor_process_agent(args: &Args) -> Result<(), Box<dyn std::error::Er
     let mut csv = cli_utils::CsvStream::default();
 
     while running.load(Ordering::SeqCst) {
-        let Some(ev) = stream.next_event()? else { break }; // EOF：agent 退出/断连
+        let ev = match stream.next_event() {
+            Ok(Some(ev)) => ev,
+            // EOF/读错误：adb 长连接断开或 agent 退出 → 等待设备恢复并重连，采样状态保留
+            Ok(None) | Err(_) => {
+                println!("{}", "连接断开，等待设备恢复…（Ctrl-C 退出）".yellow());
+                let r = running.clone();
+                match agent::reconnect_agent(
+                    Some(&args.package), args.interval, args.cpu, args.memory, args.fps,
+                    &move || r.load(Ordering::SeqCst),
+                ) {
+                    Some(s) => {
+                        stream = s;
+                        println!("{}", "已重连，恢复采样".green());
+                        continue;
+                    }
+                    None => break, // Ctrl-C
+                }
+            }
+        };
         let ev = match ev {
             Ok(ev) => ev,
             Err(e) => {
