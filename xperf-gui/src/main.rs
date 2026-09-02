@@ -121,6 +121,8 @@ fn map_event(
 fn spawn_sampling(app: tauri::AppHandle, package: String, interval: u64, flags: MetricFlags, running: Arc<Mutex<bool>>) {
     eprintln!("[sampling] 启动: package={} interval={} flags={:?}", package, interval, flags);
     std::thread::spawn(move || {
+        let platform = xperf_core::detect_platform_live();
+        eprintln!("[sampling] 平台: {} ({})", platform.name(), platform.description());
         let bin = match agent::ensure_agent_built() {
             Ok(b) => b,
             Err(e) => {
@@ -136,7 +138,7 @@ fn spawn_sampling(app: tauri::AppHandle, package: String, interval: u64, flags: 
             *running = false;
             return;
         }
-        let mut stream = match agent::spawn_agent(Some(&package), interval, flags) {
+        let mut stream = match agent::spawn_agent(Some(&package), interval, flags, Some(&*platform)) {
             Ok(s) => s,
             Err(e) => {
                 eprintln!("[sampling] agent 启动失败: {}", e);
@@ -160,7 +162,7 @@ fn spawn_sampling(app: tauri::AppHandle, package: String, interval: u64, flags: 
                     eprintln!("[sampling] 连接断开，等待设备恢复…");
                     let running2 = running.clone();
                     match agent::reconnect_agent(
-                        Some(&package), interval, flags,
+                        Some(&package), interval, flags, Some(&*platform),
                         &move || *running2.lock().unwrap(),
                     ) {
                         Some(s) => {

@@ -52,6 +52,10 @@ struct Args {
     net: bool,
     gpu: bool,
     thermal: bool,
+    /// 平台提示（ss2max/ss2pro/ss3/ss4/android），跳过运行时探测
+    platform: Option<String>,
+    /// QNX host telnet IP（覆盖默认 172.31.101.52，由 host 侧平台检测传入）
+    qnx_host: Option<String>,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -66,6 +70,8 @@ fn parse_args() -> Result<Args, String> {
     let mut net = false;
     let mut gpu = false;
     let mut thermal = false;
+    let mut platform = None;
+    let mut qnx_host = None;
     let argv: Vec<String> = std::env::args().collect();
     let mut i = 1;
     while i < argv.len() {
@@ -97,6 +103,14 @@ fn parse_args() -> Result<Args, String> {
             "--net" => net = true,
             "--gpu" => gpu = true,
             "--thermal" => thermal = true,
+            "--platform" => {
+                i += 1;
+                platform = Some(argv.get(i).ok_or("--platform 缺参数")?.clone());
+            }
+            "--qnx-host" => {
+                i += 1;
+                qnx_host = Some(argv.get(i).ok_or("--qnx-host 缺参数")?.clone());
+            }
             other => return Err(format!("未知参数: {}", other)),
         }
         i += 1;
@@ -110,7 +124,7 @@ fn parse_args() -> Result<Args, String> {
     if interval_ms < 50 {
         return Err("--interval 最小 50ms（更低会撞上 jiffies 粒度（10ms）且采样开销占比过高）".into());
     }
-    Ok(Args { package, pids, interval_ms, cpu, memory, fps, freq, io, net, gpu, thermal })
+    Ok(Args { package, pids, interval_ms, cpu, memory, fps, freq, io, net, gpu, thermal, platform, qnx_host })
 }
 
 // ---------- /proc 读取 ----------
@@ -299,20 +313,45 @@ enum GpuPath {
     DumpMem,
 }
 
-/// QNX host（GPU 所在侧）地址：SS3/8295 平台固定 172.31.101.52（virtio_net eth1 对端）
-const QNX_TELNET_IP: &str = "172.31.101.52";
-const QNX_TELNET_ADDR: &str = "172.31.101.52:23";
+/// QNX host（GPU 所在侧）默认地址：SS3/8295 平台固定 172.31.101.52（virtio_net eth1 对端）
+const QNX_TELNET_IP_DEFAULT: &str = "172.31.101.52";
 
-fn detect_gpu_path() -> Option<GpuPath> {
-    if let Some(k) = detect_kgsl() {
-        return Some(GpuPath::Kgsl(k));
+/// 当前 QNX 地址（由 --qnx-host 参数覆盖，或用默认值）
+fn qnx_ip() -> &'static str {
+    use std::sync::OnceLock;
+    static IP: OnceLock<String> = OnceLock::new();
+    IP.get_or_init(|| QNX_TELNET_IP_DEFAULT.to_string()).as_str()
+}
+
+fn qnx_addr() -> String {
+    format!("{}:23", qnx_ip())
+}
+
+/// 设置 QNX 地址（main 启动时调用一次）
+fn set_qnx_host(ip: &str) {
+    use std::sync::OnceLock;
+    static IP: OnceLock<String> = OnceLock::new();
+    let _ = IP.set(ip.to_string());
+}
+
+/// GPU 路径探测（带平台提示跳过项）
+fn detect_gpu_path_ex(skip_kgsl: bool, skip_qnx: bool) -> Option<GpuPath> {
+    if !skip_kgsl {
+        if let Some(k) = detect_kgsl() {
+            return Some(GpuPath::Kgsl(k));
+        }
     }
-    if qnx_gpu_available() {
+    if !skip_qnx && qnx_gpu_available() {
         return Some(GpuPath::Qnx);
     }
-    // 保底探测：dumpsys gpu 有 "Memory snapshot" 段即可用
+    // 保底：dumpsys gpu 显存
     let out = dumpsys(&["gpu"])?;
     parse_gpu_mem_snapshot(&out).map(|_| GpuPath::DumpMem)
+}
+
+#[allow(dead_code)]
+fn detect_gpu_path() -> Option<GpuPath> {
+    detect_gpu_path_ex(false, false)
 }
 
 /// QNX 通道可用性：busybox 存在 + QNX telnet 端口可连
@@ -322,7 +361,7 @@ fn qnx_gpu_available() -> bool {
     }
     use std::net::TcpStream;
     use std::net::ToSocketAddrs;
-    let addr = match QNX_TELNET_ADDR.to_socket_addrs() {
+    let addr = match qnx_addr().to_socket_addrs() {
         Ok(mut it) => match it.next() {
             Some(a) => a,
             None => return false,
@@ -376,7 +415,7 @@ fn spawn_qnx_gpu(period_ms: u64) -> Option<(std::process::Child, std::process::C
     use std::io::BufReader;
     use std::process::{Command, Stdio};
     let mut child = Command::new("busybox")
-        .args(["telnet", QNX_TELNET_IP])
+        .args(["telnet", qnx_ip()])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -782,6 +821,10 @@ fn main() {
     };
     // 每核最大频率（KHz），与 freq 事件的 khz 数组下标对应
     let maxkhz: Vec<u64> = (0..ncores).map(|i| read_cpufreq(i, "cpuinfo_max_freq").unwrap_or(0)).collect();
+    // QNX 地址：--qnx-host 参数覆盖默认值
+    if let Some(ref host) = args.qnx_host {
+        set_qnx_host(host);
+    }
     emit(&format!(
         "{{\"t\":\"hello\",\"ncores\":{},\"maxkhz\":[{}],\"version\":1}}",
         ncores,
@@ -795,7 +838,11 @@ fn main() {
         freq_enabled = false;
     }
     let gpu_path = if args.gpu {
-        let g = detect_gpu_path();
+        // 平台提示：android → 跳过 QNX 探测，直接走 kgsl/dumpsys；
+        // ss3 → 跳过 kgsl 探测，直接走 QNX；其余 → 自动探测
+        let skip_kgsl = matches!(args.platform.as_deref(), Some("ss3"));
+        let skip_qnx = matches!(args.platform.as_deref(), Some("android" | "ss2max" | "ss2pro"));
+        let g = detect_gpu_path_ex(skip_kgsl, skip_qnx);
         match &g {
             None => emit("{\"t\":\"err\",\"msg\":\"kgsl / QNX 通道 / dumpsys gpu 均不可用，--gpu 已禁用\"}"),
             Some(GpuPath::Qnx) => emit("{\"t\":\"err\",\"msg\":\"kgsl sysfs 不存在，--gpu 走 QNX host 通道（真利用率 + 每进程 busy + 频率）\"}"),
