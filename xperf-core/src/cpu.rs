@@ -475,6 +475,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_sample_cpu_phase1_parses_jiffies() {
+        let _lock = utils::ADB_TEST_LOCK.lock().await;
         utils::set_adb_runner_for_test(phase_runner);
         let p1 = sample_cpu_phase1("15803").await.unwrap();
         assert_eq!(p1.pid, "15803");
@@ -487,6 +488,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_sample_cpu_phase2_zero_delta_bails() {
+        let _lock = utils::ADB_TEST_LOCK.lock().await;
         // 同一 mock，phase1 和 phase2 的 sys jiffies 都相同 → delta=0 → 报错
         utils::set_adb_runner_for_test(phase_runner);
         let p1 = sample_cpu_phase1("15803").await.unwrap();
@@ -509,6 +511,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_sample_cpu_phase1_process_not_found() {
+        let _lock = utils::ADB_TEST_LOCK.lock().await;
         utils::set_adb_runner_for_test(dead_runner);
         let err = sample_cpu_phase1("99999").await.unwrap_err();
         assert!(
@@ -546,6 +549,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_sample_cpu_phase2_calculates_cpu_percent() {
+        let _lock = utils::ADB_TEST_LOCK.lock().await;
         utils::set_adb_runner_for_test(delta_runner);
         // phase1：读第一次 jiffies
         MOCK_PHASE.store(1, Ordering::SeqCst);
@@ -591,6 +595,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_sample_cpu_phase2_single_core_scale() {
+        let _lock = utils::ADB_TEST_LOCK.lock().await;
         utils::set_adb_runner_for_test(multicore_runner);
         MOCK_PHASE.store(1, Ordering::SeqCst);
         let p1 = sample_cpu_phase1("15803").await.unwrap();
@@ -604,6 +609,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_sample_cpu_phase2_negative_delta_clamps_to_zero() {
+        let _lock = utils::ADB_TEST_LOCK.lock().await;
         // 进程 jiffies 不应倒退，但若 phase2 < phase1（如进程重启），saturating_sub 归 0 → CPU=0%
         utils::set_adb_runner_for_test(delta_runner);
         MOCK_PHASE.store(1, Ordering::SeqCst);
@@ -672,6 +678,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_sample_cpu_phase2_thread_delta_calculation() {
+        let _lock = utils::ADB_TEST_LOCK.lock().await;
         utils::set_adb_runner_for_test(thread_runner);
         // phase1：线程 100(jiffies=100)、200(jiffies=200)
         MOCK_PHASE.store(1, Ordering::SeqCst);
@@ -731,6 +738,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_sample_cpu_phase2_threads_sorted_desc() {
+        let _lock = utils::ADB_TEST_LOCK.lock().await;
         utils::set_adb_runner_for_test(sort_runner);
         MOCK_PHASE.store(1, Ordering::SeqCst);
         let p1 = sample_cpu_phase1("15803").await.unwrap();

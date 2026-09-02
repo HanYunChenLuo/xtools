@@ -150,6 +150,7 @@ TOTAL SWAP PSS:      0
 
     #[tokio::test]
     async fn test_sample_memory_parses_app_summary() {
+        let _lock = crate::utils::ADB_TEST_LOCK.lock().await;
         crate::utils::set_adb_runner_for_test(meminfo_runner);
         let (total_pss, _ts, details) = sample_memory("15803").await.unwrap();
         assert_eq!(total_pss, 453901);
@@ -171,6 +172,7 @@ TOTAL SWAP PSS:      0
 
     #[tokio::test]
     async fn test_sample_memory_empty_output_returns_zero() {
+        let _lock = crate::utils::ADB_TEST_LOCK.lock().await;
         crate::utils::set_adb_runner_for_test(empty_runner);
         let (total_pss, _ts, _details) = sample_memory("99999").await.unwrap();
         assert_eq!(total_pss, 0); // 无 TOTAL PSS 行 → 0

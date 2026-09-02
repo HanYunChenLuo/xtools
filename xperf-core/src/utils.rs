@@ -95,8 +95,15 @@ pub type AdbRunner = fn(&[&str]) -> Result<ProcOutput>;
 
 static ADB_RUNNER_OVERRIDE: Mutex<Option<AdbRunner>> = Mutex::new(None);
 
+/// 测试串行锁：注入 mock adb runner 的测试共享全局状态（ADB_RUNNER_OVERRIDE，
+/// 以及 cpu.rs 的 MOCK_PHASE 等模块级标志），并行执行会互相覆盖导致偶发失败。
+/// 所有调用 set_adb_runner_for_test 的测试必须全程持有此锁
+/// （async 测试 `.lock().await`，sync 测试 `.blocking_lock()`）。
+#[cfg(test)]
+pub static ADB_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 /// 注入 mock adb 执行器，仅用于单元测试。
-/// 可重复调用（覆盖前一次设置），但测试间共享全局状态，需 `--test-threads=1` 运行。
+/// 可重复调用（覆盖前一次设置）；测试间共享全局状态，调用方须持有 ADB_TEST_LOCK。
 #[cfg(test)]
 pub fn set_adb_runner_for_test(runner: AdbRunner) {
     if let Ok(mut guard) = ADB_RUNNER_OVERRIDE.lock() {
@@ -224,6 +231,7 @@ mod tests {
 
     #[test]
     fn test_get_all_processes_multi_pid() {
+        let _lock = ADB_TEST_LOCK.blocking_lock();
         set_adb_runner_for_test(mock_runner_for_get_all_processes);
         let procs = get_all_processes("com.lixiang.car.browser").unwrap();
         assert_eq!(procs.len(), 2);
@@ -242,6 +250,7 @@ mod tests {
             }
             Ok(ProcOutput { stdout: "2026-09-01 10:00:00 +0800\n".to_string() })
         }
+        let _lock = ADB_TEST_LOCK.blocking_lock();
         set_adb_runner_for_test(single);
         let procs = get_all_processes("com.x").unwrap();
         assert_eq!(procs.len(), 1);
@@ -254,6 +263,7 @@ mod tests {
         fn empty(_args: &[&str]) -> Result<ProcOutput> {
             Ok(ProcOutput { stdout: "\n".to_string() })
         }
+        let _lock = ADB_TEST_LOCK.blocking_lock();
         set_adb_runner_for_test(empty);
         let err = get_all_processes("com.nonexistent").unwrap_err();
         assert!(
