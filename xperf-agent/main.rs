@@ -368,10 +368,11 @@ fn parse_qnx_gpu_line(line: &str) -> Option<QnxGpuSample> {
     None
 }
 
-/// 启动 QNX GPU 统计流：busybox telnet 登录（root 免密）→ 开 kgsl 统计 → slog2info -w 持续跟踪。
+/// 启动 QNX GPU 统计流：busybox telnet 登录（root 免密）→ 开 kgsl 统计 → slog2info -W 持续跟踪。
 /// 返回 (子进程, stdin 保持管道存活——drop 即 EOF 会让 telnet 退出, 行读取器)。
 /// agent 退出时 stdin/stdout 管道断开，telnet 随 QNX 侧会话结束自行清理。
-fn spawn_qnx_gpu() -> Option<(std::process::Child, std::process::ChildStdin, std::io::BufReader<std::process::ChildStdout>)> {
+/// period_ms：kgsl 统计周期（实测 50ms 稳定；QNX 侧逐上下文打点，telnet 带宽无压力）
+fn spawn_qnx_gpu(period_ms: u64) -> Option<(std::process::Child, std::process::ChildStdin, std::io::BufReader<std::process::ChildStdout>)> {
     use std::io::BufReader;
     use std::process::{Command, Stdio};
     let mut child = Command::new("busybox")
@@ -410,15 +411,15 @@ fn spawn_qnx_gpu() -> Option<(std::process::Child, std::process::ChildStdin, std
     stdin.write_all(b"root\n").ok()?;
     // 等 shell prompt：QNX 登录成功后的提示符是 "# "（同样无换行）
     read_until(&mut reader, "# ", deadline)?;
-    // 开 kgsl 统计（1s 周期）并启动持续流（-W 只跟新日志不回放历史；grep 过滤 VHAL 等海量无关日志）
-    stdin
-        .write_all(
-            b"echo gpu_set_log_level 4 > /dev/kgsl-control\n\
-              echo gpubusystats 1000 > /dev/kgsl-control\n\
-              echo gpu_per_process_busy 1000 > /dev/kgsl-control\n\
-              slog2info -W | grep kgsl\n",
-        )
-        .ok()?;
+    // 开 kgsl 统计并启动持续流（-W 只跟新日志不回放历史；grep 过滤 VHAL 等海量无关日志）
+    let cmds = format!(
+        "echo gpu_set_log_level 4 > /dev/kgsl-control\n\
+         echo gpubusystats {} > /dev/kgsl-control\n\
+         echo gpu_per_process_busy {} > /dev/kgsl-control\n\
+         slog2info -W | grep kgsl\n",
+        period_ms, period_ms
+    );
+    stdin.write_all(cmds.as_bytes()).ok()?;
     Some((child, stdin, reader))
 }
 
@@ -810,7 +811,9 @@ fn main() {
     // pid_names：QNX 进程行按进程名归因到 Android PID（QNX 显示名与 /proc/<pid>/comm 一致）。
     let pid_names: Arc<Mutex<HashMap<String, u32>>> = Arc::new(Mutex::new(HashMap::new()));
     if matches!(gpu_path, Some(GpuPath::Qnx)) {
-        match spawn_qnx_gpu() {
+        // kgsl 统计周期跟随采样间隔（clamp [100, 1000]ms：50ms 实测稳定，过短 busy% 窗口噪声大）
+        let qnx_period = args.interval_ms.clamp(100, 1000);
+        match spawn_qnx_gpu(qnx_period) {
             Some((mut child, stdin, mut reader)) => {
                 let pid_names2 = pid_names.clone();
                 std::thread::spawn(move || {
