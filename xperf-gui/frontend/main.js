@@ -172,7 +172,8 @@ const fpsHist = {};
 const tempHist = {}; // 传感器名 -> [{t, v, status}]
 const ioHist = {};   // pid -> [{t, r, w, dr, dw}]
 const gpuHist = [];  // [{t, busy, mhz}]
-const gpumemHist = {}; // pid -> [{t, mb, gmb}]（--gpu 降级路径）
+const gpumemHist = {}; // pid -> [{t, mb, gmb}]（--gpu 保底路径）
+const gpuprocHist = {}; // pid -> [{t, busy}]（--gpu QNX 路径每进程 busy%）
 let maxkhz = [];     // AgentHello 带的每核最大频率（KHz）
 
 function fmtTime(t) { return new Date(t).toTimeString().slice(0, 8); }
@@ -300,12 +301,24 @@ listen('sample', (e) => {
     }
     try { tempChart.draw(); } catch (err) { _diag('tempChart.draw ERROR: ' + err.message); }
   } else if (ev.GpuUpdate) {
-    const { timestamp, busy, mhz } = ev.GpuUpdate;
+    const { timestamp, busy, util, mhz, maxmhz } = ev.GpuUpdate;
     autoCheck('gpu');
     const t = new Date(timestamp).getTime();
-    gpuChart.title = `GPU Busy (%) — @ ${mhz} MHz`;
+    // QNX 路径带 util/maxmhz（util = busy 按频率折算的利用率）；kgsl 路径 util=0
+    gpuChart.title = maxmhz > 0 ? `GPU (%) — ${mhz}/${maxmhz} MHz` : `GPU Busy (%) — @ ${mhz} MHz`;
     gpuChart.push('busy', t, +busy.toFixed(2));
-    gpuHist.push({ t, busy, mhz });
+    if (util > 0 || maxmhz > 0) gpuChart.push('util', t, +util.toFixed(2));
+    gpuHist.push({ t, busy, util, mhz });
+    try { gpuChart.draw(); } catch (err) { _diag('gpuChart.draw ERROR: ' + err.message); }
+  } else if (ev.GpuProcUpdate) {
+    // QNX 路径：每进程 GPU busy%
+    const { pid, timestamp, busy } = ev.GpuProcUpdate;
+    if (!pidData[pid]) { pidData[pid] = { cpu: [], mem: [], new: true }; renderPidList(); }
+    autoCheck('gpu');
+    const t = new Date(timestamp).getTime();
+    gpuChart.push('PID ' + pid, t, +busy.toFixed(2));
+    if (!gpuprocHist[pid]) gpuprocHist[pid] = [];
+    gpuprocHist[pid].push({ t, busy });
     try { gpuChart.draw(); } catch (err) { _diag('gpuChart.draw ERROR: ' + err.message); }
   } else if (ev.GpuMemUpdate) {
     // --gpu 降级路径（hypervisor 平台）：每 PID GPU 显存
@@ -365,6 +378,7 @@ document.getElementById('startBtn').addEventListener('click', async () => {
   for (const k of Object.keys(tempHist)) delete tempHist[k];
   for (const k of Object.keys(ioHist)) delete ioHist[k];
   for (const k of Object.keys(gpumemHist)) delete gpumemHist[k];
+  for (const k of Object.keys(gpuprocHist)) delete gpuprocHist[k];
   gpuHist.length = 0;
   renderPeaks();
   renderPidList();
@@ -422,7 +436,7 @@ document.getElementById('timeWindow').addEventListener('change', (e) => {
 // ---- 导出 CSV：把前端持有的完整会话历史发给后端写盘 ----
 document.getElementById('exportBtn').addEventListener('click', async () => {
   const pkg = document.getElementById('package').value || 'unknown';
-  const cpu = {}, mem = {}, fps = {}, freq = {}, temp = {}, io = {}, gpumem = {};
+  const cpu = {}, mem = {}, fps = {}, freq = {}, temp = {}, io = {}, gpumem = {}, gpuproc = {};
   for (const [k, pts] of Object.entries(cpuChart.series)) cpu[k.replace('PID ', '')] = pts.map(p => [p.t, p.v]);
   for (const [k, pts] of Object.entries(memChart.series)) mem[k.replace('PID ', '')] = pts.map(p => [p.t, p.v]);
   for (const [layer, pts] of Object.entries(fpsHist)) fps[layer] = pts.map(p => [p.t, p.fps, p.jank]);
@@ -430,10 +444,11 @@ document.getElementById('exportBtn').addEventListener('click', async () => {
   for (const [sensor, pts] of Object.entries(tempHist)) temp[sensor] = pts.map(p => [p.t, p.v, p.status]);
   for (const [pid, pts] of Object.entries(ioHist)) io[pid] = pts.map(p => [p.t, p.r, p.w, p.dr, p.dw]);
   for (const [pid, pts] of Object.entries(gpumemHist)) gpumem[pid] = pts.map(p => [p.t, p.mb, p.gmb]);
-  const gpu = gpuHist.map(p => [p.t, p.busy, p.mhz]);
+  for (const [pid, pts] of Object.entries(gpuprocHist)) gpuproc[pid] = pts.map(p => [p.t, p.busy]);
+  const gpu = gpuHist.map(p => [p.t, p.busy, p.util, p.mhz]);
   const net = (netChart.series['RX'] || []).map((p, i) => [p.t, p.v, (netChart.series['TX'] || [])[i]?.v ?? 0]);
   try {
-    const dir = await invoke('export_csv', { package: pkg, cpu, mem, fps, freq, temp, gpu, io, net, gpumem });
+    const dir = await invoke('export_csv', { package: pkg, cpu, mem, fps, freq, temp, gpu, io, net, gpumem, gpuproc });
     document.getElementById('status').textContent = '已导出: ' + dir;
   } catch (e) {
     document.getElementById('status').textContent = '导出失败: ' + e;

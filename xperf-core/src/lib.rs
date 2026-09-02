@@ -115,8 +115,10 @@ pub enum SampleEvent {
     FreqUpdate { timestamp: DateTime<Local>, khz: Vec<u64> },
     /// 温度与热降频状态（status: Android ThermalStatus，-1=未知；sensors: [名称, 类型, °C]）
     TempUpdate { timestamp: DateTime<Local>, status: i32, sensors: Vec<(String, i32, f32)> },
-    /// GPU：busy 为窗口占比 %；mhz 为当前时钟（0 = 无时钟源）
-    GpuUpdate { timestamp: DateTime<Local>, busy: f32, mhz: u32 },
+    /// GPU：busy 为窗口占比 %；mhz 为当前时钟（0 = 无时钟源）；util/maxmhz 仅 QNX 路径有值
+    GpuUpdate { timestamp: DateTime<Local>, busy: f32, util: f32, mhz: u32, maxmhz: u32 },
+    /// QNX 路径：每进程 GPU busy %
+    GpuProcUpdate { pid: String, timestamp: DateTime<Local>, busy: f32 },
     /// GPU 显存（--gpu 降级路径，hypervisor 平台）：每 PID 字节数 + 整机 global
     GpuMemUpdate { pid: String, timestamp: DateTime<Local>, bytes: u64, global: u64 },
     /// 每 PID IO 速率 KB/s：r/w=逻辑读写，dr/dw=磁盘读写

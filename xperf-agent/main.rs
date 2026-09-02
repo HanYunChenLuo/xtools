@@ -14,8 +14,9 @@
 //!   {"t":"freq","ts":<wall_ms>,"khz":[2592000,...]}              // 每核当前频率，下标对应 hello 的 maxkhz
 //!   {"t":"io","ts":<wall_ms>,"pid":29697,"r":12.3,"w":4.5,"dr":0.0,"dw":1.2}  // KB/s；r/w=rchar/wchar 逻辑读写，dr/dw=read_bytes/write_bytes 磁盘读写
 //!   {"t":"net","ts":<wall_ms>,"rx":123.4,"tx":56.7}              // KB/s 整机口径（聚合物理口，排除回环/隧道；per-app 无数据源）
-//!   {"t":"gpu","ts":<wall_ms>,"busy":37.5,"mhz":585}             // kgsl gpubusy 差值占比；GPU 在 hypervisor 后的平台无 sysfs
-//!   {"t":"gpumem","ts":<wall_ms>,"pid":29697,"bytes":628928512,"global":2639089664}  // --gpu 降级路径：dumpsys gpu 每 PID GPU 显存（GPU 利用率的替代指标）
+//!   {"t":"gpu","ts":<wall_ms>,"busy":37.5,"mhz":585}             // kgsl 或 QNX 路径；QNX 路径多 "util"/"maxmhz" 字段
+//!   {"t":"gpuproc","ts":<wall_ms>,"pid":29697,"busy":14.4}       // QNX 路径：每进程 GPU busy%
+//!   {"t":"gpumem","ts":<wall_ms>,"pid":29697,"bytes":628928512,"global":2639089664}  // 保底路径：dumpsys gpu 每 PID GPU 显存
 //!   {"t":"temp","ts":<wall_ms>,"status":0,"sensors":[["soc0",4,42.5],...]}    // status=Android ThermalStatus（-1=未知）；sensors=[名称,类型,°C]
 //!   {"t":"exit","pid":29697}
 //!   {"t":"noproc"}
@@ -36,6 +37,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::io::Write;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 struct Args {
@@ -288,20 +290,136 @@ fn parse_gpu_busy(content: &str) -> Option<(u64, u64)> {
     Some((busy, total))
 }
 
-/// GPU 采样路径：kgsl（利用率+时钟）→ 降级 dumpsys gpu（每 PID 显存）。
-/// GPU 在 hypervisor 后的车机平台无 kgsl，但 dumpsys gpu 的显存快照仍可用（~11ms）。
+/// GPU 采样路径，按优先级探测：
+/// kgsl（GVM 直通，利用率+时钟）→ QNX telnet（hypervisor：QNX host 侧 kgsl slog，真利用率+每进程 busy）
+/// → dumpsys gpu（保底：每 PID 显存，~11ms）。
 enum GpuPath {
     Kgsl(Kgsl),
+    Qnx,
     DumpMem,
 }
+
+/// QNX host（GPU 所在侧）地址：SS3/8295 平台固定 172.31.101.52（virtio_net eth1 对端）
+const QNX_TELNET_IP: &str = "172.31.101.52";
+const QNX_TELNET_ADDR: &str = "172.31.101.52:23";
 
 fn detect_gpu_path() -> Option<GpuPath> {
     if let Some(k) = detect_kgsl() {
         return Some(GpuPath::Kgsl(k));
     }
-    // 降级探测：dumpsys gpu 有 "Memory snapshot" 段即可用
+    if qnx_gpu_available() {
+        return Some(GpuPath::Qnx);
+    }
+    // 保底探测：dumpsys gpu 有 "Memory snapshot" 段即可用
     let out = dumpsys(&["gpu"])?;
     parse_gpu_mem_snapshot(&out).map(|_| GpuPath::DumpMem)
+}
+
+/// QNX 通道可用性：busybox 存在 + QNX telnet 端口可连
+fn qnx_gpu_available() -> bool {
+    if fs::metadata("/vendor/bin/busybox").is_err() && fs::metadata("/system/bin/busybox").is_err() {
+        return false;
+    }
+    use std::net::TcpStream;
+    use std::net::ToSocketAddrs;
+    let addr = match QNX_TELNET_ADDR.to_socket_addrs() {
+        Ok(mut it) => match it.next() {
+            Some(a) => a,
+            None => return false,
+        },
+        Err(_) => return false,
+    };
+    TcpStream::connect_timeout(&addr, Duration::from_secs(2)).is_ok()
+}
+
+/// QNX kgsl slog 样本（slog2info 流的两类行）：
+/// 进程行: "For process[PID:1758842997] = 'xiang.car.x.svm' the GPU busy = 14.40% with CtxtID = 244 priority = 1"
+///   （PID 是 QNX 侧编号，无意义；按进程名匹配 Android comm）
+/// 系统行: "frame 435653: freq = 506.975174MHz/635Mhz, elapsed time = 5001.13ms, busy time = 840.57ms, busy = 16.81%, utilization = 13.42%"
+enum QnxGpuSample {
+    Proc { name: String, busy: f32 },
+    Sys { mhz: u32, maxmhz: u32, busy: f32, util: f32 },
+}
+
+fn parse_qnx_gpu_line(line: &str) -> Option<QnxGpuSample> {
+    if let Some(pos) = line.find("For process[PID:") {
+        // 进程名在 = '...' 内；busy 在 "the GPU busy = " 后
+        let name_start = line[pos..].find("= '")? + pos + 3;
+        let name_end = line[name_start..].find('\'')? + name_start;
+        let name = line[name_start..name_end].to_string();
+        let busy_pos = line.find("the GPU busy = ")? + "the GPU busy = ".len();
+        let busy: f32 = line[busy_pos..].split('%').next()?.trim().parse().ok()?;
+        return Some(QnxGpuSample::Proc { name, busy });
+    }
+    if line.contains("utilization = ") && line.contains("frame ") {
+        // freq = 506.975174MHz/635Mhz
+        let fpos = line.find("freq = ")? + 7;
+        let fend = line[fpos..].find("MHz")? + fpos;
+        let mhz = line[fpos..fend].trim().parse::<f32>().ok()? as u32;
+        let maxpos = line[fend..].find('/')? + fend + 1;
+        let maxend = line[maxpos..].find("Mhz")? + maxpos;
+        let maxmhz = line[maxpos..maxend].trim().parse::<f32>().ok()? as u32;
+        let bpos = line.find("busy = ")? + 7;
+        let busy: f32 = line[bpos..].split('%').next()?.trim().parse().ok()?;
+        let upos = line.find("utilization = ")? + "utilization = ".len();
+        let util: f32 = line[upos..].split('%').next()?.trim().parse().ok()?;
+        return Some(QnxGpuSample::Sys { mhz, maxmhz, busy, util });
+    }
+    None
+}
+
+/// 启动 QNX GPU 统计流：busybox telnet 登录（root 免密）→ 开 kgsl 统计 → slog2info -w 持续跟踪。
+/// 返回 (子进程, stdin 保持管道存活——drop 即 EOF 会让 telnet 退出, 行读取器)。
+/// agent 退出时 stdin/stdout 管道断开，telnet 随 QNX 侧会话结束自行清理。
+fn spawn_qnx_gpu() -> Option<(std::process::Child, std::process::ChildStdin, std::io::BufReader<std::process::ChildStdout>)> {
+    use std::io::BufReader;
+    use std::process::{Command, Stdio};
+    let mut child = Command::new("busybox")
+        .args(["telnet", QNX_TELNET_IP])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let mut stdin = child.stdin.take()?;
+    let mut reader = BufReader::new(child.stdout.take()?);
+    // 登录阶段必须逐字节读：QNX 的 "login: " 提示符不带换行，read_line 会永远阻塞
+    fn read_until(reader: &mut std::io::BufReader<std::process::ChildStdout>, marker: &str, deadline: Instant) -> Option<()> {
+        use std::io::Read;
+        let mut buf = String::new();
+        loop {
+            let mut b = [0u8; 1];
+            match reader.read_exact(&mut b) {
+                Ok(()) => {}
+                Err(_) => return None,
+            }
+            buf.push(b[0] as char);
+            if buf.ends_with(marker) {
+                return Some(());
+            }
+            if buf.len() > 4096 {
+                buf.drain(..2048); // 防 banner 刷屏时缓冲无限增长
+            }
+            if Instant::now() > deadline {
+                return None;
+            }
+        }
+    }
+    let deadline = Instant::now() + Duration::from_secs(8);
+    read_until(&mut reader, "login:", deadline)?;
+    stdin.write_all(b"root\n").ok()?;
+    // 等 shell prompt：QNX 登录成功后的提示符是 "# "（同样无换行）
+    read_until(&mut reader, "# ", deadline)?;
+    // 开 kgsl 统计（1s 周期）并启动持续流（-W 只跟新日志不回放历史；grep 过滤 VHAL 等海量无关日志）
+    stdin
+        .write_all(
+            b"echo gpu_set_log_level 4 > /dev/kgsl-control\n\
+              echo gpubusystats 1000 > /dev/kgsl-control\n\
+              echo gpu_per_process_busy 1000 > /dev/kgsl-control\n\
+              slog2info -W | grep kgsl\n",
+        )
+        .ok()?;
+    Some((child, stdin, reader))
 }
 
 /// 解析 dumpsys gpu 的显存快照："Global total: N" + "Proc <pid> total: N"（字节）。
@@ -678,14 +796,60 @@ fn main() {
     let gpu_path = if args.gpu {
         let g = detect_gpu_path();
         match &g {
-            None => emit("{\"t\":\"err\",\"msg\":\"kgsl 与 dumpsys gpu 均不可用，--gpu 已禁用\"}"),
-            Some(GpuPath::DumpMem) => emit("{\"t\":\"err\",\"msg\":\"kgsl sysfs 不存在（GPU 在 hypervisor 之后），--gpu 降级为每 PID GPU 显存（dumpsys gpu）\"}"),
+            None => emit("{\"t\":\"err\",\"msg\":\"kgsl / QNX 通道 / dumpsys gpu 均不可用，--gpu 已禁用\"}"),
+            Some(GpuPath::Qnx) => emit("{\"t\":\"err\",\"msg\":\"kgsl sysfs 不存在，--gpu 走 QNX host 通道（真利用率 + 每进程 busy + 频率）\"}"),
+            Some(GpuPath::DumpMem) => emit("{\"t\":\"err\",\"msg\":\"kgsl 与 QNX 通道均不可用，--gpu 降级为每 PID GPU 显存（dumpsys gpu）\"}"),
             Some(GpuPath::Kgsl(_)) => {}
         }
         g
     } else {
         None
     };
+
+    // QNX GPU 通道：独立读线程（slog2info -w 流式输出，不占节拍循环）。
+    // pid_names：QNX 进程行按进程名归因到 Android PID（QNX 显示名与 /proc/<pid>/comm 一致）。
+    let pid_names: Arc<Mutex<HashMap<String, u32>>> = Arc::new(Mutex::new(HashMap::new()));
+    if matches!(gpu_path, Some(GpuPath::Qnx)) {
+        match spawn_qnx_gpu() {
+            Some((mut child, stdin, mut reader)) => {
+                let pid_names2 = pid_names.clone();
+                std::thread::spawn(move || {
+                    use std::io::BufRead;
+                    let _stdin = stdin; // 持有保持管道存活（drop 即 EOF，telnet 会退出）
+                    let mut line = String::new();
+                    loop {
+                        line.clear();
+                        match reader.read_line(&mut line) {
+                            Ok(0) | Err(_) => {
+                                let _ = child.kill();
+                                emit("{\"t\":\"err\",\"msg\":\"QNX GPU 流断开，--gpu 停止\"}");
+                                return;
+                            }
+                            Ok(_) => {
+                                match parse_qnx_gpu_line(&line) {
+                                    Some(QnxGpuSample::Sys { mhz, maxmhz, busy, util }) => emit(&format!(
+                                        "{{\"t\":\"gpu\",\"ts\":{},\"busy\":{:.2},\"util\":{:.2},\"mhz\":{},\"maxmhz\":{}}}",
+                                        now_ms(), busy, util, mhz, maxmhz
+                                    )),
+                                    Some(QnxGpuSample::Proc { name, busy }) => {
+                                        let pid = pid_names2.lock().unwrap().get(&name).copied();
+                                        if let Some(pid) = pid {
+                                            emit(&format!(
+                                                "{{\"t\":\"gpuproc\",\"ts\":{},\"pid\":{},\"busy\":{:.2}}}",
+                                                now_ms(), pid, busy
+                                            ));
+                                        }
+                                    }
+                                    None => {}
+                                }
+                            }
+                        }
+                    }
+                });
+            }
+            None => emit("{\"t\":\"err\",\"msg\":\"QNX 通道启动失败（telnet 登录或 kgsl 统计开启失败），--gpu 停止\"}"),
+        }
+    }
 
     let mut states: HashMap<u32, PidState> = HashMap::new();
     let mut fps_states: HashMap<u32, FpsState> = HashMap::new();
@@ -730,6 +894,15 @@ fn main() {
 
     // 绝对节拍：按起始时间推算每轮时刻，避免 sleep 累积漂移
     let interval = Duration::from_millis(args.interval_ms);
+    // QNX GPU 路径：进程行归因映射初始填充（后续随重扫每 ~1s 更新）
+    if matches!(gpu_path, Some(GpuPath::Qnx)) {
+        let mut m = pid_names.lock().unwrap();
+        for &pid in &active_pids {
+            if let Ok(c) = fs::read_to_string(format!("/proc/{}/comm", pid)) {
+                m.insert(c.trim().to_string(), pid);
+            }
+        }
+    }
     let start = Instant::now();
     let mut round: u64 = 0;
     // 进程列表重扫间隔：约 1s 一次（低间隔下每轮扫 /proc 太贵）
@@ -767,6 +940,16 @@ fn main() {
             if found.is_empty() {
                 // 每轮重扫都报：让主机读循环在无进程期间也能定期收到行（保持 Ctrl-C 响应）
                 emit("{\"t\":\"noproc\"}");
+            }
+            // QNX GPU 路径：进程行按 comm 名归因，重扫时同步映射表
+            if matches!(gpu_path, Some(GpuPath::Qnx)) {
+                let mut m = pid_names.lock().unwrap();
+                m.clear();
+                for &pid in &active_pids {
+                    if let Ok(c) = fs::read_to_string(format!("/proc/{}/comm", pid)) {
+                        m.insert(c.trim().to_string(), pid);
+                    }
+                }
             }
         }
 
@@ -806,7 +989,8 @@ fn main() {
         }
 
         // GPU：kgsl gpubusy 计数器差值 → 窗口占比 %（首轮建基线不出数）；
-        // 降级路径（hypervisor 平台）：dumpsys gpu 每 PID 显存（限频 ≥1s）
+        // QNX 路径由独立读线程发事件（不占节拍）；
+        // 保底路径：dumpsys gpu 每 PID 显存（限频 ≥1s）
         match &gpu_path {
             Some(GpuPath::Kgsl(g)) => {
                 if let Some((busy, total)) = read_gpu_busy(g.busy_path) {
@@ -820,6 +1004,7 @@ fn main() {
                     }
                 }
             }
+            Some(GpuPath::Qnx) => {} // 读线程独立发 gpu/gpuproc 事件
             Some(GpuPath::DumpMem) => {
                 if round.is_multiple_of(gpumem_every) && !active_pids.is_empty() {
                     if let Some((global, procs)) = dumpsys(&["gpu"]).as_deref().and_then(parse_gpu_mem_snapshot) {
@@ -1161,6 +1346,31 @@ mod tests {
         assert_eq!(procs, vec![(778, 628928512), (29697, 154370048)]);
         // 无 Memory snapshot 段 → None（该设备不支持降级路径）
         assert!(parse_gpu_mem_snapshot("garbage\n").is_none());
+    }
+
+    #[test]
+    fn test_parse_qnx_gpu_line() {
+        // 真机 slog2info 行（QNX SS3/8295）
+        let proc_line = "Sep 02 14:20:14.513  kgsl.94250  slog  100  For process[PID:1758842997] = 'xiang.car.x.svm' the GPU busy = 14.40% with CtxtID = 244 priority = 1";
+        match parse_qnx_gpu_line(proc_line) {
+            Some(QnxGpuSample::Proc { name, busy }) => {
+                assert_eq!(name, "xiang.car.x.svm");
+                assert!((busy - 14.40).abs() < 0.01);
+            }
+            other => panic!("应为 Proc 样本: {:?}", other.map(|_| ())),
+        }
+        let sys_line = "Sep 02 14:20:15.498  kgsl.94250  slog  100  frame 435653: freq = 506.975174MHz/635Mhz, elapsed time = 5001.131108ms, busy time = 840.570286ms, busy = 16.807603%, utilization = 13.418957%";
+        match parse_qnx_gpu_line(sys_line) {
+            Some(QnxGpuSample::Sys { mhz, maxmhz, busy, util }) => {
+                assert_eq!((mhz, maxmhz), (506, 635));
+                assert!((busy - 16.81).abs() < 0.01);
+                assert!((util - 13.42).abs() < 0.01);
+            }
+            other => panic!("应为 Sys 样本: {:?}", other.map(|_| ())),
+        }
+        // 无关行
+        assert!(parse_qnx_gpu_line("random log line").is_none());
+        assert!(parse_qnx_gpu_line("frame 1: something without utilization").is_none());
     }
 
     #[test]

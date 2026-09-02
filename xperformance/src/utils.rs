@@ -288,6 +288,7 @@ pub struct CsvStream {
     thread: HashMap<(u32, u32), BufWriter<fs::File>>, // (pid, tid)
     io: HashMap<u32, BufWriter<fs::File>>,            // pid
     gpumem: HashMap<u32, BufWriter<fs::File>>,        // pid
+    gpuproc: HashMap<u32, BufWriter<fs::File>>,       // pid
     misc: HashMap<&'static str, BufWriter<fs::File>>, // freq/thermal/gpu/net（设备级单文件，按指标名一个 writer）
     broken: bool, // 写盘失败后停用（防逐行刷屏告警）
 }
@@ -400,11 +401,20 @@ impl CsvStream {
         }
     }
 
-    pub fn gpu_row(&mut self, pkg: &str, t: DateTime<Local>, busy: f32, mhz: u32) {
-        let row = format!("{},{:.2},{}", t.format(CSV_TS_FMT), busy, mhz);
+    pub fn gpu_row(&mut self, pkg: &str, t: DateTime<Local>, busy: f32, util: f32, mhz: u32, maxmhz: u32) {
+        let row = format!("{},{:.2},{:.2},{},{}", t.format(CSV_TS_FMT), busy, util, mhz, maxmhz);
         stream_write(
             &mut self.broken, &mut self.root, pkg, &mut self.misc, "gpu",
-            "gpu", "gpu_data.csv".to_string(), "Timestamp,Busy (%),Clock (MHz)", &row,
+            "gpu", "gpu_data.csv".to_string(), "Timestamp,Busy (%),Util (%),Clock (MHz),Max Clock (MHz)", &row,
+        );
+    }
+
+    /// QNX 路径每进程 GPU busy
+    pub fn gpuproc_row(&mut self, pkg: &str, pid: u32, t: DateTime<Local>, busy: f32) {
+        let row = format!("{},{:.2}", t.format(CSV_TS_FMT), busy);
+        stream_write(
+            &mut self.broken, &mut self.root, pkg, &mut self.gpuproc, pid,
+            "gpu", format!("gpu_proc_{}_data.csv", pid), "Timestamp,Busy (%)", &row,
         );
     }
 
@@ -457,8 +467,10 @@ pub struct ExtraSeries {
     pub freq: VecDeque<(DateTime<Local>, Vec<f32>)>,
     /// 温度样本序列
     pub temp: VecDeque<TempSample>,
-    /// (ts, busy%, clock MHz)
-    pub gpu: VecDeque<(DateTime<Local>, f32, u32)>,
+    /// (ts, busy%, util%, clock MHz)（util 仅 QNX 路径有值，kgsl 路径为 0）
+    pub gpu: VecDeque<(DateTime<Local>, f32, f32, u32)>,
+    /// pid → (ts, busy%)（QNX 路径每进程 GPU busy）
+    pub gpuproc: HashMap<u32, VecDeque<(DateTime<Local>, f32)>>,
     /// pid → IO 样本序列
     pub io: HashMap<u32, VecDeque<IoSample>>,
     /// (ts, rx, tx) KB/s（整机口径）
@@ -484,8 +496,12 @@ impl ExtraSeries {
         Self::push_capped(&mut self.temp, (t, status, sensors));
     }
 
-    pub fn push_gpu(&mut self, t: DateTime<Local>, busy: f32, mhz: u32) {
-        Self::push_capped(&mut self.gpu, (t, busy, mhz));
+    pub fn push_gpu(&mut self, t: DateTime<Local>, busy: f32, util: f32, mhz: u32) {
+        Self::push_capped(&mut self.gpu, (t, busy, util, mhz));
+    }
+
+    pub fn push_gpuproc(&mut self, pid: u32, t: DateTime<Local>, busy: f32) {
+        Self::push_capped(self.gpuproc.entry(pid).or_default(), (t, busy));
     }
 
     pub fn push_io(&mut self, pid: u32, t: DateTime<Local>, r: f32, w: f32, dr: f32, dw: f32) {

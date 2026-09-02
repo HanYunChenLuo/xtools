@@ -153,6 +153,7 @@ async fn monitor_process_agent(args: &Args, flags: xperf_core::MetricFlags) -> R
         fps: Option<(String, f32, u32)>, // 最新 (图层, fps, jank)
         io: Option<(f32, f32)>,          // 最新 (读 KB/s, 写 KB/s)
         gpumem: Option<(f32, f32)>,      // 最新 (进程 MB, 整机 MB)
+        gpuproc: Option<f32>,            // 最新 GPU busy%（QNX 路径每进程）
     }
     let mut aggs: std::collections::HashMap<u32, Agg> = Default::default();
     // 设备级指标的最新值（聚合模式每秒打印一次）
@@ -388,7 +389,31 @@ async fn monitor_process_agent(args: &Args, flags: xperf_core::MetricFlags) -> R
                 extra.push_net(t, rx, tx);
                 latest_net = Some((rx, tx));
             }
-            AgentEvent::Gpu { ts, busy, mhz } => {
+            AgentEvent::Gpu { ts, busy, util, mhz, maxmhz } => {
+                let Some(t) = DateTime::from_timestamp_millis(ts as i64)
+                    .map(|t| t.with_timezone(&Local))
+                else {
+                    continue;
+                };
+                if verbose {
+                    // QNX 路径带 util/maxmhz；kgsl 路径 util=0
+                    let extra_info = if maxmhz > 0 {
+                        format!("util {}%, {} / {} MHz", format!("{:.1}", util).blue(), mhz, maxmhz)
+                    } else {
+                        format!("@ {} MHz", mhz)
+                    };
+                    println!(
+                        "[{}] GPU: busy {}% ({})",
+                        t.format("%H:%M:%S"),
+                        format!("{:.1}", busy).blue(),
+                        extra_info
+                    );
+                }
+                csv.gpu_row(&args.package, t, busy, util, mhz, maxmhz);
+                extra.push_gpu(t, busy, util, mhz);
+                latest_gpu = Some((busy, mhz));
+            }
+            AgentEvent::GpuProc { ts, pid, busy } => {
                 let Some(t) = DateTime::from_timestamp_millis(ts as i64)
                     .map(|t| t.with_timezone(&Local))
                 else {
@@ -396,15 +421,15 @@ async fn monitor_process_agent(args: &Args, flags: xperf_core::MetricFlags) -> R
                 };
                 if verbose {
                     println!(
-                        "[{}] GPU: busy {}% @ {} MHz",
+                        "[{}] GPU busy: {}% [pid {}]",
                         t.format("%H:%M:%S"),
                         format!("{:.1}", busy).blue(),
-                        mhz
+                        pid.to_string().yellow()
                     );
                 }
-                csv.gpu_row(&args.package, t, busy, mhz);
-                extra.push_gpu(t, busy, mhz);
-                latest_gpu = Some((busy, mhz));
+                csv.gpuproc_row(&args.package, pid, t, busy);
+                extra.push_gpuproc(pid, t, busy);
+                aggs.entry(pid).or_default().gpuproc = Some(busy);
             }
             AgentEvent::GpuMem { ts, pid, bytes, global } => {
                 let Some(t) = DateTime::from_timestamp_millis(ts as i64)
@@ -482,6 +507,9 @@ async fn monitor_process_agent(args: &Args, flags: xperf_core::MetricFlags) -> R
                 }
                 if let Some((mb, gmb)) = a.gpumem {
                     parts.push(format!("GPU Mem {} MB（整机 {:.0}）", format!("{:.1}", mb).blue(), gmb));
+                }
+                if let Some(busy) = a.gpuproc {
+                    parts.push(format!("GPU busy {}%", format!("{:.1}", busy).blue()));
                 }
                 if !parts.is_empty() {
                     println!("[{}] {} (pid: {})", ts, parts.join(" | "), pid.to_string().yellow());
@@ -568,11 +596,30 @@ fn generate_extra_charts(timestamp_dir: &Path, package: &str, extra: &cli_utils:
     if extra.gpu.len() > 1 {
         let dir = timestamp_dir.join("gpu");
         let _ = std::fs::create_dir_all(&dir);
-        let busy: Vec<(DateTime<Local>, f32)> = extra.gpu.iter().map(|(t, b, _)| (*t, *b)).collect();
-        let series = vec![("busy%".to_string(), busy)];
+        let busy: Vec<(DateTime<Local>, f32)> = extra.gpu.iter().map(|(t, b, _, _)| (*t, *b)).collect();
+        let mut series = vec![("busy%".to_string(), busy)];
+        // QNX 路径带 util（busy 按频率折算）；kgsl 路径全 0，不画
+        if extra.gpu.iter().any(|(_, _, u, _)| *u > 0.0) {
+            series.push(("util%".to_string(), extra.gpu.iter().map(|(t, _, u, _)| (*t, *u)).collect()));
+        }
         match cli_utils::generate_multi_line_chart(&dir.join("gpu_chart.png"), &format!("GPU Busy - {}", package), "%", &series) {
             Ok(p) => println!("✓ GPU chart generated: {}", p.display()),
             Err(e) => println!("Failed to generate gpu chart: {}", e),
+        }
+    }
+    // QNX 路径每进程 GPU busy
+    if extra.gpuproc.values().any(|v| v.len() > 1) {
+        let dir = timestamp_dir.join("gpu");
+        let _ = std::fs::create_dir_all(&dir);
+        let mut pids: Vec<u32> = extra.gpuproc.keys().copied().collect();
+        pids.sort_unstable();
+        let series: Vec<cli_utils::NamedSeries> = pids
+            .iter()
+            .map(|pid| (format!("PID {}", pid), extra.gpuproc[pid].iter().map(|(t, b)| (*t, *b)).collect()))
+            .collect();
+        match cli_utils::generate_multi_line_chart(&dir.join("gpu_proc_chart.png"), &format!("GPU Busy per PID - {}", package), "%", &series) {
+            Ok(p) => println!("✓ GPU proc chart generated: {}", p.display()),
+            Err(e) => println!("Failed to generate gpu proc chart: {}", e),
         }
     }
     // GPU 显存（--gpu 降级路径）：每 PID 一条线 + 整机一条

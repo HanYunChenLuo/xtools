@@ -126,7 +126,7 @@ fps_sample_round(pid)                    ← agent 内每 PID 每 FPS 轮一次�
 | `--freq` | 每核 `scaling_cur_freq`（KHz；hello 带 `maxkhz` 基线） | 每轮（µs 级） | `{"t":"freq","khz":[...]}` |
 | `--io` | `/proc/<pid>/io` 计数器差值 → KB/s（r/w=rchar/wchar 逻辑读写，dr/dw=read_bytes/write_bytes 磁盘读写） | 每轮 | `{"t":"io","pid":..,"r":..,"w":..,"dr":..,"dw":..}` |
 | `--net` | `/proc/net/dev` 物理口聚合（排除 lo/sit/tun/gre/dummy/vti/ip6*）→ KB/s | 每轮 | `{"t":"net","rx":..,"tx":..}` |
-| `--gpu` | kgsl `gpubusy`（busy/total µs 计数器差值占比）+ gpuclk | 每轮 | `{"t":"gpu","busy":..,"mhz":..}` |
+| `--gpu` | kgsl `gpubusy`（busy/total µs 计数器差值占比）+ gpuclk；**降级**：GPU 在 hypervisor 后无 kgsl 时改 `dumpsys gpu` 每 PID 显存（限频 ≥1s，~11ms） | 每轮 / 降级 ≥1s | `{"t":"gpu","busy":..,"mhz":..}` / `{"t":"gpumem","pid":..,"bytes":..,"global":..}` |
 | `--thermal` | `dumpsys thermalservice`（温度 sensors + Thermal Status 热降频级别） | 限频 ≥2s（~50ms dumpsys 会拖长低间隔节拍轮） | `{"t":"temp","status":..,"sensors":[[名,类型,°C]]}` |
 
 关键设计点：

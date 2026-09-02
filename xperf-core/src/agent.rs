@@ -74,8 +74,11 @@ pub enum AgentEvent {
     Io { ts: u64, pid: u32, r: f32, w: f32, dr: f32, dw: f32 },
     /// 整机网络速率 KB/s（聚合物理口，排除回环/隧道；per-app 无数据源）
     Net { ts: u64, rx: f32, tx: f32 },
-    /// GPU：busy 为窗口内 busy 占比 %；mhz 为当前时钟（0 = 无时钟源）
-    Gpu { ts: u64, busy: f32, mhz: u32 },
+    /// GPU：busy 为窗口内 busy 占比 %；mhz 为当前时钟（0 = 无时钟源）；
+    /// util/maxmhz 仅 QNX 路径有值（util = busy 按频率折算的利用率，kgsl 路径为 0）
+    Gpu { ts: u64, busy: f32, #[serde(default)] util: f32, mhz: u32, #[serde(default)] maxmhz: u32 },
+    /// QNX 路径：每进程 GPU busy %（按 comm 名归因到 Android PID）
+    GpuProc { ts: u64, pid: u32, busy: f32 },
     /// --gpu 降级路径（GPU 在 hypervisor 后的平台）：每 PID GPU 显存字节 + 整机 global
     GpuMem { ts: u64, pid: u32, bytes: u64, global: u64 },
     /// 温度与热降频：status 为 Android ThermalStatus（-1=未知）；sensors 为 [名称, 类型, °C]
