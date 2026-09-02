@@ -17,7 +17,9 @@ class LineChart {
     this.title = title;
     this.unit = unit;
     this.maxValue = maxValue; // Y 轴下限（如 CPU=100），实际值超出时自动扩展；undefined = 自适应
-    this.series = {}; // pid -> [{t, v}]
+    this.series = {}; // pid -> [{t, v}]，完整会话历史（回看用），绘制时按窗口裁剪+抽稀
+    this.windowMode = 'follow'; // follow=最近 followMs；all=全部历史
+    this.followMs = 10 * 60 * 1000;
     this.resize();
     window.addEventListener('resize', () => this.resize());
   }
@@ -36,7 +38,6 @@ class LineChart {
   push(pid, t, v) {
     if (!this.series[pid]) this.series[pid] = [];
     this.series[pid].push({ t, v });
-    if (this.series[pid].length > 600) this.series[pid].shift();
   }
   draw() {
     const { ctx } = this;
@@ -50,18 +51,26 @@ class LineChart {
     ctx.fillStyle = '#cdd6f4';
     ctx.font = '500 14px system-ui, sans-serif';
     ctx.fillText(this.title, 12, 20);
-    // 计算范围
-    let tMin = Infinity, tMax = -Infinity, vMax = 0;
+    // 计算范围（tMax 永远取全量最新；tMin 按窗口模式：follow=最新往前 followMs，all=全量最早）
+    let tMinAll = Infinity, tMax = -Infinity;
     const pids = Object.keys(this.series);
     for (const pid of pids) {
+      const pts = this.series[pid];
+      if (pts.length === 0) continue;
+      if (pts[0].t < tMinAll) tMinAll = pts[0].t;
+      const lastT = pts[pts.length - 1].t;
+      if (lastT > tMax) tMax = lastT;
+    }
+    if (pids.length === 0 || !isFinite(tMax)) { this.drawAxes(L, T, W - R, H - B); return; }
+    let tMin = this.windowMode === 'all' ? tMinAll : Math.max(tMinAll, tMax - this.followMs);
+    if (tMax - tMin < 1000) tMax = tMin + 1000;
+    // 可见窗口内的 vMax（Y 轴）与绘制点数统计
+    let vMax = 0;
+    for (const pid of pids) {
       for (const p of this.series[pid]) {
-        if (p.t < tMin) tMin = p.t;
-        if (p.t > tMax) tMax = p.t;
-        if (p.v > vMax) vMax = p.v;
+        if (p.t >= tMin && p.v > vMax) vMax = p.v;
       }
     }
-    if (pids.length === 0 || !isFinite(tMin)) { this.drawAxes(L, T, W - R, H - B); return; }
-    if (tMax - tMin < 1000) tMax = tMin + 1000;
     // Y 轴范围：固定下限（CPU=100，超出自动扩展）或自适应（内存，基于实际最大值）
     let yMax;
     if (this.maxValue !== undefined) {
@@ -88,19 +97,36 @@ class LineChart {
       ctx.fillText(ts.toTimeString().slice(0, 8), x - 22, H - 10);
     }
     this.drawAxes(L, T, W - R, H - B);
-    // 折线
+    // 折线：窗口外点跳过（时间有序，二分找起点）；可见点超过 2×像素宽时按 stride 抽稀
     let legendX = W - R;
+    const plotW = W - R - L;
     pids.forEach((pid, i) => {
-      const pts = this.series[pid];
-      if (pts.length < 1) return;
+      const all = this.series[pid];
+      if (all.length < 1) return;
+      // 二分：第一个 t >= tMin 的下标
+      let lo = 0, hi = all.length;
+      while (lo < hi) { const mid = (lo + hi) >> 1; if (all[mid].t < tMin) lo = mid + 1; else hi = mid; }
+      if (lo >= all.length) return;
+      const visLen = all.length - lo;
+      const stride = Math.max(1, Math.ceil(visLen / (plotW * 2)));
       ctx.strokeStyle = COLORS[i % COLORS.length];
       ctx.lineWidth = 2;
       ctx.beginPath();
-      pts.forEach((p, j) => {
-        const x = L + (W - R - L) * (p.t - tMin) / span;
+      // 从窗口前一个点开始画，保证折线在左边界处连续（不截断出缺口）
+      if (lo > 0) {
+        ctx.moveTo(L, T + (H - B - T) * (1 - all[lo - 1].v / yMax));
+      } else {
+        ctx.moveTo(L + plotW * (all[0].t - tMin) / span, T + (H - B - T) * (1 - all[0].v / yMax));
+      }
+      for (let j = lo; j < all.length; j += stride) {
+        const p = all[j];
+        const x = L + plotW * (p.t - tMin) / span;
         const y = T + (H - B - T) * (1 - p.v / yMax);
-        j === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
-      });
+        ctx.lineTo(x, y);
+      }
+      // 末点必画（stride 抽稀可能跳过最新点）
+      const lp = all[all.length - 1];
+      ctx.lineTo(L + plotW * (lp.t - tMin) / span, T + (H - B - T) * (1 - lp.v / yMax));
       ctx.stroke();
       // 图例（key 即展示名：CPU/内存用 "PID xxx"，FPS 用图层短名）；
       // 从右往左按文字实际宽度排布，长图层名不截断不重叠
@@ -129,6 +155,44 @@ _diag('charts initialized');
 
 // pid -> { cpu, mem, new }
 const pidData = {};
+// 峰值面板：pid -> { cpu: {v, t}, mem: {v, t} }，仅在新峰值出现时更新 DOM
+const peaks = {};
+// Top 线程面板：pid -> 最新一轮的线程数组（CpuUpdate 自带），500ms 节流渲染
+const latestThreads = {};
+// FPS 导出用 jank 记录：图层短名 -> [{t, fps, jank}]（图表 series 只存 fps 值）
+const fpsHist = {};
+
+function fmtTime(t) { return new Date(t).toTimeString().slice(0, 8); }
+
+function renderPeaks() {
+  const rows = Object.entries(peaks).map(([pid, p]) =>
+    `<tr><td>${pid}</td>` +
+    `<td>${p.cpu ? p.cpu.v.toFixed(1) : '-'}</td><td>${p.cpu ? fmtTime(p.cpu.t) : '-'}</td>` +
+    `<td>${p.mem ? p.mem.v : '-'}</td><td>${p.mem ? fmtTime(p.mem.t) : '-'}</td></tr>`);
+  document.getElementById('peakTable').innerHTML =
+    '<tr><th>PID</th><th>峰值 CPU%</th><th>时间</th><th>峰值 PSS(KB)</th><th>时间</th></tr>' + rows.join('');
+}
+
+function trackPeak(pid, kind, v, t) {
+  if (!peaks[pid]) peaks[pid] = {};
+  if (!peaks[pid][kind] || v > peaks[pid][kind].v) {
+    peaks[pid][kind] = { v, t };
+    renderPeaks();
+  }
+}
+
+function renderThreads() {
+  const all = [];
+  for (const [pid, threads] of Object.entries(latestThreads)) {
+    for (const t of threads) all.push({ pid, tid: t.tid, name: t.name, cpu: t.cpu_usage });
+  }
+  all.sort((a, b) => b.cpu - a.cpu);
+  const rows = all.slice(0, 8).map(t =>
+    `<tr><td>${t.name}</td><td>${t.tid}</td><td>${t.pid}</td><td>${t.cpu.toFixed(1)}</td></tr>`);
+  document.getElementById('threadTable').innerHTML =
+    '<tr><th>线程</th><th>TID</th><th>PID</th><th>CPU%</th></tr>' + rows.join('');
+}
+setInterval(renderThreads, 500);
 
 let eventCount = 0;
 function updateTitle() {
@@ -171,17 +235,22 @@ listen('sample', (e) => {
     const pid = ev.PidDisappeared.pid;
     if (pidData[pid]) { pidData[pid].stopped = true; renderPidList(); }
   } else if (ev.CpuUpdate) {
-    const { pid, timestamp, process_cpu } = ev.CpuUpdate;
+    const { pid, timestamp, process_cpu, threads } = ev.CpuUpdate;
     if (!pidData[pid]) { pidData[pid] = { cpu: [], mem: [], new: true }; renderPidList(); }
-    cpuChart.push('PID ' + pid, new Date(timestamp).getTime(), +process_cpu.toFixed(2));
+    const t = new Date(timestamp).getTime();
+    cpuChart.push('PID ' + pid, t, +process_cpu.toFixed(2));
+    trackPeak(pid, 'cpu', process_cpu, t);
+    latestThreads[pid] = threads;
     try { cpuChart.draw(); } catch (err) { _diag('cpuChart.draw ERROR: ' + err.message); }
   } else if (ev.MemoryUpdate) {
     const { pid, timestamp, total_pss } = ev.MemoryUpdate;
     if (!pidData[pid]) { pidData[pid] = { cpu: [], mem: [], new: true }; renderPidList(); }
-    memChart.push('PID ' + pid, new Date(timestamp).getTime(), total_pss);
+    const t = new Date(timestamp).getTime();
+    memChart.push('PID ' + pid, t, total_pss);
+    trackPeak(pid, 'mem', total_pss, t);
     try { memChart.draw(); } catch (err) { _diag('memChart.draw ERROR: ' + err.message); }
   } else if (ev.FpsUpdate) {
-    const { pid, timestamp, layer, fps } = ev.FpsUpdate;
+    const { pid, timestamp, layer, fps, jank_count } = ev.FpsUpdate;
     if (!pidData[pid]) { pidData[pid] = { cpu: [], mem: [], new: true }; renderPidList(); }
     // 自动启动带 --fps 时前端勾选框未同步，收到首个 FPS 事件自动展开图表
     const fpsBox = document.getElementById('fps');
@@ -189,7 +258,10 @@ listen('sample', (e) => {
     // 多渲染面并存时逐图层一条折线（如游戏主 Surface + 相机预览），
     // key 用图层短名（截到最后一段，长名图例放不下）
     const shortLayer = layer.split('/').pop();
-    fpsChart.push(shortLayer, new Date(timestamp).getTime(), +fps.toFixed(1));
+    const t = new Date(timestamp).getTime();
+    fpsChart.push(shortLayer, t, +fps.toFixed(1));
+    if (!fpsHist[shortLayer]) fpsHist[shortLayer] = [];
+    fpsHist[shortLayer].push({ t, fps, jank: jank_count });
     try { fpsChart.draw(); } catch (err) { _diag('fpsChart.draw ERROR: ' + err.message); }
   } else if (ev.NoProcess) {
     document.getElementById('status').textContent = '无进程: ' + ev.NoProcess.error;
@@ -206,6 +278,10 @@ document.getElementById('startBtn').addEventListener('click', async () => {
   const memory = document.getElementById('memory').checked;
   const fps = document.getElementById('fps').checked;
   for (const k of Object.keys(pidData)) delete pidData[k];
+  for (const k of Object.keys(peaks)) delete peaks[k];
+  for (const k of Object.keys(latestThreads)) delete latestThreads[k];
+  for (const k of Object.keys(fpsHist)) delete fpsHist[k];
+  renderPeaks();
   renderPidList();
   cpuChart.series = {}; memChart.series = {}; fpsChart.series = {};
   try {
@@ -246,6 +322,27 @@ document.getElementById('cpu').addEventListener('change', toggleCharts);
 document.getElementById('memory').addEventListener('change', toggleCharts);
 document.getElementById('fps').addEventListener('change', toggleCharts);
 toggleCharts();
+
+// ---- 时间窗口：跟随最新 / 全部历史 ----
+document.getElementById('timeWindow').addEventListener('change', (e) => {
+  const mode = e.target.value;
+  for (const c of [cpuChart, memChart, fpsChart]) { c.windowMode = mode; c.draw(); }
+});
+
+// ---- 导出 CSV：把前端持有的完整会话历史发给后端写盘 ----
+document.getElementById('exportBtn').addEventListener('click', async () => {
+  const pkg = document.getElementById('package').value || 'unknown';
+  const cpu = {}, mem = {}, fps = {};
+  for (const [k, pts] of Object.entries(cpuChart.series)) cpu[k.replace('PID ', '')] = pts.map(p => [p.t, p.v]);
+  for (const [k, pts] of Object.entries(memChart.series)) mem[k.replace('PID ', '')] = pts.map(p => [p.t, p.v]);
+  for (const [layer, pts] of Object.entries(fpsHist)) fps[layer] = pts.map(p => [p.t, p.fps, p.jank]);
+  try {
+    const dir = await invoke('export_csv', { package: pkg, cpu, mem, fps });
+    document.getElementById('status').textContent = '已导出: ' + dir;
+  } catch (e) {
+    document.getElementById('status').textContent = '导出失败: ' + e;
+  }
+});
 
 // ---- 包名列表（可搜索下拉）----
 async function loadPackages() {

@@ -22,8 +22,15 @@
       <label><input id="memory" type="checkbox" checked /> Memory</label>
       <label><input id="fps" type="checkbox" /> FPS</label>
     </div>
+    <label>窗口:
+      <select id="timeWindow">
+        <option value="follow" selected>跟随最新（10 分钟）</option>
+        <option value="all">全部历史</option>
+      </select>
+    </label>
     <button id="startBtn">开始监控</button>
     <button id="stopBtn" disabled>停止</button>
+    <button id="exportBtn" class="small">导出 CSV</button>
     <div id="status">未开始</div>
     <h3>PIDs</h3>
     <ul id="pidList"></ul>
@@ -32,6 +39,16 @@
     <div id="cpuChartBox" class="chart"><canvas id="cpuChart"></canvas></div>
     <div id="memChartBox" class="chart"><canvas id="memChart"></canvas></div>
     <div id="fpsChartBox" class="chart hidden"><canvas id="fpsChart"></canvas></div>
+    <div id="panels">
+      <div id="threadPanel" class="panel">
+        <h3>Top 线程（CPU%）</h3>
+        <table id="threadTable"><tr><th>线程</th><th>TID</th><th>PID</th><th>CPU%</th></tr></table>
+      </div>
+      <div id="peakPanel" class="panel">
+        <h3>峰值</h3>
+        <table id="peakTable"><tr><th>PID</th><th>峰值 CPU%</th><th>时间</th><th>峰值 PSS(KB)</th><th>时间</th></tr></table>
+      </div>
+    </div>
   </div>
   <script src="main.js"></script>
 </body>
