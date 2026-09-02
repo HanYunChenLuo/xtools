@@ -16,16 +16,19 @@
 | commit | 内容 |
 |--------|------|
 | b732d55 | B 类五项采样：agent --freq/--thermal/--gpu/--io/--net + MetricFlags 重构 + CLI（打印/流式 CSV/退出图表）+ GUI（5 勾选框+折线图+导出扩展） |
+| d811f73 | --gpu 保底路径：dumpsys gpu 每 PID GPU 显存 |
+| 5cff92e | --gpu 新增 QNX 通道：hypervisor 平台（SS3/8295）真 GPU 利用率+频率+每进程 busy |
 
 ### 关键结论与基线
 
-- **真机数据源普查（msmnile 车机）**：
+- **真机数据源普查（SS3/8295 车机）**：
   - `/sys/class/thermal`、`/sys/class/hwmon` **不存在** → 温度走 `dumpsys thermalservice`（限频 ≥2s），但本机是 test HAL 假数据（恒定 30.8°C），代码按标准接口实现，真手机有效
-  - **GPU 在 hypervisor 后**：无 kgsl/任何 GPU sysfs → `--gpu` 启动探测失败发 err 并禁用（真手机有 kgsl 时自动生效）；`dumpsys gpu` 只有显存快照无利用率
+  - **GPU 由 QNX host 管理**（GVM 内无 kgsl sysfs/设备节点、ftrace 无 kgsl 事件、dma_fence 3s 0 事件、perfetto gpu.counters/gpu.memory 数据源注册但产 0 数据）→ 按平台文档走 QNX 侧：telnet 172.31.101.52（root 免密）→ /dev/kgsl-control 开统计 → slog2info 流。**真 GPU 数据已打通**：svm busy ~14.4%、系统 busy 16.8%/util 13.4% @ 506/635MHz，1/s 稳定
   - **per-app 网络无源**：qtaguid 不存在、eBPF maps 不便读、`/proc/<pid>/net/dev` 与整机一致（共享 netns）、被测包 uid=1000 系统聚合无意义 → `--net` 为整机口径（聚合物理口，排除 lo/sit/tun/gre/dummy/vti/ip6*），如实标注
-- **协议**：hello 带 `maxkhz`（每核最大频率基线，serde default 向后兼容）；速率类指标（io/net/gpu）首样建基线不出数，窗口按墙钟差值
+- **QNX 通道踩坑**（已写入 CLAUDE.md）：login/# 提示符无换行须逐字节读；子进程 stdin drop 即 EOF；slog2info -w 回放历史（用 -W）；必须 grep kgsl 挡 VHAL 刷屏
+- **协议**：hello 带 `maxkhz`；gpu 事件 QNX 路径带 util/maxmhz；gpuproc 进程行按 comm 归因 Android PID
 - **重构**：`spawn_agent`/`reconnect_agent` 的逐 bool 参数收敛为 `MetricFlags` 结构体（8 指标开关），CLI/GUI 共用
-- **验证**：50ms 间隔 cpu+fps+freq+io+net+thermal 六指标同采 **0 overrun**（12s，freq 209 行 CSV）；1000ms verbose 模式逐条输出正常；退出图表 freq/thermal/net/io 四张 PNG + CSV 全部落盘；87 测试全绿、clippy 零警告
+- **验证**：50ms 间隔六指标同采 **0 overrun**；89 测试全绿、clippy 零警告
 - **注意**：`timeout N cmd | head` 组合会让输出出现重复块（head 关闭管道后工具重复捕获），重定向文件即正常——非代码 bug
 
 ### 遗留问题

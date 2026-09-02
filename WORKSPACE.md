@@ -12,7 +12,7 @@
 - GUI：CPU/内存/FPS/频率/温度/GPU/IO/网络 折线（窗口跟随/全览）、Top 线程表、峰值面板、CSV 导出
 - 测试：87 全绿（含并行），clippy 零警告
 - 设备：车机 6eb792dfb0f（adbd 已 root），测试包 `com.lixiang.car.x.svm`
-- **本机限制**：GPU 在 hypervisor 后无 kgsl sysfs（--gpu 自动降级为每 PID GPU 显存 dumpsys gpu）；thermalservice 是 test HAL 假数据（30.8°C 恒定）——两路代码按标准接口实现，真手机有效
+- **本机限制**（SS3/8295，GPU 由 QNX host 管理）：GPU 利用率走 QNX telnet 通道（kgsl slog，真 busy%/util%/频率/每进程 busy）；thermalservice 是 test HAL 假数据（30.8°C 恒定）——温度代码按标准接口实现，真手机有效
 
 ---
 
@@ -24,7 +24,7 @@
 
 - [x] ~~**CPU 频率**（`scaling_cur_freq`）~~（b732d55）
 - [x] ~~温度/热降频（thermal zones）~~（b732d55，实际走 dumpsys thermalservice——本机无 /sys/class/thermal）
-- [x] ~~GPU 使用率~~（b732d55，kgsl gpubusy；本机 GPU 在 hypervisor 后无利用率源，降级为 dumpsys gpu 每 PID GPU 显存 d811f73）
+- [x] ~~GPU 使用率~~（b732d55 kgsl gpubusy → 5cff92e **QNX telnet 通道**（hypervisor 平台真利用率+频率+每进程 busy，SS3/8295 已验证）→ dumpsys gpu 显存保底 d811f73）
 - [x] ~~IO/网络~~（b732d55，/proc/<pid>/io 每 PID；网络为整机口径 /proc/net/dev——per-app 无数据源）
 
 ## C. 验证能力（"监控"→"验证"的差距）
