@@ -7,9 +7,9 @@
 
 ---
 
-## 2026-09-02 — A1 FPS 限频解耦 + 测试竞争修复 + A2/A3 流式落盘与内存上限
+## 2026-09-02 — A 类缺陷全清：FPS 限频 / 流式落盘 / 内存上限 / 断连重连 / GUI 补齐
 
-**任务线**：按 WORKSPACE.md A 类缺陷 1→2→3 顺序推进。
+**任务线**：按 WORKSPACE.md A 类缺陷 1→2→3 推进，随后清掉剩余 3 项，A 类清零。
 
 ### 完成内容（commits 旧→新）
 
@@ -18,6 +18,9 @@
 | 93f6439 | agent FPS 限频解耦（≥500ms 周期）+ 启动预热 + 空发现节流重试 |
 | df61bc4 | 并行测试数据竞争修复：ADB_TEST_LOCK 串行锁 |
 | 02c18bd | CLI 边采边流式落盘 CSV + 时序抽稀上限（CHART_SERIES_CAP=30k） |
+| cd9769b | 删除 LOG_FILE_PATH/append_to_log 死代码 |
+| 1077e97 | agent 断连自动重连恢复（xperf-core reconnect_agent，CLI+GUI） |
+| 3e388e3 | GUI 历史回看 + 峰值面板 + Top 线程视图 + CSV 导出 |
 
 ### 关键结论与基线
 
@@ -25,11 +28,14 @@
 - **测试竞争**：`ADB_RUNNER_OVERRIDE`/`MOCK_PHASE` 全局态在 cargo test 默认并行下互相覆盖，失败数 3-7 不等且非确定性；`--test-threads=1` 稳定全绿。修复后并行 5 轮 60/60。
 - **A2**：CsvStream 逐行 flush，kill -9 实测崩溃前数据完整；运行中 CSV 即增长（6s 时 88 行 → 8s 时 128 行，20 行/s 与 50ms 间隔一致）。
 - **A3**：内存时序超 2×30k 点每 2 取 1 抽稀（保时间范围、降分辨率），CSV 始终全量；MemoryTimeSeriesData 的 300 点丢头上限被抽稀替代（CLI 不再绕过 add_data_point）；`cpu_data.top_threads` 确认无读者后 CLI 不再写入。
-- 测试 80 全绿（含并行），clippy 零警告。
+- **A4 断连重连**：事件流 EOF/读错误 → `reconnect_agent` 每 500ms 轮询 `adb devices`，设备回来即重新部署+启动 agent，主机侧时序/峰值/流式 CSV 全部保留（CSV 继续追加同一时间戳目录）。实测 `pkill -f xperf-agent`（设备端死）与 `adb kill-server`（主机侧断）双路径均自动恢复；顺带覆盖 agent 崩溃场景。
+- **A5 GUI**：图表 series 不再 600 点截断（完整会话历史），绘制按窗口裁剪+二分定位+stride 抽稀防卡顿；峰值面板/Top 线程表（500ms 节流渲染）；导出走 `export_csv` 命令写 `log/<pkg>/<导出时刻>/`。前端 JS 内存会话级无界（小时级约 10MB，可接受；无人值守长测是 CLI 的职责）。
+- 测试 82 全绿（含并行、GUI 导出单测），clippy 零警告。
 
 ### 遗留问题
 
-- WORKSPACE.md A 类剩 3 项：断连即终止（无 ADB 重连）、GUI 能力缺口、`LOG_FILE_PATH` 死代码。
+- A 类清零。B/C 类（CPU 频率/温度/GPU/IO 指标、perfetto/simpleperf/阈值告警等验证能力）与 D 类（xperf-core 轮询参考实现删留决策）见 WORKSPACE.md。
+
 
 ---
 
