@@ -7,6 +7,32 @@
 
 ---
 
+## 2026-09-02 — A1 FPS 限频解耦 + 测试竞争修复 + A2/A3 流式落盘与内存上限
+
+**任务线**：按 WORKSPACE.md A 类缺陷 1→2→3 顺序推进。
+
+### 完成内容（commits 旧→新）
+
+| commit | 内容 |
+|--------|------|
+| 93f6439 | agent FPS 限频解耦（≥500ms 周期）+ 启动预热 + 空发现节流重试 |
+| df61bc4 | 并行测试数据竞争修复：ADB_TEST_LOCK 串行锁 |
+| 02c18bd | CLI 边采边流式落盘 CSV + 时序抽稀上限（CHART_SERIES_CAP=30k） |
+
+### 关键结论与基线
+
+- **A1**：限频后 50ms 间隔 CPU+FPS 同采 10s **0 overrun**（修复前约半数轮次）。实测车机全量 `dumpsys SurfaceFlinger` 1.5s（图层发现）、`--latency` 每图层 ~10ms（稳态采样）、`--list` ~0ms；发现动作因此必须在节拍外预热或按阈值节流。顺带修复既有 bug：图层发现为空时 `zero_rounds` 不增长，FPS 会永久静默（进程重启时 Surface 未建即触发）。
+- **测试竞争**：`ADB_RUNNER_OVERRIDE`/`MOCK_PHASE` 全局态在 cargo test 默认并行下互相覆盖，失败数 3-7 不等且非确定性；`--test-threads=1` 稳定全绿。修复后并行 5 轮 60/60。
+- **A2**：CsvStream 逐行 flush，kill -9 实测崩溃前数据完整；运行中 CSV 即增长（6s 时 88 行 → 8s 时 128 行，20 行/s 与 50ms 间隔一致）。
+- **A3**：内存时序超 2×30k 点每 2 取 1 抽稀（保时间范围、降分辨率），CSV 始终全量；MemoryTimeSeriesData 的 300 点丢头上限被抽稀替代（CLI 不再绕过 add_data_point）；`cpu_data.top_threads` 确认无读者后 CLI 不再写入。
+- 测试 80 全绿（含并行），clippy 零警告。
+
+### 遗留问题
+
+- WORKSPACE.md A 类剩 3 项：断连即终止（无 ADB 重连）、GUI 能力缺口、`LOG_FILE_PATH` 死代码。
+
+---
+
 ## 2026-09-01 — CPU 口径修复 + FPS 采集 + agent 统一采样架构
 
 **任务线**：修复 GUI CPU 图表显示为 0 → 顺藤摸瓜完成三项大改动。
