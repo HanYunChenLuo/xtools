@@ -244,6 +244,69 @@ fn is_running(state: State<'_, AppState>) -> Result<bool, String> {
     Ok(*state.running.lock().map_err(|e| e.to_string())?)
 }
 
+/// 导出前端持有的完整会话历史为 CSV（GUI 不流式落盘，数据在前端内存中）。
+/// 写到 log/<pkg>/<导出时刻>/ 下的 cpu/memory/fps 子目录，返回目录路径。
+/// cpu/mem: pid -> [[ms, value]...]；fps: 图层短名 -> [[ms, fps, jank]...]
+#[tauri::command]
+fn export_csv(
+    package: String,
+    cpu: std::collections::HashMap<String, Vec<(f64, f64)>>,
+    mem: std::collections::HashMap<String, Vec<(f64, f64)>>,
+    fps: std::collections::HashMap<String, Vec<(f64, f64, u32)>>,
+) -> Result<String, String> {
+    use std::io::Write;
+    let dir = std::path::PathBuf::from("log")
+        .join(&package)
+        .join(Local::now().format("%Y%m%d_%H%M%S").to_string());
+    let fmt_ts = |ms: f64| {
+        DateTime::from_timestamp_millis(ms as i64)
+            .map(|t| t.with_timezone(&Local).format("%Y-%m-%d %H:%M:%S%.3f").to_string())
+            .unwrap_or_default()
+    };
+    let mut wrote = false;
+    if !cpu.is_empty() {
+        let d = dir.join("cpu");
+        std::fs::create_dir_all(&d).map_err(|e| e.to_string())?;
+        for (pid, pts) in &cpu {
+            let mut f = std::fs::File::create(d.join(format!("cpu_{}_data.csv", pid))).map_err(|e| e.to_string())?;
+            writeln!(f, "Timestamp,Process CPU (%)").map_err(|e| e.to_string())?;
+            for (t, v) in pts {
+                writeln!(f, "{},{:.2}", fmt_ts(*t), v).map_err(|e| e.to_string())?;
+            }
+        }
+        wrote = true;
+    }
+    if !mem.is_empty() {
+        let d = dir.join("memory");
+        std::fs::create_dir_all(&d).map_err(|e| e.to_string())?;
+        for (pid, pts) in &mem {
+            let mut f = std::fs::File::create(d.join(format!("memory_{}_data.csv", pid))).map_err(|e| e.to_string())?;
+            writeln!(f, "Timestamp,Total PSS").map_err(|e| e.to_string())?;
+            for (t, v) in pts {
+                writeln!(f, "{},{}", fmt_ts(*t), *v as u64).map_err(|e| e.to_string())?;
+            }
+        }
+        wrote = true;
+    }
+    if !fps.is_empty() {
+        let d = dir.join("fps");
+        std::fs::create_dir_all(&d).map_err(|e| e.to_string())?;
+        for (layer, pts) in &fps {
+            let safe = layer.replace(['/', '#'], "_");
+            let mut f = std::fs::File::create(d.join(format!("fps_data_{}.csv", safe))).map_err(|e| e.to_string())?;
+            writeln!(f, "Timestamp,FPS,Jank").map_err(|e| e.to_string())?;
+            for (t, v, jank) in pts {
+                writeln!(f, "{},{:.2},{}", fmt_ts(*t), v, jank).map_err(|e| e.to_string())?;
+            }
+        }
+        wrote = true;
+    }
+    if !wrote {
+        return Err("暂无可导出的数据".into());
+    }
+    Ok(dir.to_string_lossy().into_owned())
+}
+
 fn main() {
     // 支持命令行自动启动：xperf-gui --package <pkg> [--interval 1000] [--cpu] [--memory]
     // （便于脚本化/验证；不传参数则手动在前端操作）
@@ -288,8 +351,38 @@ fn main() {
             stop_sampling,
             diag_log,
             list_packages,
-            is_running
+            is_running,
+            export_csv
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_export_csv_writes_files() {
+        let pkg = format!("test_export_{}", std::process::id());
+        let mut cpu = std::collections::HashMap::new();
+        cpu.insert("1234".to_string(), vec![(1700000000000.0, 12.5), (1700000001000.0, 30.0)]);
+        let mut fps = std::collections::HashMap::new();
+        fps.insert("SVM Container_0".to_string(), vec![(1700000000000.0, 30.0, 1u32)]);
+        let dir = export_csv(pkg.clone(), cpu, Default::default(), fps).unwrap();
+        let cpu_csv = std::fs::read_to_string(format!("{}/cpu/cpu_1234_data.csv", dir)).unwrap();
+        assert!(cpu_csv.starts_with("Timestamp,Process CPU (%)\n"));
+        assert!(cpu_csv.contains(",12.50\n"));
+        let fps_csv = std::fs::read_to_string(format!("{}/fps/fps_data_SVM Container_0.csv", dir)).unwrap();
+        assert!(fps_csv.starts_with("Timestamp,FPS,Jank\n"));
+        assert!(fps_csv.contains(",30.00,1\n"));
+        std::fs::remove_dir_all(std::path::PathBuf::from("log").join(&pkg)).ok();
+    }
+
+    #[test]
+    fn test_export_csv_empty_errors() {
+        let r = export_csv("x".into(), Default::default(), Default::default(), Default::default());
+        assert!(r.is_err());
+    }
+}
+
