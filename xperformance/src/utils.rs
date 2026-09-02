@@ -2,13 +2,16 @@ use anyhow::Result;
 use chrono::{DateTime, Local};
 use plotters::element::PathElement;
 use plotters::prelude::*;
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::io::{BufWriter, Write};
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 
 use xperf_core::ThreadCpuInfo;
+
+/// CSV 时间戳格式（与历史导出文件一致，毫秒精度）
+const CSV_TS_FMT: &str = "%Y-%m-%d %H:%M:%S%.3f";
 
 // 存储当前执行期间的timestamp目录路径
 static TIMESTAMP_DIR: OnceLock<Mutex<Option<PathBuf>>> = OnceLock::new();
@@ -93,9 +96,6 @@ pub fn generate_cpu_chart(
         .border_style(BLACK)
         .draw()?;
 
-    let csv_path = output_file.with_extension("csv");
-    export_cpu_data_to_csv(&csv_path, timestamps, process_cpu)?;
-
     Ok(output_file_clone)
 }
 
@@ -167,43 +167,6 @@ pub fn generate_cpu_summary_chart(
     Ok(path_clone)
 }
 
-pub fn export_cpu_data_to_csv(
-    path: &PathBuf,
-    timestamps: &VecDeque<DateTime<Local>>,
-    process_cpu: &VecDeque<f32>,
-) -> Result<()> {
-    let mut file = fs::File::create(path)?;
-    writeln!(file, "Timestamp,Process CPU (%)")?;
-    for i in 0..timestamps.len() {
-        writeln!(
-            file,
-            "{},{:.2}",
-            timestamps[i].format("%Y-%m-%d %H:%M:%S%.3f"),
-            process_cpu[i]
-        )?;
-    }
-    file.flush()?;
-    Ok(())
-}
-
-/// 导出 FPS 时序数据到 CSV
-pub fn export_fps_data_to_csv(path: &PathBuf, data: &xperf_core::FpsTimeSeriesData) -> Result<()> {
-    let mut file = fs::File::create(path)?;
-    writeln!(file, "Timestamp,FPS,Jank,Layer")?;
-    for i in 0..data.timestamps.len() {
-        writeln!(
-            file,
-            "{},{:.2},{},{}",
-            data.timestamps[i].format("%Y-%m-%d %H:%M:%S%.3f"),
-            data.fps[i],
-            data.jank_counts[i],
-            data.layers[i]
-        )?;
-    }
-    file.flush()?;
-    Ok(())
-}
-
 pub fn create_timestamp_subdir(package: &str) -> Result<PathBuf> {
     let cell = TIMESTAMP_DIR.get_or_init(|| Mutex::new(None));
     let mut guard = cell.lock().unwrap();
@@ -225,61 +188,6 @@ pub fn create_timestamp_subdir(package: &str) -> Result<PathBuf> {
 
     *guard = Some(timestamp_dir.clone());
     Ok(timestamp_dir)
-}
-
-pub fn export_thread_data_to_csv(
-    path: PathBuf,
-    pid: &str,
-    threads: &[ThreadCpuInfo],
-    append: bool,
-) -> Result<Vec<String>> {
-    let mut created_files = Vec::new();
-    let active_threads: Vec<&ThreadCpuInfo> = threads.iter().filter(|t| t.cpu_usage > 0.0).collect();
-
-    if active_threads.is_empty() {
-        return Ok(created_files);
-    }
-
-    let mut thread_map: std::collections::HashMap<String, Vec<&ThreadCpuInfo>> =
-        std::collections::HashMap::new();
-    for thread in active_threads {
-        if thread.timestamp.is_some() {
-            thread_map.entry(thread.tid.clone()).or_default().push(thread);
-        }
-    }
-
-    for (tid, thread_data) in thread_map {
-        if thread_data.is_empty() {
-            continue;
-        }
-        let thread_name = thread_data.last().unwrap().name.clone();
-        let sanitized_name = thread_name.replace(" ", "_").replace("/", "-");
-        let filename = format!("thread_{}_{}_{}.csv", sanitized_name, tid, pid);
-        let filepath = path.join(&filename);
-
-        let file_exists = filepath.exists();
-        let file = if append && file_exists {
-            std::fs::OpenOptions::new().append(true).open(&filepath)?
-        } else {
-            std::fs::File::create(&filepath)?
-        };
-        let mut writer = std::io::BufWriter::new(file);
-        if !append || !file_exists {
-            writeln!(writer, "Timestamp,CPUUsage")?;
-        }
-
-        let mut sorted_data = thread_data.clone();
-        sorted_data.sort_by(|a, b| a.timestamp.unwrap().cmp(&b.timestamp.unwrap()));
-        for thread in sorted_data {
-            if let Some(timestamp) = thread.timestamp {
-                writeln!(writer, "{},{}", timestamp.format("%Y-%m-%d %H:%M:%S%.3f"), thread.cpu_usage)?;
-            }
-        }
-        writer.flush()?;
-        created_files.push(filename);
-    }
-
-    Ok(created_files)
 }
 
 pub fn generate_thread_time_series_chart(
@@ -386,4 +294,99 @@ pub fn generate_thread_time_series_chart(
 
     root.present()?;
     Ok(chart_filename)
+}
+
+// ---------- 边采边落盘（流式 CSV）----------
+
+/// 样本到达即追加写入对应 CSV：进程崩溃只丢未 flush 的尾部，而不是全部数据。
+/// 文件名与历史退出导出命名一致；退出阶段不再重写 CSV，只生成图表。
+#[derive(Default)]
+pub struct CsvStream {
+    root: Option<PathBuf>, // 时间戳根目录，首个样本时创建
+    cpu: HashMap<u32, BufWriter<fs::File>>,
+    mem: HashMap<u32, BufWriter<fs::File>>,
+    fps: HashMap<u32, BufWriter<fs::File>>,
+    thread: HashMap<(u32, u32), BufWriter<fs::File>>, // (pid, tid)
+    broken: bool, // 写盘失败后停用（防逐行刷屏告警）
+}
+
+/// 懒打开目标文件（首次写表头）并追加一行 + flush。
+/// map 按 key 每文件一个 writer；root 为会话时间戳目录（首个样本时创建）。
+#[allow(clippy::too_many_arguments)]
+fn stream_write<K: Eq + std::hash::Hash>(
+    broken: &mut bool,
+    root: &mut Option<PathBuf>,
+    pkg: &str,
+    map: &mut HashMap<K, BufWriter<fs::File>>,
+    key: K,
+    subdir: &str,
+    filename: String,
+    header: &str,
+    row: &str,
+) {
+    if *broken {
+        return;
+    }
+    let result = (|| -> Result<()> {
+        let w = match map.entry(key) {
+            std::collections::hash_map::Entry::Occupied(o) => o.into_mut(),
+            std::collections::hash_map::Entry::Vacant(v) => {
+                if root.is_none() {
+                    *root = Some(create_timestamp_subdir(pkg)?);
+                }
+                let dir = root.as_ref().expect("root just set").join(subdir);
+                fs::create_dir_all(&dir)?;
+                let mut w = BufWriter::new(fs::File::create(dir.join(filename))?);
+                writeln!(w, "{}", header)?;
+                v.insert(w)
+            }
+        };
+        writeln!(w, "{}", row)?;
+        w.flush()?; // 每行 flush：行体小、频率低（≤20 行/s/PID），崩溃丢尾最小化
+        Ok(())
+    })();
+    if let Err(e) = result {
+        *broken = true;
+        eprintln!("CSV 流式落盘失败，后续样本不再写盘: {}", e);
+    }
+}
+
+impl CsvStream {
+    pub fn cpu_row(&mut self, pkg: &str, pid: u32, t: DateTime<Local>, cpu: f32) {
+        let row = format!("{},{:.2}", t.format(CSV_TS_FMT), cpu);
+        stream_write(
+            &mut self.broken, &mut self.root, pkg, &mut self.cpu, pid,
+            "cpu", format!("cpu_{}_data.csv", pid), "Timestamp,Process CPU (%)", &row,
+        );
+    }
+
+    pub fn mem_row(&mut self, pkg: &str, pid: u32, t: DateTime<Local>, d: &xperf_core::MemoryDetails) {
+        let row = format!(
+            "{},{},{},{},{},{},{},{},{}",
+            t.format(CSV_TS_FMT), d.total_pss, d.java_heap, d.native_heap,
+            d.code, d.stack, d.graphics, d.private_other, d.system
+        );
+        stream_write(
+            &mut self.broken, &mut self.root, pkg, &mut self.mem, pid,
+            "memory", format!("memory_{}_data.csv", pid),
+            "Timestamp,Total PSS,Java Heap,Native Heap,Code,Stack,Graphics,Private Other,System", &row,
+        );
+    }
+
+    pub fn fps_row(&mut self, pkg: &str, pid: u32, t: DateTime<Local>, layer: &str, fps: f32, jank: u32) {
+        let row = format!("{},{:.2},{},{}", t.format(CSV_TS_FMT), fps, jank, layer);
+        stream_write(
+            &mut self.broken, &mut self.root, pkg, &mut self.fps, pid,
+            "fps", format!("{}_fps_data_pid{}.csv", pkg, pid), "Timestamp,FPS,Jank,Layer", &row,
+        );
+    }
+
+    pub fn thread_row(&mut self, pkg: &str, pid: u32, tid: u32, name: &str, t: DateTime<Local>, cpu: f32) {
+        let row = format!("{},{}", t.format(CSV_TS_FMT), cpu);
+        let sanitized = name.replace(' ', "_").replace('/', "-");
+        stream_write(
+            &mut self.broken, &mut self.root, pkg, &mut self.thread, (pid, tid),
+            "thread", format!("thread_{}_{}_{}.csv", sanitized, tid, pid), "Timestamp,CPUUsage", &row,
+        );
+    }
 }

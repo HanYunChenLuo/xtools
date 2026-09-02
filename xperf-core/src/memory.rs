@@ -25,15 +25,12 @@ pub struct MemoryTimeSeriesData {
 
 impl MemoryTimeSeriesData {
     pub fn add_data_point(&mut self, timestamp: DateTime<Local>, details: MemoryDetails) {
-        // 添加新数据点
+        if self.timestamps.len() >= 2 * crate::CHART_SERIES_CAP {
+            crate::decimate(&mut self.timestamps);
+            crate::decimate(&mut self.memory_details);
+        }
         self.timestamps.push_back(timestamp);
         self.memory_details.push_back(details);
-
-        // 保持最多300个数据点
-        while self.timestamps.len() > 300 {
-            self.timestamps.pop_front();
-            self.memory_details.pop_front();
-        }
     }
 }
 

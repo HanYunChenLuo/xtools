@@ -13,6 +13,32 @@ use chrono::{DateTime, Local};
 use serde::Serialize;
 use std::collections::{HashMap, VecDeque};
 
+/// 内存中时序序列的抽稀上限：采样数据由 CLI 边采边流式落盘（CSV 始终完整），
+/// 内存序列只服务退出时的图表渲染——超过 2×CAP 时每 2 取 1 抽稀，
+/// 保留完整时间范围、分辨率随运行时长自适应降级，长测内存有界。
+/// CAP=30_000：50ms 间隔下约 25 分钟全精度；1s 间隔下永远达不到上限。
+pub(crate) const CHART_SERIES_CAP: usize = 30_000;
+
+/// 每 2 取 1 原地抽稀（保留首尾，容量减半）
+pub(crate) fn decimate<T>(dq: &mut VecDeque<T>) {
+    let mut i = 0;
+    dq.retain(|_| {
+        let keep = i % 2 == 0;
+        i += 1;
+        keep
+    });
+}
+
+/// Vec 版抽稀（FpsTimeSeriesData 用 Vec 存储）
+pub(crate) fn decimate_vec<T>(v: &mut Vec<T>) {
+    let mut i = 0;
+    v.retain(|_| {
+        let keep = i % 2 == 0;
+        i += 1;
+        keep
+    });
+}
+
 /// 单个 PID 的监控状态。多进程应用会有多个 PidStats，按 pid 索引在 HashMap 中。
 #[derive(Default)]
 pub struct PidStats {
@@ -41,6 +67,11 @@ impl CpuTimeSeriesData {
         process_cpu: f32,
         top_threads: Vec<ThreadCpuInfo>,
     ) {
+        if self.timestamps.len() >= 2 * CHART_SERIES_CAP {
+            decimate(&mut self.timestamps);
+            decimate(&mut self.process_cpu);
+            decimate(&mut self.top_threads);
+        }
         self.timestamps.push_back(timestamp);
         self.process_cpu.push_back(process_cpu);
         self.top_threads.push_back(top_threads);
@@ -353,3 +384,74 @@ impl Sampler {
         self.thread
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_cpu_time_series_decimates_beyond_cap() {
+        let mut d = CpuTimeSeriesData::default();
+        let t0 = Local::now();
+        let n = 2 * CHART_SERIES_CAP + 10;
+        for i in 0..n {
+            d.add_data_point(t0 + chrono::Duration::milliseconds(i as i64), i as f32, Vec::new());
+        }
+        // 达到 2×CAP 时抽稀一次（每 2 取 1），再追加 10 个点
+        assert_eq!(d.timestamps.len(), CHART_SERIES_CAP + 10);
+        assert_eq!(d.process_cpu.len(), CHART_SERIES_CAP + 10);
+        assert_eq!(d.top_threads.len(), CHART_SERIES_CAP + 10);
+        // 首点保留；抽稀保留偶数位；末点保留 → 时间范围完整
+        assert_eq!(d.process_cpu[0], 0.0);
+        assert_eq!(d.process_cpu[1], 2.0);
+        assert_eq!(*d.process_cpu.back().unwrap(), (n - 1) as f32);
+        assert_eq!(d.timestamps[0], t0);
+        assert_eq!(
+            *d.timestamps.back().unwrap(),
+            t0 + chrono::Duration::milliseconds((n - 1) as i64)
+        );
+    }
+
+    #[test]
+    fn test_memory_time_series_decimates_beyond_cap() {
+        let mut d = MemoryTimeSeriesData::default();
+        let n = 2 * CHART_SERIES_CAP + 5;
+        for i in 0..n {
+            d.add_data_point(
+                Local::now(),
+                MemoryDetails { total_pss: i as u64, ..Default::default() },
+            );
+        }
+        assert_eq!(d.timestamps.len(), CHART_SERIES_CAP + 5);
+        assert_eq!(d.memory_details.len(), CHART_SERIES_CAP + 5);
+        assert_eq!(d.memory_details[0].total_pss, 0);
+        assert_eq!(d.memory_details[1].total_pss, 2);
+        assert_eq!(d.memory_details.back().unwrap().total_pss, (n - 1) as u64);
+    }
+
+    #[test]
+    fn test_fps_time_series_decimates_beyond_cap() {
+        let mut d = FpsTimeSeriesData::default();
+        let n = 2 * CHART_SERIES_CAP + 5;
+        for i in 0..n {
+            d.add_data_point(Local::now(), i as f32, i as u32, "L");
+        }
+        assert_eq!(d.timestamps.len(), CHART_SERIES_CAP + 5);
+        assert_eq!(d.fps[0], 0.0);
+        assert_eq!(d.fps[1], 2.0);
+        assert_eq!(*d.fps.last().unwrap(), (n - 1) as f32);
+        assert_eq!(d.layers.len(), CHART_SERIES_CAP + 5);
+        assert_eq!(d.jank_counts.len(), CHART_SERIES_CAP + 5);
+    }
+
+    #[test]
+    fn test_series_below_cap_untouched() {
+        let mut d = CpuTimeSeriesData::default();
+        for i in 0..100 {
+            d.add_data_point(Local::now(), i as f32, Vec::new());
+        }
+        assert_eq!(d.process_cpu.len(), 100);
+        assert_eq!(d.process_cpu[1], 1.0);
+    }
+}
+
