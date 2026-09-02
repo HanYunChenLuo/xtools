@@ -126,12 +126,13 @@ fps_sample_round(pid)                    ← agent 内每 PID 每 FPS 轮一次�
 | `--freq` | 每核 `scaling_cur_freq`（KHz；hello 带 `maxkhz` 基线） | 每轮（µs 级） | `{"t":"freq","khz":[...]}` |
 | `--io` | `/proc/<pid>/io` 计数器差值 → KB/s（r/w=rchar/wchar 逻辑读写，dr/dw=read_bytes/write_bytes 磁盘读写） | 每轮 | `{"t":"io","pid":..,"r":..,"w":..,"dr":..,"dw":..}` |
 | `--net` | `/proc/net/dev` 物理口聚合（排除 lo/sit/tun/gre/dummy/vti/ip6*）→ KB/s | 每轮 | `{"t":"net","rx":..,"tx":..}` |
-| `--gpu` | kgsl `gpubusy`（busy/total µs 计数器差值占比）+ gpuclk；**降级**：GPU 在 hypervisor 后无 kgsl 时改 `dumpsys gpu` 每 PID 显存（限频 ≥1s，~11ms） | 每轮 / 降级 ≥1s | `{"t":"gpu","busy":..,"mhz":..}` / `{"t":"gpumem","pid":..,"bytes":..,"global":..}` |
+| `--gpu` | 三级探测：kgsl `gpubusy`（GVM 直通）→ **QNX telnet**（hypervisor：QNX host 的 kgsl slog，真 busy%/util%/频率+每进程 busy）→ `dumpsys gpu` 每 PID 显存（保底，限频 ≥1s） | 每轮 / QNX 1s / 保底 ≥1s | `{"t":"gpu","busy":..,"util":..,"mhz":..,"maxmhz":..}` / `{"t":"gpuproc","pid":..,"busy":..}` / `{"t":"gpumem","pid":..,"bytes":..,"global":..}` |
 | `--thermal` | `dumpsys thermalservice`（温度 sensors + Thermal Status 热降频级别） | 限频 ≥2s（~50ms dumpsys 会拖长低间隔节拍轮） | `{"t":"temp","status":..,"sensors":[[名,类型,°C]]}` |
 
 关键设计点：
 - **net 是整机口径**：Android 应用共享 netns，`/proc/<pid>/net/dev` 与整机一致；per-app 流量需 qtaguid（内核无）或 eBPF maps（不便读），实测被测包 uid=1000 系统聚合也无意义——如实标注整机。
-- **gpu/thermal 自适应降级**：GPU 在 hypervisor 后的平台（如此车机 msmnile）无 kgsl sysfs，启动探测失败发 err 并禁用；此车机 thermalservice 是 test HAL 假数据（恒定 30.8°C），代码按标准接口实现，真手机有效。
+- **QNX 通道细节**（SS3/8295，GPU 由 QNX host 管理，GVM 内无 kgsl 任何东西）：agent 起 `busybox telnet 172.31.101.52`（QNX 侧 root 免密）长连接，写 `/dev/kgsl-control` 开统计（gpu_set_log_level 4 + gpubusystats + gpu_per_process_busy），`slog2info -W | grep kgsl` 流式读（**-W 不回放历史**，-w 会先倒几百行 backlog；grep 挡 VHAL 刷屏）。读线程独立不占节拍；进程行按 comm 名归因（QNX 显示名 = /proc/<pid>/comm）。坑：QNX `login:`/`# ` 提示符**无换行**，必须逐字节读；子进程 stdin 句柄 drop 即 EOF，telnet 会退出（须移交读线程持有）。
+- **gpu/thermal 自适应降级**：探测失败发 err 并降级/禁用；此车机 thermalservice 是 test HAL 假数据（恒定 30.8°C），代码按标准接口实现，真手机有效。
 - **host 侧开关收敛为 `MetricFlags`**（xperf-core/agent.rs）：`spawn_agent`/`reconnect_agent` 签名从逐 bool 改为该结构体，CLI/GUI 共用。
 - **速率类指标（io/net/gpu）首样建基线不出数**，窗口按墙钟差值（非假定间隔），overrun 时速率仍准。
 
