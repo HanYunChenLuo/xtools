@@ -286,6 +286,8 @@ pub struct CsvStream {
     mem: HashMap<u32, BufWriter<fs::File>>,
     fps: HashMap<u32, BufWriter<fs::File>>,
     thread: HashMap<(u32, u32), BufWriter<fs::File>>, // (pid, tid)
+    io: HashMap<u32, BufWriter<fs::File>>,            // pid
+    misc: HashMap<&'static str, BufWriter<fs::File>>, // freq/thermal/gpu/net（设备级单文件，按指标名一个 writer）
     broken: bool, // 写盘失败后停用（防逐行刷屏告警）
 }
 
@@ -368,4 +370,194 @@ impl CsvStream {
             "thread", format!("thread_{}_{}_{}.csv", sanitized, tid, pid), "Timestamp,CPUUsage", &row,
         );
     }
+
+    /// 每核频率一行（MHz），表头列数由首个样本核数决定
+    pub fn freq_row(&mut self, pkg: &str, t: DateTime<Local>, mhz: &[f32]) {
+        let header = format!(
+            "Timestamp,{}",
+            (0..mhz.len()).map(|i| format!("cpu{} (MHz)", i)).collect::<Vec<_>>().join(",")
+        );
+        let row = format!(
+            "{},{}",
+            t.format(CSV_TS_FMT),
+            mhz.iter().map(|m| format!("{:.0}", m)).collect::<Vec<_>>().join(",")
+        );
+        stream_write(
+            &mut self.broken, &mut self.root, pkg, &mut self.misc, "freq",
+            "freq", "freq_data.csv".to_string(), &header, &row,
+        );
+    }
+
+    /// 温度长格式：每传感器一行（Timestamp,Status,Sensor,TempC）
+    pub fn temp_row(&mut self, pkg: &str, t: DateTime<Local>, status: i32, sensors: &[(String, i32, f32)]) {
+        for (name, _, value) in sensors {
+            let row = format!("{},{},{},{:.1}", t.format(CSV_TS_FMT), status, name, value);
+            stream_write(
+                &mut self.broken, &mut self.root, pkg, &mut self.misc, "thermal",
+                "thermal", "thermal_data.csv".to_string(), "Timestamp,Status,Sensor,TempC", &row,
+            );
+        }
+    }
+
+    pub fn gpu_row(&mut self, pkg: &str, t: DateTime<Local>, busy: f32, mhz: u32) {
+        let row = format!("{},{:.2},{}", t.format(CSV_TS_FMT), busy, mhz);
+        stream_write(
+            &mut self.broken, &mut self.root, pkg, &mut self.misc, "gpu",
+            "gpu", "gpu_data.csv".to_string(), "Timestamp,Busy (%),Clock (MHz)", &row,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)] // r/w/dr/dw 四个速率是协议字段，不再包结构体
+    pub fn io_row(&mut self, pkg: &str, pid: u32, t: DateTime<Local>, r: f32, w: f32, dr: f32, dw: f32) {
+        let row = format!("{},{:.2},{:.2},{:.2},{:.2}", t.format(CSV_TS_FMT), r, w, dr, dw);
+        stream_write(
+            &mut self.broken, &mut self.root, pkg, &mut self.io, pid,
+            "io", format!("io_{}_data.csv", pid),
+            "Timestamp,Read (KB/s),Write (KB/s),Disk Read (KB/s),Disk Write (KB/s)", &row,
+        );
+    }
+
+    pub fn net_row(&mut self, pkg: &str, t: DateTime<Local>, rx: f32, tx: f32) {
+        let row = format!("{},{:.2},{:.2}", t.format(CSV_TS_FMT), rx, tx);
+        stream_write(
+            &mut self.broken, &mut self.root, pkg, &mut self.misc, "net",
+            "net", "net_data.csv".to_string(), "Timestamp,RX (KB/s),TX (KB/s)", &row,
+        );
+    }
+}
+
+// ---------- B 类指标时序（退出图表用）----------
+
+/// 单条序列的点集：(时间, 值)
+pub type SeriesPoints = Vec<(DateTime<Local>, f32)>;
+/// 一条命名序列（图例名 + 点集）
+pub type NamedSeries = (String, SeriesPoints);
+/// 温度传感器读数：(名称, 类型, °C)
+pub type SensorReading = (String, i32, f32);
+/// 温度样本：(ts, thermal status, [(sensor, °C)])
+pub type TempSample = (DateTime<Local>, i32, Vec<(String, f32)>);
+/// IO 样本：(ts, r, w, dr, dw) KB/s
+pub type IoSample = (DateTime<Local>, f32, f32, f32, f32);
+
+/// 设备级/IO 指标的时序容器：样本到达即追加，超 2×CHART_SERIES_CAP 每 2 取 1 抽稀。
+#[derive(Default)]
+pub struct ExtraSeries {
+    /// (ts, 每核 MHz)
+    pub freq: VecDeque<(DateTime<Local>, Vec<f32>)>,
+    /// 温度样本序列
+    pub temp: VecDeque<TempSample>,
+    /// (ts, busy%, clock MHz)
+    pub gpu: VecDeque<(DateTime<Local>, f32, u32)>,
+    /// pid → IO 样本序列
+    pub io: HashMap<u32, VecDeque<IoSample>>,
+    /// (ts, rx, tx) KB/s（整机口径）
+    pub net: VecDeque<(DateTime<Local>, f32, f32)>,
+}
+
+impl ExtraSeries {
+    fn push_capped<T>(dq: &mut VecDeque<T>, v: T) {
+        if dq.len() >= 2 * xperf_core::CHART_SERIES_CAP {
+            xperf_core::decimate(dq);
+        }
+        dq.push_back(v);
+    }
+
+    pub fn push_freq(&mut self, t: DateTime<Local>, mhz: Vec<f32>) {
+        Self::push_capped(&mut self.freq, (t, mhz));
+    }
+
+    pub fn push_temp(&mut self, t: DateTime<Local>, status: i32, sensors: &[(String, i32, f32)]) {
+        let sensors: Vec<(String, f32)> = sensors.iter().map(|(n, _, v)| (n.clone(), *v)).collect();
+        Self::push_capped(&mut self.temp, (t, status, sensors));
+    }
+
+    pub fn push_gpu(&mut self, t: DateTime<Local>, busy: f32, mhz: u32) {
+        Self::push_capped(&mut self.gpu, (t, busy, mhz));
+    }
+
+    pub fn push_io(&mut self, pid: u32, t: DateTime<Local>, r: f32, w: f32, dr: f32, dw: f32) {
+        Self::push_capped(self.io.entry(pid).or_default(), (t, r, w, dr, dw));
+    }
+
+    pub fn push_net(&mut self, t: DateTime<Local>, rx: f32, tx: f32) {
+        Self::push_capped(&mut self.net, (t, rx, tx));
+    }
+}
+
+/// 通用多序列折线图：B 类指标（freq/temp/gpu/io/net）退出图表共用。
+/// 每条序列 (名称, [(时间, 值)])；自适应纵轴。
+pub fn generate_multi_line_chart(
+    path: &PathBuf,
+    title: &str,
+    y_desc: &str,
+    series: &[NamedSeries],
+) -> Result<PathBuf> {
+    let series: Vec<&NamedSeries> = series.iter().filter(|(_, pts)| !pts.is_empty()).collect();
+    if series.is_empty() {
+        return Err(anyhow::format_err!("No data to chart"));
+    }
+
+    let mut min_time = None;
+    let mut max_time = None;
+    let mut max_v = 1.0f32;
+    for (_, pts) in &series {
+        min_time = Some(min_time.map_or(pts[0].0, |m: DateTime<Local>| m.min(pts[0].0)));
+        max_time = Some(max_time.map_or(pts[pts.len() - 1].0, |m: DateTime<Local>| m.max(pts[pts.len() - 1].0)));
+        for (_, v) in pts {
+            if *v > max_v {
+                max_v = *v;
+            }
+        }
+    }
+    let min_time = min_time.unwrap();
+    let max_time = max_time.unwrap();
+    let max_time = if max_time <= min_time { min_time + chrono::Duration::minutes(1) } else { max_time };
+    max_v *= 1.1;
+
+    let path_clone = path.clone();
+    let root = BitMapBackend::new(path, (1920, 1080)).into_drawing_area();
+    root.fill(&WHITE)?;
+
+    let (title_area, chart_area) = root.split_vertically(50);
+    title_area.titled(title, ("sans-serif", 20))?;
+
+    let mut chart = ChartBuilder::on(&chart_area)
+        .margin(10)
+        .margin_right(35)
+        .x_label_area_size(40)
+        .y_label_area_size(60)
+        .build_cartesian_2d(min_time..max_time, 0f32..max_v)?;
+
+    chart
+        .configure_mesh()
+        .x_labels(8)
+        .x_label_formatter(&|x| x.format("%H:%M:%S").to_string())
+        .y_desc(y_desc)
+        .x_desc("Time")
+        .draw()?;
+
+    let colors = [
+        RGBColor(31, 119, 180), RGBColor(255, 127, 14), RGBColor(44, 160, 44),
+        RGBColor(214, 39, 40), RGBColor(148, 103, 189), RGBColor(140, 86, 75),
+        RGBColor(227, 119, 194), RGBColor(127, 127, 127), RGBColor(188, 189, 34),
+        RGBColor(23, 190, 207),
+    ];
+
+    for (i, (name, pts)) in series.iter().enumerate() {
+        let color = colors[i % colors.len()];
+        chart
+            .draw_series(LineSeries::new(pts.iter().copied(), color.stroke_width(2)))?
+            .label(name.clone())
+            .legend(move |(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], color.stroke_width(2)));
+    }
+    chart
+        .configure_series_labels()
+        .background_style(WHITE.mix(0.8))
+        .border_style(BLACK)
+        .position(SeriesLabelPosition::UpperRight)
+        .margin(10)
+        .draw()?;
+
+    root.present()?;
+    Ok(path_clone)
 }

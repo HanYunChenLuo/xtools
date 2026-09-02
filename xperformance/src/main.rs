@@ -37,6 +37,26 @@ struct Args {
     #[arg(long)]
     fps: bool,
 
+    /// Monitor per-core CPU frequency (scaling_cur_freq)
+    #[arg(long)]
+    freq: bool,
+
+    /// Monitor temperature and thermal throttling status (dumpsys thermalservice, ≥2s period)
+    #[arg(long)]
+    thermal: bool,
+
+    /// Monitor GPU busy% (kgsl sysfs; auto-disabled when GPU is behind hypervisor)
+    #[arg(long)]
+    gpu: bool,
+
+    /// Monitor per-process IO rate (KB/s, /proc/<pid>/io)
+    #[arg(long)]
+    io: bool,
+
+    /// Monitor system-wide network rate (KB/s, /proc/net/dev physical interfaces)
+    #[arg(long)]
+    net: bool,
+
     /// Sampling interval in milliseconds (default: 1000)
     #[arg(short, long, default_value_t = 1000)]
     interval: u64,
@@ -70,24 +90,38 @@ async fn monitor_process(args: &Args) -> Result<(), Box<dyn std::error::Error>> 
 
     check_adb()?;
 
-    if !args.cpu && !args.memory && !args.fps {
-        println!("No monitoring options selected. Use --cpu, --memory or --fps");
+    let flags = metric_flags(args);
+    if !flags.any() {
+        println!("No monitoring options selected. Use --cpu/--memory/--fps/--freq/--thermal/--gpu/--io/--net");
         return Ok(());
     }
 
     // 统一走设备端 agent 采样（无 adb 轮询路径）
-    monitor_process_agent(args).await
+    monitor_process_agent(args, flags).await
+}
+
+fn metric_flags(args: &Args) -> xperf_core::MetricFlags {
+    xperf_core::MetricFlags {
+        cpu: args.cpu,
+        memory: args.memory,
+        fps: args.fps,
+        freq: args.freq,
+        thermal: args.thermal,
+        gpu: args.gpu,
+        io: args.io,
+        net: args.net,
+    }
 }
 
 /// 统一采样路径：设备端 agent 常驻采样 + exec-out 事件流。
 /// 输出策略：interval ≥ 500ms 逐条详细打印（低频率，同旧轮询模式的信息量）；
 /// < 500ms 时按 ~1s 聚合打印（逐条会刷屏），全量明细均在退出 CSV 中。
-async fn monitor_process_agent(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
+async fn monitor_process_agent(args: &Args, flags: xperf_core::MetricFlags) -> Result<(), Box<dyn std::error::Error>> {
     use xperf_core::agent::{self, AgentEvent};
 
     let bin = agent::ensure_agent_built()?;
     agent::deploy_agent(&bin)?;
-    let mut stream = agent::spawn_agent(Some(&args.package), args.interval, args.cpu, args.memory, args.fps)?;
+    let mut stream = agent::spawn_agent(Some(&args.package), args.interval, flags)?;
     println!("agent 已部署并启动（间隔 {}ms）", args.interval);
 
     let verbose = args.interval >= 500;
@@ -117,11 +151,19 @@ async fn monitor_process_agent(args: &Args) -> Result<(), Box<dyn std::error::Er
         rss: u64,
         has_mem: bool,
         fps: Option<(String, f32, u32)>, // 最新 (图层, fps, jank)
+        io: Option<(f32, f32)>,          // 最新 (读 KB/s, 写 KB/s)
     }
     let mut aggs: std::collections::HashMap<u32, Agg> = Default::default();
+    // 设备级指标的最新值（聚合模式每秒打印一次）
+    let mut latest_freq: Vec<u64> = Vec::new(); // KHz
+    let mut latest_net: Option<(f32, f32)> = None;
+    let mut latest_gpu: Option<(f32, u32)> = None;
+    let mut latest_temp: Option<(i32, Vec<cli_utils::SensorReading>)> = None;
     let mut last_print = Instant::now();
     // 边采边落盘：样本到达即追加 CSV，崩溃只丢未 flush 尾部
     let mut csv = cli_utils::CsvStream::default();
+    // B 类指标时序（退出图表用；超 2×CHART_SERIES_CAP 每 2 取 1 抽稀）
+    let mut extra = cli_utils::ExtraSeries::default();
 
     while running.load(Ordering::SeqCst) {
         let ev = match stream.next_event() {
@@ -131,7 +173,7 @@ async fn monitor_process_agent(args: &Args) -> Result<(), Box<dyn std::error::Er
                 println!("{}", "连接断开，等待设备恢复…（Ctrl-C 退出）".yellow());
                 let r = running.clone();
                 match agent::reconnect_agent(
-                    Some(&args.package), args.interval, args.cpu, args.memory, args.fps,
+                    Some(&args.package), args.interval, flags,
                     &move || r.load(Ordering::SeqCst),
                 ) {
                     Some(s) => {
@@ -151,7 +193,10 @@ async fn monitor_process_agent(args: &Args) -> Result<(), Box<dyn std::error::Er
             }
         };
         match ev {
-            AgentEvent::Hello { ncores } => println!("设备 {} 核", ncores),
+            AgentEvent::Hello { ncores, maxkhz } => {
+                let maxghz: Vec<String> = maxkhz.iter().map(|k| format!("{:.2}", *k as f32 / 1e6)).collect();
+                println!("设备 {} 核（最大频率 GHz: [{}]）", ncores, maxghz.join(", "));
+            }
             AgentEvent::Cpu { ts, pid, cpu, th } => {
                 let Some(t) = DateTime::from_timestamp_millis(ts as i64)
                     .map(|t| t.with_timezone(&Local))
@@ -288,6 +333,98 @@ async fn monitor_process_agent(args: &Args) -> Result<(), Box<dyn std::error::Er
                 let a = aggs.entry(pid).or_default();
                 a.fps = Some((layer, fps, jank));
             }
+            AgentEvent::Freq { ts, khz } => {
+                let Some(t) = DateTime::from_timestamp_millis(ts as i64)
+                    .map(|t| t.with_timezone(&Local))
+                else {
+                    continue;
+                };
+                let mhz: Vec<f32> = khz.iter().map(|k| *k as f32 / 1000.0).collect();
+                if verbose {
+                    let cells: Vec<String> = mhz.iter().map(|m| format!("{:.0}", m)).collect();
+                    println!("[{}] CPU Freq MHz: [{}]", t.format("%H:%M:%S"), cells.join(", ").blue());
+                }
+                csv.freq_row(&args.package, t, &mhz);
+                extra.push_freq(t, mhz.clone());
+                latest_freq = khz;
+            }
+            AgentEvent::Io { ts, pid, r, w, dr, dw } => {
+                let Some(t) = DateTime::from_timestamp_millis(ts as i64)
+                    .map(|t| t.with_timezone(&Local))
+                else {
+                    continue;
+                };
+                if verbose {
+                    println!(
+                        "[{}] IO: read {} KB/s (disk {}), write {} KB/s (disk {}) [pid {}]",
+                        t.format("%H:%M:%S"),
+                        format!("{:.1}", r).blue(),
+                        format!("{:.1}", dr).blue(),
+                        format!("{:.1}", w).yellow(),
+                        format!("{:.1}", dw).yellow(),
+                        pid.to_string().yellow()
+                    );
+                }
+                csv.io_row(&args.package, pid, t, r, w, dr, dw);
+                extra.push_io(pid, t, r, w, dr, dw);
+                aggs.entry(pid).or_default().io = Some((r, w));
+            }
+            AgentEvent::Net { ts, rx, tx } => {
+                let Some(t) = DateTime::from_timestamp_millis(ts as i64)
+                    .map(|t| t.with_timezone(&Local))
+                else {
+                    continue;
+                };
+                if verbose {
+                    println!(
+                        "[{}] Net（整机）: RX {} KB/s, TX {} KB/s",
+                        t.format("%H:%M:%S"),
+                        format!("{:.1}", rx).blue(),
+                        format!("{:.1}", tx).yellow()
+                    );
+                }
+                csv.net_row(&args.package, t, rx, tx);
+                extra.push_net(t, rx, tx);
+                latest_net = Some((rx, tx));
+            }
+            AgentEvent::Gpu { ts, busy, mhz } => {
+                let Some(t) = DateTime::from_timestamp_millis(ts as i64)
+                    .map(|t| t.with_timezone(&Local))
+                else {
+                    continue;
+                };
+                if verbose {
+                    println!(
+                        "[{}] GPU: busy {}% @ {} MHz",
+                        t.format("%H:%M:%S"),
+                        format!("{:.1}", busy).blue(),
+                        mhz
+                    );
+                }
+                csv.gpu_row(&args.package, t, busy, mhz);
+                extra.push_gpu(t, busy, mhz);
+                latest_gpu = Some((busy, mhz));
+            }
+            AgentEvent::Temp { ts, status, sensors } => {
+                let Some(t) = DateTime::from_timestamp_millis(ts as i64)
+                    .map(|t| t.with_timezone(&Local))
+                else {
+                    continue;
+                };
+                if verbose {
+                    let cells: Vec<String> =
+                        sensors.iter().map(|(name, _, v)| format!("{}: {:.1}°C", name, v)).collect();
+                    println!(
+                        "[{}] Temp: {} (thermal status: {})",
+                        t.format("%H:%M:%S"),
+                        cells.join(", ").blue(),
+                        if status >= 0 { status.to_string().red() } else { "未知".into() }
+                    );
+                }
+                csv.temp_row(&args.package, t, status, &sensors);
+                extra.push_temp(t, status, &sensors);
+                latest_temp = Some((status, sensors));
+            }
             AgentEvent::Exit { pid } => {
                 restart_count += 1;
                 if let Some(s) = pid_stats.get_mut(&pid.to_string()) {
@@ -318,6 +455,9 @@ async fn monitor_process_agent(args: &Args) -> Result<(), Box<dyn std::error::Er
                 if let Some((layer, fps, jank)) = &a.fps {
                     parts.push(format!("FPS {} (jank {}, {})", format!("{:.1}", fps).blue(), jank, layer.green()));
                 }
+                if let Some((r, w)) = a.io {
+                    parts.push(format!("IO R {} / W {} KB/s", format!("{:.1}", r).blue(), format!("{:.1}", w).yellow()));
+                }
                 if !parts.is_empty() {
                     println!("[{}] {} (pid: {})", ts, parts.join(" | "), pid.to_string().yellow());
                 }
@@ -325,19 +465,128 @@ async fn monitor_process_agent(args: &Args) -> Result<(), Box<dyn std::error::Er
                 a.sum = 0.0;
                 a.max = 0.0;
             }
+            // 设备级指标（不区分 PID）：一行汇总
+            let mut dev_parts = Vec::new();
+            if !latest_freq.is_empty() {
+                let cells: Vec<String> = latest_freq.iter().map(|k| format!("{:.0}", *k as f32 / 1000.0)).collect();
+                dev_parts.push(format!("Freq MHz [{}]", cells.join(",").blue()));
+            }
+            if let Some((rx, tx)) = latest_net {
+                dev_parts.push(format!("Net RX {} / TX {} KB/s", format!("{:.1}", rx).blue(), format!("{:.1}", tx).yellow()));
+            }
+            if let Some((busy, mhz)) = latest_gpu {
+                dev_parts.push(format!("GPU {}% @ {}MHz", format!("{:.1}", busy).blue(), mhz));
+            }
+            if let Some((status, sensors)) = &latest_temp {
+                let cells: Vec<String> = sensors.iter().map(|(n, _, v)| format!("{}: {:.1}°C", n, v)).collect();
+                dev_parts.push(format!("Temp {} (status {})", cells.join(", ").blue(), status));
+            }
+            if !dev_parts.is_empty() {
+                println!("[{}] {}", ts, dev_parts.join(" | "));
+            }
         }
     }
 
     drop(stream); // 杀掉设备端 agent（Drop 里 kill）
-    generate_final_outputs(args, &pid_stats, &thread_time_series)?;
+    generate_final_outputs(args, &pid_stats, &thread_time_series, &extra)?;
     println!("Process Restarts: {}", restart_count.to_string().red());
     Ok(())
+}
+
+/// B 类指标退出图表：每指标一张多序列折线（freq 每核一条 / temp 每传感器一条 / io 每 PID 读写两条）。
+fn generate_extra_charts(timestamp_dir: &Path, package: &str, extra: &cli_utils::ExtraSeries) {
+    if extra.freq.len() > 1 {
+        let dir = timestamp_dir.join("freq");
+        let _ = std::fs::create_dir_all(&dir);
+        let ncores = extra.freq.back().map(|(_, v)| v.len()).unwrap_or(0);
+        let series: Vec<cli_utils::NamedSeries> = (0..ncores)
+            .map(|c| {
+                (
+                    format!("cpu{}", c),
+                    extra.freq.iter().map(|(t, v)| (*t, v.get(c).copied().unwrap_or(0.0))).collect(),
+                )
+            })
+            .collect();
+        match cli_utils::generate_multi_line_chart(&dir.join("freq_chart.png"), &format!("CPU Frequency - {}", package), "MHz", &series) {
+            Ok(p) => println!("✓ Freq chart generated: {}", p.display()),
+            Err(e) => println!("Failed to generate freq chart: {}", e),
+        }
+    }
+    if extra.temp.len() > 1 {
+        let dir = timestamp_dir.join("thermal");
+        let _ = std::fs::create_dir_all(&dir);
+        // 传感器集合以出现过的并集为准（HAL 传感器列表运行中可能变化）
+        let mut names: Vec<String> = Vec::new();
+        for (_, _, sensors) in &extra.temp {
+            for (n, _) in sensors {
+                if !names.contains(n) {
+                    names.push(n.clone());
+                }
+            }
+        }
+        let series: Vec<cli_utils::NamedSeries> = names
+            .iter()
+            .map(|n| {
+                let pts = extra
+                    .temp
+                    .iter()
+                    .filter_map(|(t, _, sensors)| sensors.iter().find(|(sn, _)| sn == n).map(|(_, v)| (*t, *v)))
+                    .collect();
+                (n.clone(), pts)
+            })
+            .collect();
+        match cli_utils::generate_multi_line_chart(&dir.join("thermal_chart.png"), &format!("Temperature - {}", package), "°C", &series) {
+            Ok(p) => println!("✓ Thermal chart generated: {}", p.display()),
+            Err(e) => println!("Failed to generate thermal chart: {}", e),
+        }
+    }
+    if extra.gpu.len() > 1 {
+        let dir = timestamp_dir.join("gpu");
+        let _ = std::fs::create_dir_all(&dir);
+        let busy: Vec<(DateTime<Local>, f32)> = extra.gpu.iter().map(|(t, b, _)| (*t, *b)).collect();
+        let series = vec![("busy%".to_string(), busy)];
+        match cli_utils::generate_multi_line_chart(&dir.join("gpu_chart.png"), &format!("GPU Busy - {}", package), "%", &series) {
+            Ok(p) => println!("✓ GPU chart generated: {}", p.display()),
+            Err(e) => println!("Failed to generate gpu chart: {}", e),
+        }
+    }
+    if extra.net.len() > 1 {
+        let dir = timestamp_dir.join("net");
+        let _ = std::fs::create_dir_all(&dir);
+        let rx: Vec<(DateTime<Local>, f32)> = extra.net.iter().map(|(t, r, _)| (*t, *r)).collect();
+        let tx: Vec<(DateTime<Local>, f32)> = extra.net.iter().map(|(t, _, x)| (*t, *x)).collect();
+        let series = vec![("RX KB/s".to_string(), rx), ("TX KB/s".to_string(), tx)];
+        match cli_utils::generate_multi_line_chart(&dir.join("net_chart.png"), &format!("Network（整机）- {}", package), "KB/s", &series) {
+            Ok(p) => println!("✓ Net chart generated: {}", p.display()),
+            Err(e) => println!("Failed to generate net chart: {}", e),
+        }
+    }
+    for (pid, samples) in &extra.io {
+        if samples.len() <= 1 {
+            continue;
+        }
+        let dir = timestamp_dir.join("io");
+        let _ = std::fs::create_dir_all(&dir);
+        let r: Vec<(DateTime<Local>, f32)> = samples.iter().map(|(t, r, _, _, _)| (*t, *r)).collect();
+        let w: Vec<(DateTime<Local>, f32)> = samples.iter().map(|(t, _, w, _, _)| (*t, *w)).collect();
+        let series = vec![("read KB/s".to_string(), r), ("write KB/s".to_string(), w)];
+        match cli_utils::generate_multi_line_chart(
+            &dir.join(format!("io_{}_chart.png", pid)),
+            &format!("IO - {} (PID: {})", package, pid),
+            "KB/s",
+            &series,
+        ) {
+            Ok(p) => println!("✓ IO chart generated (pid {}): {}", pid, p.display()),
+            Err(e) => println!("Failed to generate io chart for pid {}: {}", pid, e),
+        }
+    }
 }
 
 fn generate_final_outputs(
     args: &Args,
     pid_stats: &std::collections::HashMap<String, xperf_core::PidStats>,
     thread_time_series: &std::collections::HashMap<String, std::collections::HashMap<String, Vec<ThreadCpuInfo>>>,
+    extra: &cli_utils::ExtraSeries,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // 线程时序图（按 PID）
     if args.thread && args.cpu && !thread_time_series.is_empty() {
@@ -452,6 +701,8 @@ fn generate_final_outputs(
         }
     }
     // FPS CSV 已在采样时流式落盘（fps/<pkg>_fps_data_pid<pid>.csv），CLI 不出 FPS 图表
+    // B 类指标退出图表（CSV 同样已流式落盘在各自子目录）
+    generate_extra_charts(&timestamp_dir, &args.package, extra);
     Ok(())
 }
 

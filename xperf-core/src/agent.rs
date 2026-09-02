@@ -12,10 +12,44 @@ use std::process::{Child, Command, Stdio};
 
 const DEVICE_AGENT_PATH: &str = "/data/local/tmp/xperf-agent";
 
+/// 采样指标开关：与 agent 命令行 --cpu/--memory/--fps/--freq/--io/--net/--gpu/--thermal 一一对应。
+/// 设备无关指标（freq/thermal/net/gpu）不区分 PID；io 为每 PID。
+#[derive(Debug, Clone, Copy, Default)]
+pub struct MetricFlags {
+    pub cpu: bool,
+    pub memory: bool,
+    pub fps: bool,
+    pub freq: bool,
+    pub thermal: bool,
+    pub gpu: bool,
+    pub io: bool,
+    pub net: bool,
+}
+
+impl MetricFlags {
+    pub fn any(&self) -> bool {
+        self.cpu || self.memory || self.fps || self.freq || self.thermal || self.gpu || self.io || self.net
+    }
+
+    fn to_agent_args(self) -> Vec<String> {
+        let mut args = Vec::new();
+        if self.cpu { args.push("--cpu".into()); }
+        if self.memory { args.push("--memory".into()); }
+        if self.fps { args.push("--fps".into()); }
+        if self.freq { args.push("--freq".into()); }
+        if self.io { args.push("--io".into()); }
+        if self.net { args.push("--net".into()); }
+        if self.gpu { args.push("--gpu".into()); }
+        if self.thermal { args.push("--thermal".into()); }
+        args
+    }
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(tag = "t", rename_all = "lowercase")]
 pub enum AgentEvent {
-    Hello { ncores: u32 },
+    /// maxkhz: 每核最大频率（KHz），旧版 agent 无此字段时为空
+    Hello { ncores: u32, #[serde(default)] maxkhz: Vec<u64> },
     /// ts: 墙钟毫秒；cpu: 单核口径 %；th: [tid, 线程名, cpu%]（仅 >0.05% 的线程）
     Cpu { ts: u64, pid: u32, cpu: f32, th: Vec<(u32, String, f32)> },
     /// pss/rss 及分类明细，单位 KB；分类字段仅 interval≥500ms（dumpsys meminfo 路径）有值
@@ -34,6 +68,16 @@ pub enum AgentEvent {
     },
     /// 每个活跃图层一条；全静止时一条零帧样本
     Fps { ts: u64, pid: u32, layer: String, fps: f32, frames: u32, jank: u32 },
+    /// 每核当前频率（KHz），下标与 Hello 的 maxkhz 对应；0 = 该核离线/读失败
+    Freq { ts: u64, khz: Vec<u64> },
+    /// 每 PID IO 速率 KB/s：r/w=rchar/wchar 逻辑读写，dr/dw=read_bytes/write_bytes 磁盘读写
+    Io { ts: u64, pid: u32, r: f32, w: f32, dr: f32, dw: f32 },
+    /// 整机网络速率 KB/s（聚合物理口，排除回环/隧道；per-app 无数据源）
+    Net { ts: u64, rx: f32, tx: f32 },
+    /// GPU：busy 为窗口内 busy 占比 %；mhz 为当前时钟（0 = 无时钟源）
+    Gpu { ts: u64, busy: f32, mhz: u32 },
+    /// 温度与热降频：status 为 Android ThermalStatus（-1=未知）；sensors 为 [名称, 类型, °C]
+    Temp { ts: u64, status: i32, #[serde(default)] sensors: Vec<(String, i32, f32)> },
     Exit { pid: u32 },
     Noproc,
     Err { msg: String },
@@ -118,27 +162,13 @@ pub fn deploy_agent(local: &Path) -> Result<()> {
 }
 
 /// 启动设备端采样器，返回事件流。Ctrl-C/断连时 agent 因 stdout 写失败自行退出。
-pub fn spawn_agent(
-    package: Option<&str>,
-    interval_ms: u64,
-    cpu: bool,
-    memory: bool,
-    fps: bool,
-) -> Result<AgentStream> {
+pub fn spawn_agent(package: Option<&str>, interval_ms: u64, flags: MetricFlags) -> Result<AgentStream> {
     let mut cmd_args = vec!["exec-out".to_string(), DEVICE_AGENT_PATH.to_string()];
     if let Some(pkg) = package {
         cmd_args.extend(["--package".to_string(), pkg.to_string()]);
     }
     cmd_args.extend(["--interval".to_string(), interval_ms.to_string()]);
-    if cpu {
-        cmd_args.push("--cpu".to_string());
-    }
-    if memory {
-        cmd_args.push("--memory".to_string());
-    }
-    if fps {
-        cmd_args.push("--fps".to_string());
-    }
+    cmd_args.extend(flags.to_agent_args());
     let mut child = Command::new("adb")
         .args(&cmd_args)
         .stdout(Stdio::piped())
@@ -170,9 +200,7 @@ fn device_online() -> bool {
 pub fn reconnect_agent(
     package: Option<&str>,
     interval_ms: u64,
-    cpu: bool,
-    memory: bool,
-    fps: bool,
+    flags: MetricFlags,
     is_running: &dyn Fn() -> bool,
 ) -> Option<AgentStream> {
     loop {
@@ -182,7 +210,7 @@ pub fn reconnect_agent(
         if device_online() {
             match ensure_agent_built()
                 .and_then(|bin| deploy_agent(&bin))
-                .and_then(|_| spawn_agent(package, interval_ms, cpu, memory, fps))
+                .and_then(|_| spawn_agent(package, interval_ms, flags))
             {
                 Ok(s) => return Some(s),
                 Err(e) => eprintln!("agent 重连失败: {}，继续等待…", e),
@@ -199,7 +227,62 @@ mod tests {
     #[test]
     fn test_parse_hello() {
         let ev: AgentEvent = serde_json::from_str(r#"{"t":"hello","ncores":8,"version":1}"#).unwrap();
-        assert!(matches!(ev, AgentEvent::Hello { ncores: 8 }));
+        assert!(matches!(ev, AgentEvent::Hello { ncores: 8, .. }));
+        // 新版带 maxkhz
+        let ev: AgentEvent =
+            serde_json::from_str(r#"{"t":"hello","ncores":8,"maxkhz":[2841600,2841600],"version":1}"#).unwrap();
+        match ev {
+            AgentEvent::Hello { ncores, maxkhz } => assert_eq!((ncores, maxkhz), (8, vec![2841600, 2841600])),
+            _ => panic!("应为 Hello 事件"),
+        }
+    }
+
+    #[test]
+    fn test_parse_b_metrics() {
+        let ev: AgentEvent =
+            serde_json::from_str(r#"{"t":"freq","ts":1,"khz":[2592000,2246400]}"#).unwrap();
+        match ev {
+            AgentEvent::Freq { khz, .. } => assert_eq!(khz, vec![2592000, 2246400]),
+            _ => panic!("应为 Freq 事件"),
+        }
+        let ev: AgentEvent =
+            serde_json::from_str(r#"{"t":"io","ts":1,"pid":29697,"r":12.5,"w":3.0,"dr":0.0,"dw":1.5}"#).unwrap();
+        match ev {
+            AgentEvent::Io { pid, r, w, dr, dw, .. } => {
+                assert_eq!(pid, 29697);
+                assert_eq!((r, w, dr, dw), (12.5, 3.0, 0.0, 1.5));
+            }
+            _ => panic!("应为 Io 事件"),
+        }
+        let ev: AgentEvent = serde_json::from_str(r#"{"t":"net","ts":1,"rx":123.5,"tx":56.0}"#).unwrap();
+        match ev {
+            AgentEvent::Net { rx, tx, .. } => assert_eq!((rx, tx), (123.5, 56.0)),
+            _ => panic!("应为 Net 事件"),
+        }
+        let ev: AgentEvent = serde_json::from_str(r#"{"t":"gpu","ts":1,"busy":37.5,"mhz":585}"#).unwrap();
+        match ev {
+            AgentEvent::Gpu { busy, mhz, .. } => assert_eq!((busy, mhz), (37.5, 585)),
+            _ => panic!("应为 Gpu 事件"),
+        }
+        let ev: AgentEvent = serde_json::from_str(
+            r#"{"t":"temp","ts":1,"status":0,"sensors":[["soc0",0,42.5],["skin",3,41.0]]}"#,
+        )
+        .unwrap();
+        match ev {
+            AgentEvent::Temp { status, sensors, .. } => {
+                assert_eq!(status, 0);
+                assert_eq!(sensors, vec![("soc0".to_string(), 0, 42.5), ("skin".to_string(), 3, 41.0)]);
+            }
+            _ => panic!("应为 Temp 事件"),
+        }
+    }
+
+    #[test]
+    fn test_metric_flags_to_agent_args() {
+        let flags = MetricFlags { cpu: true, net: true, ..Default::default() };
+        assert_eq!(flags.to_agent_args(), vec!["--cpu", "--net"]);
+        assert!(!MetricFlags::default().any());
+        assert!(flags.any());
     }
 
     #[test]

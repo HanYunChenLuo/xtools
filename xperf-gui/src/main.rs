@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use chrono::{DateTime, Local};
 use tauri::{Emitter, Manager, State};
 use xperf_core::agent::{self, AgentEvent};
-use xperf_core::{MemoryDetails, SampleEvent, ThreadCpuInfo};
+use xperf_core::{MemoryDetails, MetricFlags, SampleEvent, ThreadCpuInfo};
 
 /// AgentEvent → 前端 SampleEvent（保持与前端既有协议一致，前端零改动）。
 /// 首次见到某 PID 时先补一条 PidDiscovered。
@@ -19,7 +19,10 @@ fn map_event(
     };
     let mut out = Vec::new();
     let pid = match &ev {
-        AgentEvent::Cpu { pid, .. } | AgentEvent::Mem { pid, .. } | AgentEvent::Fps { pid, .. } => Some(*pid),
+        AgentEvent::Cpu { pid, .. }
+        | AgentEvent::Mem { pid, .. }
+        | AgentEvent::Fps { pid, .. }
+        | AgentEvent::Io { pid, .. } => Some(*pid),
         _ => None,
     };
     if let Some(p) = pid {
@@ -31,8 +34,9 @@ fn map_event(
         }
     }
     match ev {
-        AgentEvent::Hello { ncores } => {
+        AgentEvent::Hello { ncores, maxkhz } => {
             eprintln!("[sampling] agent 已启动（{} 核）", ncores);
+            out.push(SampleEvent::AgentHello { ncores, maxkhz });
         }
         AgentEvent::Cpu { ts, pid, cpu, th } => {
             let t = ts_of(ts);
@@ -78,6 +82,21 @@ fn map_event(
                 jank_count: jank,
             });
         }
+        AgentEvent::Freq { ts, khz } => {
+            out.push(SampleEvent::FreqUpdate { timestamp: ts_of(ts), khz });
+        }
+        AgentEvent::Temp { ts, status, sensors } => {
+            out.push(SampleEvent::TempUpdate { timestamp: ts_of(ts), status, sensors });
+        }
+        AgentEvent::Gpu { ts, busy, mhz } => {
+            out.push(SampleEvent::GpuUpdate { timestamp: ts_of(ts), busy, mhz });
+        }
+        AgentEvent::Io { ts, pid, r, w, dr, dw } => {
+            out.push(SampleEvent::IoUpdate { pid: pid.to_string(), timestamp: ts_of(ts), r, w, dr, dw });
+        }
+        AgentEvent::Net { ts, rx, tx } => {
+            out.push(SampleEvent::NetUpdate { timestamp: ts_of(ts), rx, tx });
+        }
         AgentEvent::Exit { pid } => {
             known_pids.remove(&pid);
             out.push(SampleEvent::PidDisappeared { pid: pid.to_string() });
@@ -92,8 +111,8 @@ fn map_event(
 
 /// 后台采样循环（start_sampling 命令与自动启动共用）。
 /// 采样在设备端 agent 进行，本线程只阻塞读事件流并转发给前端。
-fn spawn_sampling(app: tauri::AppHandle, package: String, interval: u64, cpu: bool, memory: bool, fps: bool, running: Arc<Mutex<bool>>) {
-    eprintln!("[sampling] 启动: package={} interval={} cpu={} memory={} fps={}", package, interval, cpu, memory, fps);
+fn spawn_sampling(app: tauri::AppHandle, package: String, interval: u64, flags: MetricFlags, running: Arc<Mutex<bool>>) {
+    eprintln!("[sampling] 启动: package={} interval={} flags={:?}", package, interval, flags);
     std::thread::spawn(move || {
         let bin = match agent::ensure_agent_built() {
             Ok(b) => b,
@@ -110,7 +129,7 @@ fn spawn_sampling(app: tauri::AppHandle, package: String, interval: u64, cpu: bo
             *running = false;
             return;
         }
-        let mut stream = match agent::spawn_agent(Some(&package), interval, cpu, memory, fps) {
+        let mut stream = match agent::spawn_agent(Some(&package), interval, flags) {
             Ok(s) => s,
             Err(e) => {
                 eprintln!("[sampling] agent 启动失败: {}", e);
@@ -134,7 +153,7 @@ fn spawn_sampling(app: tauri::AppHandle, package: String, interval: u64, cpu: bo
                     eprintln!("[sampling] 连接断开，等待设备恢复…");
                     let running2 = running.clone();
                     match agent::reconnect_agent(
-                        Some(&package), interval, cpu, memory, fps,
+                        Some(&package), interval, flags,
                         &move || *running2.lock().unwrap(),
                     ) {
                         Some(s) => {
@@ -167,6 +186,14 @@ fn brief_event(ev: &SampleEvent) -> String {
             format!("FpsUpdate pid={} fps={:.1} jank={} layer={}", pid, fps, jank_count, layer)
         }
         SampleEvent::NoProcess { error } => format!("NoProcess: {}", error),
+        SampleEvent::AgentHello { ncores, .. } => format!("AgentHello ncores={}", ncores),
+        SampleEvent::FreqUpdate { khz, .. } => format!("FreqUpdate khz={:?}", khz),
+        SampleEvent::TempUpdate { status, sensors, .. } => {
+            format!("TempUpdate status={} sensors={}", status, sensors.len())
+        }
+        SampleEvent::GpuUpdate { busy, mhz, .. } => format!("GpuUpdate busy={:.1}% mhz={}", busy, mhz),
+        SampleEvent::IoUpdate { pid, r, w, .. } => format!("IoUpdate pid={} r={:.1} w={:.1} KB/s", pid, r, w),
+        SampleEvent::NetUpdate { rx, tx, .. } => format!("NetUpdate rx={:.1} tx={:.1} KB/s", rx, tx),
         SampleEvent::SampleError { pid, stage, error } => {
             format!("SampleError pid={:?} stage={}: {}", pid, stage, error)
         }
@@ -178,12 +205,18 @@ struct AppState {
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)] // tauri 命令参数须扁平，指标开关逐一对应前端勾选框
 async fn start_sampling(
     package: String,
     interval: u64,
     cpu: bool,
     memory: bool,
     fps: bool,
+    freq: bool,
+    thermal: bool,
+    gpu: bool,
+    io: bool,
+    net: bool,
     state: State<'_, AppState>,
     app: tauri::AppHandle,
 ) -> Result<(), String> {
@@ -195,7 +228,8 @@ async fn start_sampling(
         *running = true;
     }
 
-    spawn_sampling(app, package, interval, cpu, memory, fps, state.running.clone());
+    let flags = MetricFlags { cpu, memory, fps, freq, thermal, gpu, io, net };
+    spawn_sampling(app, package, interval, flags, state.running.clone());
 
     Ok(())
 }
@@ -244,15 +278,26 @@ fn is_running(state: State<'_, AppState>) -> Result<bool, String> {
     Ok(*state.running.lock().map_err(|e| e.to_string())?)
 }
 
+/// IO 导出行：(ms, r, w, dr, dw) KB/s
+type IoExportPoints = Vec<(f64, f64, f64, f64, f64)>;
+
 /// 导出前端持有的完整会话历史为 CSV（GUI 不流式落盘，数据在前端内存中）。
-/// 写到 log/<pkg>/<导出时刻>/ 下的 cpu/memory/fps 子目录，返回目录路径。
+/// 写到 log/<pkg>/<导出时刻>/ 下的各指标子目录，返回目录路径。
 /// cpu/mem: pid -> [[ms, value]...]；fps: 图层短名 -> [[ms, fps, jank]...]
+/// freq: 核名 -> [[ms, MHz]...]；temp: 传感器 -> [[ms, °C, status]...]；
+/// gpu: [[ms, busy%, mhz]...]；io: pid -> [[ms, r, w, dr, dw]...]；net: [[ms, rx, tx]...]
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 fn export_csv(
     package: String,
     cpu: std::collections::HashMap<String, Vec<(f64, f64)>>,
     mem: std::collections::HashMap<String, Vec<(f64, f64)>>,
     fps: std::collections::HashMap<String, Vec<(f64, f64, u32)>>,
+    freq: std::collections::HashMap<String, Vec<(f64, f64)>>,
+    temp: std::collections::HashMap<String, Vec<(f64, f64, i32)>>,
+    gpu: Vec<(f64, f64, u32)>,
+    io: std::collections::HashMap<String, IoExportPoints>,
+    net: Vec<(f64, f64, f64)>,
 ) -> Result<String, String> {
     use std::io::Write;
     let dir = std::path::PathBuf::from("log")
@@ -301,6 +346,68 @@ fn export_csv(
         }
         wrote = true;
     }
+    if !freq.is_empty() {
+        let d = dir.join("freq");
+        std::fs::create_dir_all(&d).map_err(|e| e.to_string())?;
+        let mut f = std::fs::File::create(d.join("freq_data.csv")).map_err(|e| e.to_string())?;
+        // 核名按 cpuN 数值排序，列序稳定
+        let mut cores: Vec<&String> = freq.keys().collect();
+        cores.sort_by_key(|n| n.trim_start_matches("cpu").parse::<u32>().unwrap_or(u32::MAX));
+        writeln!(f, "Timestamp,{}", cores.iter().map(|c| format!("{} (MHz)", c)).collect::<Vec<_>>().join(","))
+            .map_err(|e| e.to_string())?;
+        let rows = cores.iter().map(|c| &freq[*c]).collect::<Vec<_>>();
+        let n = rows.iter().map(|r| r.len()).max().unwrap_or(0);
+        for i in 0..n {
+            let t = rows.iter().find_map(|r| r.get(i).map(|(t, _)| *t)).unwrap_or(0.0);
+            let cells: Vec<String> = rows.iter().map(|r| r.get(i).map(|(_, v)| format!("{:.0}", v)).unwrap_or_default()).collect();
+            writeln!(f, "{},{}", fmt_ts(t), cells.join(",")).map_err(|e| e.to_string())?;
+        }
+        wrote = true;
+    }
+    if !temp.is_empty() {
+        let d = dir.join("thermal");
+        std::fs::create_dir_all(&d).map_err(|e| e.to_string())?;
+        let mut f = std::fs::File::create(d.join("thermal_data.csv")).map_err(|e| e.to_string())?;
+        writeln!(f, "Timestamp,Status,Sensor,TempC").map_err(|e| e.to_string())?;
+        for (sensor, pts) in &temp {
+            for (t, v, status) in pts {
+                writeln!(f, "{},{},{},{:.1}", fmt_ts(*t), status, sensor, v).map_err(|e| e.to_string())?;
+            }
+        }
+        wrote = true;
+    }
+    if !gpu.is_empty() {
+        let d = dir.join("gpu");
+        std::fs::create_dir_all(&d).map_err(|e| e.to_string())?;
+        let mut f = std::fs::File::create(d.join("gpu_data.csv")).map_err(|e| e.to_string())?;
+        writeln!(f, "Timestamp,Busy (%),Clock (MHz)").map_err(|e| e.to_string())?;
+        for (t, busy, mhz) in &gpu {
+            writeln!(f, "{},{:.2},{}", fmt_ts(*t), busy, mhz).map_err(|e| e.to_string())?;
+        }
+        wrote = true;
+    }
+    if !io.is_empty() {
+        let d = dir.join("io");
+        std::fs::create_dir_all(&d).map_err(|e| e.to_string())?;
+        for (pid, pts) in &io {
+            let mut f = std::fs::File::create(d.join(format!("io_{}_data.csv", pid))).map_err(|e| e.to_string())?;
+            writeln!(f, "Timestamp,Read (KB/s),Write (KB/s),Disk Read (KB/s),Disk Write (KB/s)").map_err(|e| e.to_string())?;
+            for (t, r, w, dr, dw) in pts {
+                writeln!(f, "{},{:.2},{:.2},{:.2},{:.2}", fmt_ts(*t), r, w, dr, dw).map_err(|e| e.to_string())?;
+            }
+        }
+        wrote = true;
+    }
+    if !net.is_empty() {
+        let d = dir.join("net");
+        std::fs::create_dir_all(&d).map_err(|e| e.to_string())?;
+        let mut f = std::fs::File::create(d.join("net_data.csv")).map_err(|e| e.to_string())?;
+        writeln!(f, "Timestamp,RX (KB/s),TX (KB/s)").map_err(|e| e.to_string())?;
+        for (t, rx, tx) in &net {
+            writeln!(f, "{},{:.2},{:.2}", fmt_ts(*t), rx, tx).map_err(|e| e.to_string())?;
+        }
+        wrote = true;
+    }
     if !wrote {
         return Err("暂无可导出的数据".into());
     }
@@ -308,7 +415,7 @@ fn export_csv(
 }
 
 fn main() {
-    // 支持命令行自动启动：xperf-gui --package <pkg> [--interval 1000] [--cpu] [--memory]
+    // 支持命令行自动启动：xperf-gui --package <pkg> [--interval 1000] [--cpu] [--memory] [--fps] [--freq] [--io] [--net] [--gpu] [--thermal]
     // （便于脚本化/验证；不传参数则手动在前端操作）
     let args: Vec<String> = std::env::args().collect();
     let get_opt = |name: &str| -> Option<String> {
@@ -316,11 +423,19 @@ fn main() {
             .position(|a| a == name)
             .and_then(|i| args.get(i + 1).cloned())
     };
+    let has_flag = |name: &str| args.iter().any(|a| a == name);
     let auto_package = get_opt("--package");
     let auto_interval: u64 = get_opt("--interval").and_then(|v| v.parse().ok()).unwrap_or(1000);
-    let auto_cpu = args.iter().any(|a| a == "--cpu");
-    let auto_memory = args.iter().any(|a| a == "--memory");
-    let auto_fps = args.iter().any(|a| a == "--fps");
+    let auto_flags = MetricFlags {
+        cpu: has_flag("--cpu"),
+        memory: has_flag("--memory"),
+        fps: has_flag("--fps"),
+        freq: has_flag("--freq"),
+        thermal: has_flag("--thermal"),
+        gpu: has_flag("--gpu"),
+        io: has_flag("--io"),
+        net: has_flag("--net"),
+    };
 
     tauri::Builder::default()
         .manage(AppState {
@@ -333,13 +448,17 @@ fn main() {
                 if !*running {
                     *running = true;
                     drop(running);
+                    // 一个指标都没传时默认 CPU+Memory（保持旧行为）
+                    let flags = if auto_flags.any() {
+                        auto_flags
+                    } else {
+                        MetricFlags { cpu: true, memory: true, ..auto_flags }
+                    };
                     spawn_sampling(
                         app.handle().clone(),
                         package,
                         auto_interval,
-                        auto_cpu || !auto_memory, // 默认至少 CPU
-                        auto_memory || !auto_cpu, // 默认至少 memory
-                        auto_fps,
+                        flags,
                         state.running.clone(),
                     );
                 }
@@ -369,19 +488,53 @@ mod tests {
         cpu.insert("1234".to_string(), vec![(1700000000000.0, 12.5), (1700000001000.0, 30.0)]);
         let mut fps = std::collections::HashMap::new();
         fps.insert("SVM Container_0".to_string(), vec![(1700000000000.0, 30.0, 1u32)]);
-        let dir = export_csv(pkg.clone(), cpu, Default::default(), fps).unwrap();
+        let mut freq = std::collections::HashMap::new();
+        freq.insert("cpu0".to_string(), vec![(1700000000000.0, 2592.0)]);
+        freq.insert("cpu1".to_string(), vec![(1700000000000.0, 2246.0)]);
+        let mut temp = std::collections::HashMap::new();
+        temp.insert("soc0".to_string(), vec![(1700000000000.0, 42.5, 0i32)]);
+        let gpu = vec![(1700000000000.0, 37.5, 585u32)];
+        let mut io = std::collections::HashMap::new();
+        io.insert("1234".to_string(), vec![(1700000000000.0, 12.0, 3.0, 0.0, 1.0)]);
+        let net = vec![(1700000000000.0, 123.0, 45.0)];
+        let dir = export_csv(pkg.clone(), cpu, Default::default(), fps, freq, temp, gpu, io, net).unwrap();
         let cpu_csv = std::fs::read_to_string(format!("{}/cpu/cpu_1234_data.csv", dir)).unwrap();
         assert!(cpu_csv.starts_with("Timestamp,Process CPU (%)\n"));
         assert!(cpu_csv.contains(",12.50\n"));
         let fps_csv = std::fs::read_to_string(format!("{}/fps/fps_data_SVM Container_0.csv", dir)).unwrap();
         assert!(fps_csv.starts_with("Timestamp,FPS,Jank\n"));
         assert!(fps_csv.contains(",30.00,1\n"));
+        let freq_csv = std::fs::read_to_string(format!("{}/freq/freq_data.csv", dir)).unwrap();
+        assert!(freq_csv.starts_with("Timestamp,cpu0 (MHz),cpu1 (MHz)\n"));
+        assert!(freq_csv.contains(",2592,2246\n"));
+        let temp_csv = std::fs::read_to_string(format!("{}/thermal/thermal_data.csv", dir)).unwrap();
+        assert!(temp_csv.starts_with("Timestamp,Status,Sensor,TempC\n"));
+        assert!(temp_csv.contains(",0,soc0,42.5\n"));
+        let gpu_csv = std::fs::read_to_string(format!("{}/gpu/gpu_data.csv", dir)).unwrap();
+        assert!(gpu_csv.starts_with("Timestamp,Busy (%),Clock (MHz)\n"));
+        assert!(gpu_csv.contains(",37.50,585\n"));
+        let io_csv = std::fs::read_to_string(format!("{}/io/io_1234_data.csv", dir)).unwrap();
+        assert!(io_csv.starts_with("Timestamp,Read (KB/s),Write (KB/s),Disk Read (KB/s),Disk Write (KB/s)\n"));
+        assert!(io_csv.contains(",12.00,3.00,0.00,1.00\n"));
+        let net_csv = std::fs::read_to_string(format!("{}/net/net_data.csv", dir)).unwrap();
+        assert!(net_csv.starts_with("Timestamp,RX (KB/s),TX (KB/s)\n"));
+        assert!(net_csv.contains(",123.00,45.00\n"));
         std::fs::remove_dir_all(std::path::PathBuf::from("log").join(&pkg)).ok();
     }
 
     #[test]
     fn test_export_csv_empty_errors() {
-        let r = export_csv("x".into(), Default::default(), Default::default(), Default::default());
+        let r = export_csv(
+            "x".into(),
+            Default::default(),
+            Default::default(),
+            Default::default(),
+            Default::default(),
+            Default::default(),
+            Default::default(),
+            Default::default(),
+            Default::default(),
+        );
         assert!(r.is_err());
     }
 }
