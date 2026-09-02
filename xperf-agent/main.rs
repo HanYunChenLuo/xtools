@@ -22,7 +22,9 @@
 //!   （agent 常驻保有上一轮状态，无需主机侧 phase1/phase2 结构）
 //! - 内存：interval ≥ 500ms 用本地 dumpsys meminfo（全分类明细，同轮询模式）；
 //!   低间隔改读 /proc/<pid>/smaps_rollup（Pss/Rss，~1ms）
-//! - FPS：设备端本地 dumpsys SurfaceFlinger（无 adb 中转，图层名无需引号转义）
+//! - FPS：设备端本地 dumpsys SurfaceFlinger（无 adb 中转，图层名无需引号转义）；
+//!   限频至 ≥500ms 周期（每 fps_every_n_rounds 轮一次），与 CPU/内存节拍解耦——
+//!   低间隔下每轮跑 dumpsys SurfaceFlinger 会拖垮节拍（实测 50ms 间隔约半数轮次 overrun）
 
 use std::collections::HashMap;
 use std::fs;
@@ -196,8 +198,15 @@ struct PidState {
 // 与 xperf-core/fps.rs 同源的解析逻辑（agent 零依赖独立发布，有意复制而非共享）。
 // 设备端用 Command 直接 exec dumpsys，无 adb shell 拼接，图层名无需引号。
 
-/// 连续零帧达到该轮数后重新发现图层（Surface 重建会换名，如 #0 → #1）
+/// 连续零帧达到该采样轮数后重新发现图层（Surface 重建会换名，如 #0 → #1）。
+/// 计的是 FPS 采样轮（限频后每轮 ≥500ms，即 ≥5s 持续零帧才重发现）。
 const FPS_REDISCOVER_ZERO_ROUNDS: u32 = 10;
+
+/// FPS 采样限频：每多少主循环轮采一次，保证 FPS 有效周期 ≥500ms。
+/// dumpsys SurfaceFlinger 单轮开销 ~100ms 级，低间隔下每轮执行会拖垮节拍。
+fn fps_every_n_rounds(interval_ms: u64) -> u64 {
+    500u64.div_ceil(interval_ms).max(1)
+}
 
 struct FpsLayerState {
     name: String,
@@ -307,6 +316,8 @@ fn sf_discover_layers(pid: u32, package: &str) -> Vec<String> {
 
 /// 某 PID 一轮 FPS 采样：有帧图层各发一行；全零时发一条零帧行（界面静止是真实状态）。
 /// 图层发现：首轮 + 连续零帧达阈值后重做。包名用于兜底匹配（ownerPID 是首选）。
+/// 发现为空（进程刚重启 Surface 未建，或应用本无界面）也记零帧轮，
+/// 靠阈值节流重试——全量 dump 在此车机 ~1.5s，不能每轮试。
 fn fps_sample_round(st: &mut FpsState, pid: u32, package: &str, ts: u64) {
     if !st.attempted || st.zero_rounds >= FPS_REDISCOVER_ZERO_ROUNDS {
         st.layers = sf_discover_layers(pid, package)
@@ -315,9 +326,10 @@ fn fps_sample_round(st: &mut FpsState, pid: u32, package: &str, ts: u64) {
             .collect();
         st.attempted = true;
         st.zero_rounds = 0;
-        if st.layers.is_empty() {
-            return; // 应用无界面
-        }
+    }
+    if st.layers.is_empty() {
+        st.zero_rounds += 1;
+        return;
     }
 
     let now = Instant::now();
@@ -450,12 +462,42 @@ fn main() {
     // --pid 模式下 FPS 兜底匹配需要包名：从 /proc/<pid>/cmdline 反查（一次性缓存）
     let mut pkg_cache: HashMap<u32, String> = HashMap::new();
 
+    // FPS 预热：图层发现的全量 dumpsys SurfaceFlinger 在此车机 ~1.5s，
+    // 放在节拍时钟开始前执行，避免首轮 backlog、后续追帧期 CPU 窗口不齐。
+    // （进程尚未启动时此处无 PID，发现会推迟到循环内首次 FPS 轮，代价同上但仅一次）
+    if args.fps {
+        if let Some(pkg) = &args.package {
+            for pid in resolve_pids(pkg) {
+                if !active_pids.contains(&pid) {
+                    active_pids.push(pid);
+                }
+            }
+        }
+        for &pid in &active_pids.clone() {
+            let pkg = match &args.package {
+                Some(p) => p.clone(),
+                None => pkg_cache
+                    .entry(pid)
+                    .or_insert_with(|| {
+                        fs::read_to_string(format!("/proc/{}/cmdline", pid))
+                            .map(|s| s.trim_end_matches('\0').to_string())
+                            .unwrap_or_default()
+                    })
+                    .clone(),
+            };
+            // 首轮仅建图层列表 + 帧时间戳基线，不出数
+            fps_sample_round(fps_states.entry(pid).or_default(), pid, &pkg, now_ms());
+        }
+    }
+
     // 绝对节拍：按起始时间推算每轮时刻，避免 sleep 累积漂移
     let interval = Duration::from_millis(args.interval_ms);
     let start = Instant::now();
     let mut round: u64 = 0;
     // 进程列表重扫间隔：约 1s 一次（低间隔下每轮扫 /proc 太贵）
     let rescan_rounds = (1000 / args.interval_ms).max(1);
+    // FPS 限频：与 CPU/内存节拍解耦，有效周期 ≥500ms（50ms 间隔 → 每 10 轮一次）
+    let fps_every = fps_every_n_rounds(args.interval_ms);
 
     loop {
         round += 1;
@@ -587,8 +629,10 @@ fn main() {
                 }
             }
 
-            // FPS：设备端本地 dumpsys SurfaceFlinger（图层发现 + 帧时间戳差值）
-            if args.fps {
+            // FPS：设备端本地 dumpsys SurfaceFlinger（图层发现 + 帧时间戳差值）。
+            // 限频执行（每 fps_every 轮一次）；启动时已预热建基线，
+            // 首个 FPS 轮（round == fps_every）即覆盖一个完整周期。
+            if args.fps && round.is_multiple_of(fps_every) {
                 let pkg = match &args.package {
                     Some(p) => p.clone(),
                     None => pkg_cache.entry(pid).or_insert_with(|| {
@@ -650,6 +694,15 @@ mod tests {
     #[test]
     fn test_json_escape() {
         assert_eq!(json_escape("a\"b\\c"), "a\\\"b\\\\c");
+    }
+
+    #[test]
+    fn test_fps_every_n_rounds() {
+        // FPS 有效周期 ≥500ms：低间隔限频，≥500ms 每轮都采
+        assert_eq!(fps_every_n_rounds(50), 10); // 50ms → 每 10 轮（500ms）
+        assert_eq!(fps_every_n_rounds(300), 2); // 300ms → 每 2 轮（600ms）
+        assert_eq!(fps_every_n_rounds(500), 1);
+        assert_eq!(fps_every_n_rounds(1000), 1);
     }
 
     // ---- FPS / meminfo 解析（与 xperf-core 同源逻辑的设备端副本）----
