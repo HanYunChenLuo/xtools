@@ -466,7 +466,7 @@ fn main() {
     };
     let has_flag = |name: &str| args.iter().any(|a| a == name);
     let auto_package = get_opt("--package");
-    let auto_interval: u64 = get_opt("--interval").and_then(|v| v.parse().ok()).unwrap_or(1000);
+    let auto_interval: u64 = get_opt("--interval").and_then(|v| v.parse().ok()).unwrap_or(1000).max(50);
     let auto_flags = MetricFlags {
         cpu: has_flag("--cpu"),
         memory: has_flag("--memory"),
