@@ -54,8 +54,9 @@ GUI:  start_sampling / 自动启动 → spawn_sampling()（std::thread 阻塞读
 ```
 
 - **设备端**：xperf-agent 常驻，直接读 /proc（CPU/线程）、smaps_rollup 或 dumpsys meminfo（内存）、本地 dumpsys SurfaceFlinger（FPS），按绝对节拍（start + round×interval，防漂移）逐轮输出 JSON 行
-- **主机侧**：只是表现层（CLI 打印/CSV/图表；GUI emit 给前端）。ADB 断开 → exec-out EOF → 循环退出；Ctrl-C → 关闭连接 → agent 写 stdout 失败自行退出
+- **主机侧**：只是表现层（CLI 打印/流式 CSV/图表；GUI emit 给前端）。ADB 断开 → exec-out EOF → `reconnect_agent` 每 500ms 轮询等设备回来，重新部署+启动 agent，主机侧状态（时序/峰值/CSV）保留；Ctrl-C → 关闭连接 → agent 写 stdout 失败自行退出
 - **xperf-core 的 Sampler/cpu/memory/fps 轮询模块是参考实现（含完整单测），CLI/GUI 已不再调用**；agent 复制了其中的解析逻辑（零依赖独立发布的要求）
+- **GUI 前端**：CPU/内存/FPS 折线（series 保留完整会话历史，窗口跟随 10min / 全部历史切换，绘制时二分裁剪 + stride 抽稀防卡顿）、Top 线程表（500ms 节流渲染）、峰值面板（新峰值才更新 DOM）、导出 CSV（`export_csv` 命令写 `log/<pkg>/<导出时刻>/`）
 
 ### CPU 采样口径（agent 与参考实现一致）
 
@@ -130,8 +131,8 @@ fps_sample_round(pid)                    ← agent 内每 PID 每 FPS 轮一次�
 - 绝对节拍：`start + round × interval`，漂移时发 err 行（"round N overrun"）
 - CPU 窗口 = 相邻两轮差值（常驻保有状态，无 phase1/phase2 结构）
 - 需要 root（读他进程的 /proc、smaps_rollup）；内部设备 adbd 已 root
-- 终端输出：interval ≥ 500ms 逐条详细打印；< 500ms 按 ~1s 聚合（avg/max），全量明细在退出 CSV；CSV 时间戳毫秒精度（`%.3f`）
-- 主机断连/Ctrl-C → exec-out 关闭 → agent 写 stdout 失败自行退出
+- 终端输出：interval ≥ 500ms 逐条详细打印；< 500ms 按 ~1s 聚合（avg/max），全量明细在流式 CSV；CSV 时间戳毫秒精度（`%.3f`）
+- 主机断连（EOF）→ 自动重连恢复（见上）；Ctrl-C → exec-out 关闭 → agent 写 stdout 失败自行退出
 
 **验证基线**：svm @ 50ms 间隔，78 样本均值 15.03%，与 adb top 一致；50ms 窗口可见 25-47% 的瞬时毛刺（1s 采样看不到）。
 
@@ -158,11 +159,8 @@ fps_sample_round(pid)                    ← agent 内每 PID 每 FPS 轮一次�
 
 ```rust
 static INTERRUPT_FLAG: AtomicBool          // Ctrl-C 中断标志
-static LOG_FILE_PATH: OnceLock<Mutex<Option<PathBuf>>>  // 日志文件路径（当前未初始化，append_to_log 调用均会静默失败）
-static TIMESTAMP_DIR: OnceLock<Mutex<Option<PathBuf>>>  // 本次会话的输出根目录，首次调用 create_timestamp_subdir 时创建并缓存
+static TIMESTAMP_DIR: OnceLock<Mutex<Option<PathBuf>>>  // 本次会话的输出根目录，首个样本流式落盘时创建并缓存
 ```
-
-`LOG_FILE_PATH` 目前始终为 `None`（原有的 `init_logging` 调用已注释掉），`append_to_log` 会返回错误但调用方均使用 `let _ =` 忽略。
 
 ---
 

@@ -6,19 +6,18 @@
 
 ## 当前状态速览
 
-- 采样架构：**设备端 agent（xperf-agent）为 CLI/GUI 唯一采样路径**，无 adb 轮询
+- 采样架构：**设备端 agent（xperf-agent）为 CLI/GUI 唯一采样路径**，无 adb 轮询；断连自动重连恢复（EOF 后轮询等设备回来，状态保留）
 - 指标覆盖：CPU（单核口径，与 adb top 一致）、内存（dumpsys meminfo / smaps_rollup）、FPS（SurfaceFlinger 图层，多图层分色，agent 内限频 ≥500ms 与 CPU/内存解耦）
-- 落盘：CLI 边采边流式写 CSV（逐行 flush，崩溃只丢尾部）；内存时序抽稀上限 2×30k 点，只服务退出图表
-- 测试：80 全绿（含并行），clippy 零警告
+- 落盘：CLI 边采边流式写 CSV（逐行 flush，崩溃只丢尾部）；内存时序抽稀上限 2×30k 点，只服务退出图表；GUI 保留完整会话历史，可导出 CSV
+- GUI：CPU/内存/FPS 折线（窗口跟随/全览）、Top 线程表、峰值面板、CSV 导出
+- 测试：82 全绿（含并行），clippy 零警告
 - 设备：车机 6eb792dfb0f（adbd 已 root），测试包 `com.lixiang.car.x.svm`
 
 ---
 
 ## A. 已知缺陷（优先级最高）
 
-- [ ] **断连即终止**：agent EOF 直接退出，无 ADB 重连恢复。
-- [ ] **GUI 能力缺口**：无线程视图（CLI 有 --thread）、无峰值面板、无数据导出、600 点窗口（约 10 分钟）无法回看历史。
-- [ ] **死代码**：`LOG_FILE_PATH` 从未初始化，`append_to_log` 永远静默失败——要么接通要么删除。
+（无——A 类已全部清零）
 
 ## B. 指标覆盖扩展（root 设备上都很便宜）
 
@@ -50,3 +49,6 @@
 - ✅ agent FPS 限频解耦 ≥500ms + 启动预热 + 空发现节流重试，50ms 同采 0 overrun（93f6439）
 - ✅ 并行测试数据竞争修复：ADB_TEST_LOCK 串行锁（df61bc4）
 - ✅ CLI 边采边流式落盘 CSV + 时序抽稀上限（02c18bd）
+- ✅ 删除 LOG_FILE_PATH 死代码（cd9769b）
+- ✅ agent 断连自动重连恢复，CLI+GUI（1077e97）
+- ✅ GUI 历史回看 + 峰值面板 + Top 线程 + CSV 导出（3e388e3）
