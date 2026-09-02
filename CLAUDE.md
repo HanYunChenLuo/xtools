@@ -117,6 +117,28 @@ fps_sample_round(pid)                    ← agent 内每 PID 每 FPS 轮一次�
 
 ---
 
+### B 类指标（设备级上下文，agent 内实现）
+
+五个开关（`--freq/--thermal/--gpu/--io/--net`），协议与采样成本：
+
+| 开关 | 数据源 | 周期 | 协议事件 |
+|------|--------|------|---------|
+| `--freq` | 每核 `scaling_cur_freq`（KHz；hello 带 `maxkhz` 基线） | 每轮（µs 级） | `{"t":"freq","khz":[...]}` |
+| `--io` | `/proc/<pid>/io` 计数器差值 → KB/s（r/w=rchar/wchar 逻辑读写，dr/dw=read_bytes/write_bytes 磁盘读写） | 每轮 | `{"t":"io","pid":..,"r":..,"w":..,"dr":..,"dw":..}` |
+| `--net` | `/proc/net/dev` 物理口聚合（排除 lo/sit/tun/gre/dummy/vti/ip6*）→ KB/s | 每轮 | `{"t":"net","rx":..,"tx":..}` |
+| `--gpu` | kgsl `gpubusy`（busy/total µs 计数器差值占比）+ gpuclk | 每轮 | `{"t":"gpu","busy":..,"mhz":..}` |
+| `--thermal` | `dumpsys thermalservice`（温度 sensors + Thermal Status 热降频级别） | 限频 ≥2s（~50ms dumpsys 会拖长低间隔节拍轮） | `{"t":"temp","status":..,"sensors":[[名,类型,°C]]}` |
+
+关键设计点：
+- **net 是整机口径**：Android 应用共享 netns，`/proc/<pid>/net/dev` 与整机一致；per-app 流量需 qtaguid（内核无）或 eBPF maps（不便读），实测被测包 uid=1000 系统聚合也无意义——如实标注整机。
+- **gpu/thermal 自适应降级**：GPU 在 hypervisor 后的平台（如此车机 msmnile）无 kgsl sysfs，启动探测失败发 err 并禁用；此车机 thermalservice 是 test HAL 假数据（恒定 30.8°C），代码按标准接口实现，真手机有效。
+- **host 侧开关收敛为 `MetricFlags`**（xperf-core/agent.rs）：`spawn_agent`/`reconnect_agent` 签名从逐 bool 改为该结构体，CLI/GUI 共用。
+- **速率类指标（io/net/gpu）首样建基线不出数**，窗口按墙钟差值（非假定间隔），overrun 时速率仍准。
+
+CLI 退出图表用通用 helper `generate_multi_line_chart`（xperformance/utils.rs）：freq 每核一条、temp 每传感器一条、io 每 PID 读写两条、net RX/TX、gpu busy%。
+
+---
+
 ### agent（设备端采样器，xperf-agent）
 
 **为什么**：adb 轮询单轮固定 6+ 次调用（每次 ~13ms 起，`dumpsys meminfo` ~100ms），低间隔下开销超过间隔本身，且每次 adb 调用都扰动被测系统。agent 常驻设备直接读 /proc（微秒级），NDJSON 经 `adb exec-out` 长连接流式回传（PerfDog Agent 同构思路，但免装 APK：纯静态二进制）。当前 CLI/GUI 的**唯一**采样路径。
@@ -142,10 +164,11 @@ fps_sample_round(pid)                    ← agent 内每 PID 每 FPS 轮一次�
 
 | 场景 | 触发条件 | 输出位置 |
 |------|---------|---------|
-| CPU/内存/FPS/线程 CSV | **采样时流式追加**（每个样本到达即写并 flush，崩溃只丢尾部） | `log/<pkg>/<ts>/{cpu,memory,fps,thread}/` |
+| CPU/内存/FPS/线程/B类指标 CSV | **采样时流式追加**（每个样本到达即写并 flush，崩溃只丢尾部） | `log/<pkg>/<ts>/{cpu,memory,fps,thread,freq,thermal,gpu,io,net}/` |
 | CPU 图表（每 PID + 汇总） | 程序退出，数据点 > 1 | `log/<pkg>/<ts>/cpu/` |
 | 内存图表（每 PID + 汇总） | 同上 | `log/<pkg>/<ts>/memory/` |
 | 线程时序图 | `--thread --cpu`，退出时有数据 | `log/<pkg>/<ts>/thread/` |
+| B 类图表（freq 每核/temp 每传感器/io 每 PID/net/gpu） | 退出时对应序列 > 1 点 | `log/<pkg>/<ts>/{freq,thermal,io,net,gpu}/` |
 
 - 内存中的时序序列只服务退出图表：超过 2×30k 点时每 2 取 1 原地抽稀（`CHART_SERIES_CAP`，保完整时间范围、分辨率随运行时长自适应降级）；CSV 始终全量。
 - `CpuTimeSeriesData.top_threads` 已无读者，CLI agent 路径不再写入（线程明细走 thread_time_series + 流式 CSV）。
