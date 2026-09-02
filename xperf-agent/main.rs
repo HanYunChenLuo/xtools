@@ -1007,7 +1007,20 @@ fn main() {
                     }
                 }
             }
-            Some(GpuPath::Qnx) => {} // 读线程独立发 gpu/gpuproc 事件
+            Some(GpuPath::Qnx) => {
+                // QNX 路径的 busy%/util%/频率由读线程异步发；这里补采 dumpsys gpu 显存（限频 ≥1s）
+                if round.is_multiple_of(gpumem_every) && !active_pids.is_empty() {
+                    if let Some((global, procs)) = dumpsys(&["gpu"]).as_deref().and_then(parse_gpu_mem_snapshot) {
+                        for &pid in &active_pids {
+                            let bytes = procs.iter().find(|(p, _)| *p == pid).map(|(_, b)| *b).unwrap_or(0);
+                            emit(&format!(
+                                "{{\"t\":\"gpumem\",\"ts\":{},\"pid\":{},\"bytes\":{},\"global\":{}}}",
+                                ts, pid, bytes, global
+                            ));
+                        }
+                    }
+                }
+            }
             Some(GpuPath::DumpMem) => {
                 if round.is_multiple_of(gpumem_every) && !active_pids.is_empty() {
                     if let Some((global, procs)) = dumpsys(&["gpu"]).as_deref().and_then(parse_gpu_mem_snapshot) {
