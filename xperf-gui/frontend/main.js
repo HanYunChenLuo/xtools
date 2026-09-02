@@ -151,6 +151,12 @@ class LineChart {
 const cpuChart = new LineChart('cpuChart', 'Process CPU (%)', '%', 100);
 const memChart = new LineChart('memChart', 'Memory Total PSS (KB)', 'KB');
 const fpsChart = new LineChart('fpsChart', 'FPS', 'fps'); // 自适应纵轴（30/60/120 档各异）
+const freqChart = new LineChart('freqChart', 'CPU Frequency (MHz)', 'MHz'); // 每核一条线
+const tempChart = new LineChart('tempChart', 'Temperature (°C)', '°C'); // 每传感器一条线；thermal status 写入标题
+const gpuChart = new LineChart('gpuChart', 'GPU Busy (%)', '%', 100);
+const ioChart = new LineChart('ioChart', 'IO (KB/s)', 'KB/s'); // 每 PID 读/写各一条
+const netChart = new LineChart('netChart', 'Network 整机 (KB/s)', 'KB/s');
+const allCharts = [cpuChart, memChart, fpsChart, freqChart, tempChart, gpuChart, ioChart, netChart];
 _diag('charts initialized');
 
 // pid -> { cpu, mem, new }
@@ -161,6 +167,11 @@ const peaks = {};
 const latestThreads = {};
 // FPS 导出用 jank 记录：图层短名 -> [{t, fps, jank}]（图表 series 只存 fps 值）
 const fpsHist = {};
+// B 类指标导出用：temp 需要 status（图表 series 只存 °C）；io 需要 dr/dw；gpu 需要 mhz
+const tempHist = {}; // 传感器名 -> [{t, v, status}]
+const ioHist = {};   // pid -> [{t, r, w, dr, dw}]
+const gpuHist = [];  // [{t, busy, mhz}]
+let maxkhz = [];     // AgentHello 带的每核最大频率（KHz）
 
 function fmtTime(t) { return new Date(t).toTimeString().slice(0, 8); }
 
@@ -266,9 +277,59 @@ listen('sample', (e) => {
     try { fpsChart.draw(); } catch (err) { _diag('fpsChart.draw ERROR: ' + err.message); }
   } else if (ev.NoProcess) {
     document.getElementById('status').textContent = '无进程: ' + ev.NoProcess.error;
+  } else if (ev.AgentHello) {
+    maxkhz = ev.AgentHello.maxkhz || [];
+  } else if (ev.FreqUpdate) {
+    const { timestamp, khz } = ev.FreqUpdate;
+    // 勾选框未同步（自动启动带 --freq）时自动展开
+    autoCheck('freq');
+    const t = new Date(timestamp).getTime();
+    khz.forEach((k, i) => freqChart.push('cpu' + i, t, k / 1000)); // KHz → MHz
+    try { freqChart.draw(); } catch (err) { _diag('freqChart.draw ERROR: ' + err.message); }
+  } else if (ev.TempUpdate) {
+    const { timestamp, status, sensors } = ev.TempUpdate;
+    autoCheck('thermal');
+    const t = new Date(timestamp).getTime();
+    tempChart.title = `Temperature (°C) — thermal status ${status}`;
+    for (const [name, , value] of sensors) {
+      tempChart.push(name, t, value);
+      if (!tempHist[name]) tempHist[name] = [];
+      tempHist[name].push({ t, v: value, status });
+    }
+    try { tempChart.draw(); } catch (err) { _diag('tempChart.draw ERROR: ' + err.message); }
+  } else if (ev.GpuUpdate) {
+    const { timestamp, busy, mhz } = ev.GpuUpdate;
+    autoCheck('gpu');
+    const t = new Date(timestamp).getTime();
+    gpuChart.title = `GPU Busy (%) — @ ${mhz} MHz`;
+    gpuChart.push('busy', t, +busy.toFixed(2));
+    gpuHist.push({ t, busy, mhz });
+    try { gpuChart.draw(); } catch (err) { _diag('gpuChart.draw ERROR: ' + err.message); }
+  } else if (ev.IoUpdate) {
+    const { pid, timestamp, r, w, dr, dw } = ev.IoUpdate;
+    if (!pidData[pid]) { pidData[pid] = { cpu: [], mem: [], new: true }; renderPidList(); }
+    autoCheck('io');
+    const t = new Date(timestamp).getTime();
+    ioChart.push(`PID ${pid} R`, t, +r.toFixed(2));
+    ioChart.push(`PID ${pid} W`, t, +w.toFixed(2));
+    if (!ioHist[pid]) ioHist[pid] = [];
+    ioHist[pid].push({ t, r, w, dr, dw });
+    try { ioChart.draw(); } catch (err) { _diag('ioChart.draw ERROR: ' + err.message); }
+  } else if (ev.NetUpdate) {
+    const { timestamp, rx, tx } = ev.NetUpdate;
+    autoCheck('net');
+    const t = new Date(timestamp).getTime();
+    netChart.push('RX', t, +rx.toFixed(2));
+    netChart.push('TX', t, +tx.toFixed(2));
+    try { netChart.draw(); } catch (err) { _diag('netChart.draw ERROR: ' + err.message); }
   }
   updateTitle();
 });
+// 自动启动带的指标勾选框未同步：收到首个对应事件时自动勾上并展开图表
+function autoCheck(id) {
+  const box = document.getElementById(id);
+  if (!box.checked) { box.checked = true; toggleCharts(); }
+}
 _diag('listen(sample) registered');
 
 document.getElementById('startBtn').addEventListener('click', async () => {
@@ -278,16 +339,24 @@ document.getElementById('startBtn').addEventListener('click', async () => {
   const cpu = document.getElementById('cpu').checked;
   const memory = document.getElementById('memory').checked;
   const fps = document.getElementById('fps').checked;
+  const freq = document.getElementById('freq').checked;
+  const thermal = document.getElementById('thermal').checked;
+  const gpu = document.getElementById('gpu').checked;
+  const io = document.getElementById('io').checked;
+  const net = document.getElementById('net').checked;
   for (const k of Object.keys(pidData)) delete pidData[k];
   for (const k of Object.keys(peaks)) delete peaks[k];
   for (const k of Object.keys(latestThreads)) delete latestThreads[k];
   for (const k of Object.keys(fpsHist)) delete fpsHist[k];
+  for (const k of Object.keys(tempHist)) delete tempHist[k];
+  for (const k of Object.keys(ioHist)) delete ioHist[k];
+  gpuHist.length = 0;
   renderPeaks();
   renderPidList();
-  cpuChart.series = {}; memChart.series = {}; fpsChart.series = {};
+  for (const c of allCharts) c.series = {};
   try {
     _diag('startBtn invoking start_sampling: pkg=' + package + ' interval=' + interval);
-    await invoke('start_sampling', { package, interval, cpu, memory, fps });
+    await invoke('start_sampling', { package, interval, cpu, memory, fps, freq, thermal, gpu, io, net });
     _diag('start_sampling RETURNED OK');
     document.getElementById('startBtn').disabled = true;
     document.getElementById('stopBtn').disabled = false;
@@ -308,39 +377,46 @@ document.getElementById('stopBtn').addEventListener('click', async () => {
 });
 _diag('UI handlers bound');
 
-// ---- 图表随 CPU/Memory/FPS 勾选状态显示/隐藏 ----
+// ---- 图表随勾选状态显示/隐藏 ----
 function toggleCharts() {
-  const cpuOn = document.getElementById('cpu').checked;
-  const memOn = document.getElementById('memory').checked;
-  const fpsOn = document.getElementById('fps').checked;
-  document.getElementById('cpuChartBox').classList.toggle('hidden', !cpuOn);
-  document.getElementById('memChartBox').classList.toggle('hidden', !memOn);
-  document.getElementById('fpsChartBox').classList.toggle('hidden', !fpsOn);
+  const pairs = [
+    ['cpu', 'cpuChartBox'], ['memory', 'memChartBox'], ['fps', 'fpsChartBox'],
+    ['freq', 'freqChartBox'], ['thermal', 'tempChartBox'], ['gpu', 'gpuChartBox'],
+    ['io', 'ioChartBox'], ['net', 'netChartBox'],
+  ];
+  for (const [id, boxId] of pairs) {
+    document.getElementById(boxId).classList.toggle('hidden', !document.getElementById(id).checked);
+  }
   // 线程数据来自 CpuUpdate：CPU 关闭时线程面板同步隐藏
-  document.getElementById('threadPanel').classList.toggle('hidden', !cpuOn);
+  document.getElementById('threadPanel').classList.toggle('hidden', !document.getElementById('cpu').checked);
   // 容器显隐变化后 chart 尺寸需刷新
-  setTimeout(() => { cpuChart.resize(); memChart.resize(); fpsChart.resize(); }, 50);
+  setTimeout(() => { for (const c of allCharts) c.resize(); }, 50);
 }
-document.getElementById('cpu').addEventListener('change', toggleCharts);
-document.getElementById('memory').addEventListener('change', toggleCharts);
-document.getElementById('fps').addEventListener('change', toggleCharts);
+for (const id of ['cpu', 'memory', 'fps', 'freq', 'thermal', 'gpu', 'io', 'net']) {
+  document.getElementById(id).addEventListener('change', toggleCharts);
+}
 toggleCharts();
 
 // ---- 时间窗口：跟随最新 / 全部历史 ----
 document.getElementById('timeWindow').addEventListener('change', (e) => {
   const mode = e.target.value;
-  for (const c of [cpuChart, memChart, fpsChart]) { c.windowMode = mode; c.draw(); }
+  for (const c of allCharts) { c.windowMode = mode; c.draw(); }
 });
 
 // ---- 导出 CSV：把前端持有的完整会话历史发给后端写盘 ----
 document.getElementById('exportBtn').addEventListener('click', async () => {
   const pkg = document.getElementById('package').value || 'unknown';
-  const cpu = {}, mem = {}, fps = {};
+  const cpu = {}, mem = {}, fps = {}, freq = {}, temp = {}, io = {};
   for (const [k, pts] of Object.entries(cpuChart.series)) cpu[k.replace('PID ', '')] = pts.map(p => [p.t, p.v]);
   for (const [k, pts] of Object.entries(memChart.series)) mem[k.replace('PID ', '')] = pts.map(p => [p.t, p.v]);
   for (const [layer, pts] of Object.entries(fpsHist)) fps[layer] = pts.map(p => [p.t, p.fps, p.jank]);
+  for (const [core, pts] of Object.entries(freqChart.series)) freq[core] = pts.map(p => [p.t, p.v]);
+  for (const [sensor, pts] of Object.entries(tempHist)) temp[sensor] = pts.map(p => [p.t, p.v, p.status]);
+  for (const [pid, pts] of Object.entries(ioHist)) io[pid] = pts.map(p => [p.t, p.r, p.w, p.dr, p.dw]);
+  const gpu = gpuHist.map(p => [p.t, p.busy, p.mhz]);
+  const net = (netChart.series['RX'] || []).map((p, i) => [p.t, p.v, (netChart.series['TX'] || [])[i]?.v ?? 0]);
   try {
-    const dir = await invoke('export_csv', { package: pkg, cpu, mem, fps });
+    const dir = await invoke('export_csv', { package: pkg, cpu, mem, fps, freq, temp, gpu, io, net });
     document.getElementById('status').textContent = '已导出: ' + dir;
   } catch (e) {
     document.getElementById('status').textContent = '导出失败: ' + e;

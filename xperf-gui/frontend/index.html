@@ -21,6 +21,11 @@
       <label><input id="cpu" type="checkbox" checked /> CPU</label>
       <label><input id="memory" type="checkbox" checked /> Memory</label>
       <label><input id="fps" type="checkbox" /> FPS</label>
+      <label><input id="freq" type="checkbox" /> 频率</label>
+      <label><input id="thermal" type="checkbox" /> 温度</label>
+      <label><input id="gpu" type="checkbox" /> GPU</label>
+      <label><input id="io" type="checkbox" /> IO</label>
+      <label><input id="net" type="checkbox" /> 网络</label>
     </div>
     <label>窗口:
       <select id="timeWindow">
@@ -39,6 +44,11 @@
     <div id="cpuChartBox" class="chart"><canvas id="cpuChart"></canvas></div>
     <div id="memChartBox" class="chart"><canvas id="memChart"></canvas></div>
     <div id="fpsChartBox" class="chart hidden"><canvas id="fpsChart"></canvas></div>
+    <div id="freqChartBox" class="chart hidden"><canvas id="freqChart"></canvas></div>
+    <div id="tempChartBox" class="chart hidden"><canvas id="tempChart"></canvas></div>
+    <div id="gpuChartBox" class="chart hidden"><canvas id="gpuChart"></canvas></div>
+    <div id="ioChartBox" class="chart hidden"><canvas id="ioChart"></canvas></div>
+    <div id="netChartBox" class="chart hidden"><canvas id="netChart"></canvas></div>
     <div id="panels">
       <div id="threadPanel" class="panel">
         <h3>Top 线程（CPU%）</h3>

@@ -4,6 +4,7 @@ pub mod fps;
 pub mod memory;
 pub mod utils;
 
+pub use agent::MetricFlags;
 pub use cpu::{CpuSample1, ThreadCpuInfo};
 pub use fps::{FpsPidState, FpsTimeSeriesData};
 pub use memory::{MemoryDetails, MemoryTimeSeriesData};
@@ -20,7 +21,7 @@ use std::collections::{HashMap, VecDeque};
 pub const CHART_SERIES_CAP: usize = 30_000;
 
 /// 每 2 取 1 原地抽稀（保留首尾，容量减半）
-pub(crate) fn decimate<T>(dq: &mut VecDeque<T>) {
+pub fn decimate<T>(dq: &mut VecDeque<T>) {
     let mut i = 0;
     dq.retain(|_| {
         let keep = i % 2 == 0;
@@ -108,6 +109,18 @@ pub enum SampleEvent {
         frame_count: u32,
         jank_count: u32,
     },
+    /// agent 握手信息（核数 + 每核最大频率 KHz）
+    AgentHello { ncores: u32, maxkhz: Vec<u64> },
+    /// 每核当前频率（KHz），下标与 AgentHello 的 maxkhz 对应
+    FreqUpdate { timestamp: DateTime<Local>, khz: Vec<u64> },
+    /// 温度与热降频状态（status: Android ThermalStatus，-1=未知；sensors: [名称, 类型, °C]）
+    TempUpdate { timestamp: DateTime<Local>, status: i32, sensors: Vec<(String, i32, f32)> },
+    /// GPU：busy 为窗口占比 %；mhz 为当前时钟（0 = 无时钟源）
+    GpuUpdate { timestamp: DateTime<Local>, busy: f32, mhz: u32 },
+    /// 每 PID IO 速率 KB/s：r/w=逻辑读写，dr/dw=磁盘读写
+    IoUpdate { pid: String, timestamp: DateTime<Local>, r: f32, w: f32, dr: f32, dw: f32 },
+    /// 整机网络速率 KB/s（聚合物理口，排除回环/隧道；per-app 无数据源）
+    NetUpdate { timestamp: DateTime<Local>, rx: f32, tx: f32 },
     /// 包名下无任何进程
     NoProcess { error: String },
     /// 采样中的非致命错误（如单次 ADB 失败）

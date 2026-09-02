@@ -11,11 +11,17 @@
 //!    "java":..,"native":..,"code":..,"stack":..,"gfx":..,"other":..,"sys":..}
 //!   （内存分类字段仅 interval≥500ms 的 dumpsys meminfo 路径有值，低间隔 smaps_rollup 路径为 0）
 //!   {"t":"fps","ts":<wall_ms>,"pid":29697,"layer":"SVM Container#0","fps":30.0,"frames":32,"jank":0}
+//!   {"t":"freq","ts":<wall_ms>,"khz":[2592000,...]}              // 每核当前频率，下标对应 hello 的 maxkhz
+//!   {"t":"io","ts":<wall_ms>,"pid":29697,"r":12.3,"w":4.5,"dr":0.0,"dw":1.2}  // KB/s；r/w=rchar/wchar 逻辑读写，dr/dw=read_bytes/write_bytes 磁盘读写
+//!   {"t":"net","ts":<wall_ms>,"rx":123.4,"tx":56.7}              // KB/s 整机口径（聚合物理口，排除回环/隧道；per-app 无数据源）
+//!   {"t":"gpu","ts":<wall_ms>,"busy":37.5,"mhz":585}             // kgsl gpubusy 差值占比；GPU 在 hypervisor 后的平台无 sysfs，探测失败则不启用
+//!   {"t":"temp","ts":<wall_ms>,"status":0,"sensors":[["soc0",4,42.5],...]}    // status=Android ThermalStatus（-1=未知）；sensors=[名称,类型,°C]
 //!   {"t":"exit","pid":29697}
 //!   {"t":"noproc"}
 //!   {"t":"err","msg":"..."}
 //!
 //! 用法：xperf-agent --package <pkg> [--pid N]... --interval 50 [--cpu] [--memory] [--fps]
+//!                   [--freq] [--io] [--net] [--gpu] [--thermal]
 //!
 //! 与主机侧 adb 模式的差异：
 //! - CPU 口径相同（jiffies 差值 ×核数，单核基准），但窗口是相邻两轮之间
@@ -38,6 +44,11 @@ struct Args {
     cpu: bool,
     memory: bool,
     fps: bool,
+    freq: bool,
+    io: bool,
+    net: bool,
+    gpu: bool,
+    thermal: bool,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -47,6 +58,11 @@ fn parse_args() -> Result<Args, String> {
     let mut cpu = false;
     let mut memory = false;
     let mut fps = false;
+    let mut freq = false;
+    let mut io = false;
+    let mut net = false;
+    let mut gpu = false;
+    let mut thermal = false;
     let argv: Vec<String> = std::env::args().collect();
     let mut i = 1;
     while i < argv.len() {
@@ -73,6 +89,11 @@ fn parse_args() -> Result<Args, String> {
             "--cpu" => cpu = true,
             "--memory" => memory = true,
             "--fps" => fps = true,
+            "--freq" => freq = true,
+            "--io" => io = true,
+            "--net" => net = true,
+            "--gpu" => gpu = true,
+            "--thermal" => thermal = true,
             other => return Err(format!("未知参数: {}", other)),
         }
         i += 1;
@@ -80,13 +101,13 @@ fn parse_args() -> Result<Args, String> {
     if package.is_none() && pids.is_empty() {
         return Err("需要 --package 或 --pid".into());
     }
-    if !cpu && !memory && !fps {
-        return Err("需要 --cpu / --memory / --fps 至少一个".into());
+    if !(cpu || memory || fps || freq || io || net || gpu || thermal) {
+        return Err("需要至少一个采样开关（--cpu/--memory/--fps/--freq/--io/--net/--gpu/--thermal）".into());
     }
     if interval_ms == 0 {
         return Err("--interval 不能为 0".into());
     }
-    Ok(Args { package, pids, interval_ms, cpu, memory, fps })
+    Ok(Args { package, pids, interval_ms, cpu, memory, fps, freq, io, net, gpu, thermal })
 }
 
 // ---------- /proc 读取 ----------
@@ -166,6 +187,138 @@ fn resolve_pids(package: &str) -> Vec<u32> {
     }
     pids.sort_unstable();
     pids
+}
+
+// ---------- B 类指标：CPU 频率 / IO / 网络 / GPU / 温度 ----------
+
+fn read_u64_file(path: &str) -> Option<u64> {
+    fs::read_to_string(path).ok()?.trim().parse().ok()
+}
+
+/// 读 cpu<N> 的某个 cpufreq 节点（KHz）；核离线/节点缺失返回 None
+fn read_cpufreq(core: u32, node: &str) -> Option<u64> {
+    read_u64_file(&format!("/sys/devices/system/cpu/cpu{}/cpufreq/{}", core, node))
+}
+
+/// 读全部核 scaling_cur_freq（KHz）；读不到的核补 0，保持下标与核号对齐
+fn read_cpu_freqs(ncores: u32) -> Vec<u64> {
+    (0..ncores).map(|i| read_cpufreq(i, "scaling_cur_freq").unwrap_or(0)).collect()
+}
+
+/// 读 /proc/<pid>/io：(rchar, wchar, read_bytes, write_bytes)，单位字节
+/// rchar/wchar 是逻辑读写（含 page cache），read_bytes/write_bytes 是真实磁盘 IO
+fn read_pid_io(pid: u32) -> Option<(u64, u64, u64, u64)> {
+    let content = fs::read_to_string(format!("/proc/{}/io", pid)).ok()?;
+    parse_pid_io(&content)
+}
+
+fn parse_pid_io(content: &str) -> Option<(u64, u64, u64, u64)> {
+    let (mut r, mut w, mut dr, mut dw) = (None, None, None, None);
+    for line in content.lines() {
+        if let Some(v) = line.strip_prefix("rchar:") {
+            r = v.trim().parse().ok();
+        } else if let Some(v) = line.strip_prefix("wchar:") {
+            w = v.trim().parse().ok();
+        } else if let Some(v) = line.strip_prefix("read_bytes:") {
+            dr = v.trim().parse().ok();
+        } else if let Some(v) = line.strip_prefix("write_bytes:") {
+            dw = v.trim().parse().ok();
+        }
+    }
+    Some((r?, w?, dr?, dw?))
+}
+
+/// 读 /proc/net/dev 聚合物理口收发字节数：(rx_bytes, tx_bytes)。
+/// 排除回环与隧道/虚拟口（lo/sit/tun/gre/dummy/vti/ip6*），只统计真实网络活动。
+/// 注意是整机口径：Android 应用共享 netns，/proc/<pid>/net/dev 与整机内容一致，
+/// per-app 流量需 qtaguid/eBPF（此车机均不可用）。
+fn read_net_dev() -> Option<(u64, u64)> {
+    let content = fs::read_to_string("/proc/net/dev").ok()?;
+    Some(parse_net_dev(&content))
+}
+
+fn parse_net_dev(content: &str) -> (u64, u64) {
+    let (mut rx, mut tx) = (0u64, 0u64);
+    for line in content.lines().skip(2) {
+        let Some((iface, rest)) = line.split_once(':') else { continue };
+        let iface = iface.trim();
+        if iface == "lo"
+            || iface.starts_with("sit")
+            || iface.starts_with("tun")
+            || iface.starts_with("gre")
+            || iface.starts_with("dummy")
+            || iface.contains("vti")
+            || iface.starts_with("ip6")
+        {
+            continue;
+        }
+        let fields: Vec<&str> = rest.split_whitespace().collect();
+        rx += fields.first().and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
+        tx += fields.get(8).and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
+    }
+    (rx, tx)
+}
+
+/// kgsl sysfs 路径（GPU 使用率 + 时钟）。GPU 在 hypervisor 后的车机平台无此节点。
+struct Kgsl {
+    busy_path: &'static str,
+    clk_path: Option<&'static str>,
+}
+
+fn detect_kgsl() -> Option<Kgsl> {
+    const BUSY: &str = "/sys/class/kgsl/kgsl-3d0/gpubusy";
+    fs::metadata(BUSY).ok()?;
+    let clk_path = ["/sys/class/kgsl/kgsl-3d0/gpuclk", "/sys/class/kgsl/kgsl-3d0/devfreq/cur_freq"]
+        .into_iter()
+        .find(|p| fs::metadata(p).is_ok());
+    Some(Kgsl { busy_path: BUSY, clk_path })
+}
+
+/// 读 gpubusy："busy_time total_time"（µs 计数器），差值算窗口占比
+fn read_gpu_busy(path: &str) -> Option<(u64, u64)> {
+    let content = fs::read_to_string(path).ok()?;
+    parse_gpu_busy(&content)
+}
+
+fn parse_gpu_busy(content: &str) -> Option<(u64, u64)> {
+    let mut it = content.split_whitespace();
+    let busy = it.next()?.parse().ok()?;
+    let total = it.next()?.parse().ok()?;
+    Some((busy, total))
+}
+
+/// 解析 dumpsys thermalservice：
+/// - "Thermal Status: N" → 热降频状态（Android ThermalStatus 0-6）
+/// - "Temperature{mValue=30.8, mType=3, mName=..., mStatus=0}" → 各传感器
+///
+/// 输出含 Cached/Current HAL 两个温度区块（HAL 在后且更准），后者覆盖前者。
+fn parse_thermalservice(out: &str) -> (Option<i32>, Vec<(String, i32, f32)>) {
+    let mut status = None;
+    let mut sensors: Vec<(String, i32, f32)> = Vec::new();
+    for line in out.lines() {
+        let line = line.trim();
+        if let Some(rest) = line.strip_prefix("Thermal Status:") {
+            status = rest.trim().parse().ok();
+        } else if line.contains("temperatures") {
+            sensors.clear(); // 新温度区块（Cached → Current HAL），保留最后一个
+        } else if let Some(start) = line.find("Temperature{") {
+            if let Some(s) = parse_temperature_entry(&line[start..]) {
+                sensors.push(s);
+            }
+        }
+    }
+    (status, sensors)
+}
+
+/// 解析 "Temperature{mValue=30.8, mType=3, mName=test temperature sensor, mStatus=0}"
+/// 名字可含空格/逗号，以 ", mStatus=" 为右边界。
+fn parse_temperature_entry(s: &str) -> Option<(String, i32, f32)> {
+    let value = s.split("mValue=").nth(1)?.split(',').next()?.trim().parse().ok()?;
+    let type_ = s.split("mType=").nth(1)?.split(',').next()?.trim().parse().ok()?;
+    let name_start = s.find("mName=")? + "mName=".len();
+    let name_end = s.rfind(", mStatus=").unwrap_or(s.len());
+    let name = s.get(name_start..name_end.min(s.len()))?.trim().to_string();
+    Some((name, type_, value))
 }
 
 // ---------- 输出 ----------
@@ -464,10 +617,36 @@ fn main() {
         eprintln!("无法读取 /proc/stat");
         std::process::exit(1);
     };
-    emit(&format!("{{\"t\":\"hello\",\"ncores\":{},\"version\":1}}", ncores));
+    // 每核最大频率（KHz），与 freq 事件的 khz 数组下标对应
+    let maxkhz: Vec<u64> = (0..ncores).map(|i| read_cpufreq(i, "cpuinfo_max_freq").unwrap_or(0)).collect();
+    emit(&format!(
+        "{{\"t\":\"hello\",\"ncores\":{},\"maxkhz\":[{}],\"version\":1}}",
+        ncores,
+        maxkhz.iter().map(u64::to_string).collect::<Vec<_>>().join(",")
+    ));
+
+    // B 类指标启动探测（探测失败发 err 并禁用，不影响其余指标）
+    let mut freq_enabled = args.freq;
+    if freq_enabled && maxkhz.iter().all(|&f| f == 0) && read_cpu_freqs(ncores).iter().all(|&f| f == 0) {
+        emit("{\"t\":\"err\",\"msg\":\"cpufreq sysfs 不可用，--freq 已禁用\"}");
+        freq_enabled = false;
+    }
+    let kgsl = if args.gpu {
+        let k = detect_kgsl();
+        if k.is_none() {
+            emit("{\"t\":\"err\",\"msg\":\"kgsl sysfs 不存在（GPU 可能在 hypervisor 之后），--gpu 已禁用\"}");
+        }
+        k
+    } else {
+        None
+    };
 
     let mut states: HashMap<u32, PidState> = HashMap::new();
     let mut fps_states: HashMap<u32, FpsState> = HashMap::new();
+    // 速率类指标的上一轮基线：(上轮时间戳 ms, 计数器...)
+    let mut io_states: HashMap<u32, (u64, u64, u64, u64, u64)> = HashMap::new(); // pid → (ts, rchar, wchar, read_bytes, write_bytes)
+    let mut prev_net: Option<(u64, u64, u64)> = None; // (ts, rx_bytes, tx_bytes)
+    let mut prev_gpu: Option<(u64, u64)> = None; // (busy_time, total_time)
     let mut active_pids: Vec<u32> = args.pids.clone();
 
     // 内存分类明细仅在间隔 ≥500ms 时启用（dumpsys meminfo ~100ms，低间隔下太重）
@@ -511,6 +690,9 @@ fn main() {
     let rescan_rounds = (1000 / args.interval_ms).max(1);
     // FPS 限频：与 CPU/内存节拍解耦，有效周期 ≥500ms（50ms 间隔 → 每 10 轮一次）
     let fps_every = fps_every_n_rounds(args.interval_ms);
+    // 温度限频：dumpsys thermalservice ~50ms 级，≥2s 一轮（温度变化慢；低间隔下避免频繁拖长节拍轮）
+    let thermal_every = 2000u64.div_ceil(args.interval_ms).max(1);
+    let mut thermal_warned = false;
 
     loop {
         round += 1;
@@ -550,6 +732,68 @@ fn main() {
             continue; // 间隔过短导致 jiffies 无变化，跳过本轮
         }
         let ts = now_ms();
+
+        // CPU 频率：每核一次 sysfs 读（µs 级），每轮都采
+        if freq_enabled {
+            let khz = read_cpu_freqs(ncores);
+            emit(&format!(
+                "{{\"t\":\"freq\",\"ts\":{},\"khz\":[{}]}}",
+                ts,
+                khz.iter().map(u64::to_string).collect::<Vec<_>>().join(",")
+            ));
+        }
+
+        // 网络：整机口径计数器差值 → KB/s（首轮建基线不出数）
+        if args.net {
+            if let Some((rx, tx)) = read_net_dev() {
+                if let Some((pts, prx, ptx)) = prev_net.replace((ts, rx, tx)) {
+                    let dt = ts.saturating_sub(pts) as f32 / 1000.0;
+                    if dt > 0.0 {
+                        let rx_kbs = rx.saturating_sub(prx) as f32 / 1024.0 / dt;
+                        let tx_kbs = tx.saturating_sub(ptx) as f32 / 1024.0 / dt;
+                        emit(&format!("{{\"t\":\"net\",\"ts\":{},\"rx\":{:.2},\"tx\":{:.2}}}", ts, rx_kbs, tx_kbs));
+                    }
+                }
+            }
+        }
+
+        // GPU：kgsl gpubusy 计数器差值 → 窗口占比 %（首轮建基线不出数）
+        if let Some(g) = &kgsl {
+            if let Some((busy, total)) = read_gpu_busy(g.busy_path) {
+                if let Some((pb, pt)) = prev_gpu.replace((busy, total)) {
+                    let dtotal = total.saturating_sub(pt);
+                    if dtotal > 0 {
+                        let pct = busy.saturating_sub(pb) as f32 / dtotal as f32 * 100.0;
+                        let mhz = g.clk_path.and_then(read_u64_file).map(|hz| hz / 1_000_000).unwrap_or(0);
+                        emit(&format!("{{\"t\":\"gpu\",\"ts\":{},\"busy\":{:.2},\"mhz\":{}}}", ts, pct, mhz));
+                    }
+                }
+            }
+        }
+
+        // 温度/热降频：dumpsys thermalservice，限频 ≥2s 一轮
+        if args.thermal && round.is_multiple_of(thermal_every) {
+            match dumpsys(&["thermalservice"]).as_deref().map(parse_thermalservice) {
+                Some((status, sensors)) if status.is_some() || !sensors.is_empty() => {
+                    let sensors_json: Vec<String> = sensors
+                        .iter()
+                        .map(|(name, type_, value)| format!("[\"{}\",{},{:.1}]", json_escape(name), type_, value))
+                        .collect();
+                    emit(&format!(
+                        "{{\"t\":\"temp\",\"ts\":{},\"status\":{},\"sensors\":[{}]}}",
+                        ts,
+                        status.unwrap_or(-1),
+                        sensors_json.join(",")
+                    ));
+                }
+                _ => {
+                    if !thermal_warned {
+                        emit("{\"t\":\"err\",\"msg\":\"thermalservice 无温度数据（--thermal 持续重试）\"}");
+                        thermal_warned = true;
+                    }
+                }
+            }
+        }
 
         let mut exited: Vec<u32> = Vec::new();
         for &pid in &active_pids {
@@ -642,6 +886,22 @@ fn main() {
                 }
             }
 
+            // IO：/proc/<pid>/io 计数器差值 → KB/s（首轮建基线不出数）
+            if args.io {
+                if let Some((r, w, dr, dw)) = read_pid_io(pid) {
+                    if let Some((pts, pr, pw, pdr, pdw)) = io_states.insert(pid, (ts, r, w, dr, dw)) {
+                        let dt = ts.saturating_sub(pts) as f32 / 1000.0;
+                        if dt > 0.0 {
+                            let kbs = |cur: u64, prev: u64| cur.saturating_sub(prev) as f32 / 1024.0 / dt;
+                            emit(&format!(
+                                "{{\"t\":\"io\",\"ts\":{},\"pid\":{},\"r\":{:.2},\"w\":{:.2},\"dr\":{:.2},\"dw\":{:.2}}}",
+                                ts, pid, kbs(r, pr), kbs(w, pw), kbs(dr, pdr), kbs(dw, pdw)
+                            ));
+                        }
+                    }
+                }
+            }
+
             // FPS：设备端本地 dumpsys SurfaceFlinger（图层发现 + 帧时间戳差值）。
             // 限频执行（每 fps_every 轮一次）；启动时已预热建基线，
             // 首个 FPS 轮（round == fps_every）即覆盖一个完整周期。
@@ -663,6 +923,7 @@ fn main() {
             active_pids.retain(|&p| p != pid);
             states.remove(&pid);
             fps_states.remove(&pid);
+            io_states.remove(&pid);
             pkg_cache.remove(&pid);
             emit(&format!("{{\"t\":\"exit\",\"pid\":{}}}", pid));
         }
@@ -785,5 +1046,66 @@ mod tests {
     #[test]
     fn test_parse_meminfo_summary_no_total() {
         assert!(parse_meminfo_summary("garbage\n").is_none());
+    }
+
+    // ---- B 类指标解析 ----
+
+    #[test]
+    fn test_parse_pid_io() {
+        let content = "rchar: 78340951\nwchar: 1099734450\nsyscr: 8814340\nsyscw: 29172547\nread_bytes: 16384\nwrite_bytes: 167936\ncancelled_write_bytes: 0\n";
+        assert_eq!(parse_pid_io(content), Some((78340951, 1099734450, 16384, 167936)));
+        assert_eq!(parse_pid_io("rchar: 1\n"), None); // 字段不全
+    }
+
+    #[test]
+    fn test_parse_net_dev_skips_virtual_ifaces() {
+        // 真机格式：eth* 物理口统计，lo/sit0/tunl0/gre0/dummy0/ip6_vti0 等虚拟口跳过
+        let content = "Inter-|   Receive\n face |bytes\n\
+                       eth0.4: 2017964286 23774549 0 0 0 0 0 1155 80722878944 59977192 0 0 0 0 0 0\n\
+                       eth1: 9355968477 69004472 0 0 0 0 0 0 16194561619 118076019 0 0 0 0 0 0\n\
+                       lo: 999 10 0 0 0 0 0 0 888 10 0 0 0 0 0 0\n\
+                       sit0: 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n\
+                       tunl0: 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n\
+                       gre0: 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n\
+                       gretap0: 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n\
+                       dummy0: 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n\
+                       ip6_vti0: 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n\
+                       ip6gre0: 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n";
+        let (rx, tx) = parse_net_dev(content);
+        assert_eq!(rx, 2017964286 + 9355968477);
+        assert_eq!(tx, 80722878944 + 16194561619); // 不含 lo 的 888
+    }
+
+    #[test]
+    fn test_parse_gpu_busy() {
+        assert_eq!(parse_gpu_busy("12345 67890\n"), Some((12345, 67890)));
+        assert_eq!(parse_gpu_busy("12345\n"), None);
+    }
+
+    #[test]
+    fn test_parse_thermalservice() {
+        // 真机格式：Cached 区块在前，HAL 区块在后（后者覆盖前者）
+        let out = "IsStatusOverride: false\n\
+                   Thermal Status: 1\n\
+                   Cached temperatures:\n\
+                   \tTemperature{mValue=30.8, mType=3, mName=test temperature sensor, mStatus=0}\n\
+                   HAL Ready: true\n\
+                   Current temperatures from HAL:\n\
+                   \tTemperature{mValue=42.5, mType=0, mName=soc0, mStatus=1}\n\
+                   \tTemperature{mValue=41.0, mType=3, mName=skin, mStatus=0}\n\
+                   Current cooling devices from HAL:\n\
+                   \tCoolingDevice{mValue=100, mType=0, mName=test cooling device}\n\
+                   Temperature static thresholds from HAL:\n\
+                   \t{.type = SKIN}\n";
+        let (status, sensors) = parse_thermalservice(out);
+        assert_eq!(status, Some(1));
+        assert_eq!(sensors.len(), 2);
+        assert_eq!(sensors[0], ("soc0".to_string(), 0, 42.5));
+        assert_eq!(sensors[1], ("skin".to_string(), 3, 41.0));
+    }
+
+    #[test]
+    fn test_parse_thermalservice_empty() {
+        assert_eq!(parse_thermalservice("garbage\n"), (None, Vec::new()));
     }
 }
