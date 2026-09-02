@@ -6,6 +6,8 @@ body { font-family: -apple-system, "Segoe UI", "Noto Sans CJK SC", "PingFang SC"
 #sidebar label { display: block; margin: 8px 0; font-size: 13px; }
 #sidebar input[type=text], #sidebar input[type=number] { width: 100%; padding: 4px; margin-top: 2px; background: #313244; color: #cdd6f4; border: 1px solid #45475a; border-radius: 3px; }
 .checkboxes { display: flex; flex-wrap: wrap; gap: 8px 12px; margin: 8px 0; }
+.checkboxes label { display: inline-flex; align-items: center; gap: 4px; font-size: 13px; white-space: nowrap; }
+.checkboxes input[type=checkbox] { width: 16px; height: 16px; margin: 0; flex-shrink: 0; }
 #sidebar button { width: 100%; padding: 8px; margin: 4px 0; border: none; border-radius: 4px; cursor: pointer; font-size: 14px; }
 #sidebar button.small { width: 100%; padding: 5px; font-size: 12px; background: #45475a; color: #cdd6f4; }
 #startBtn { background: #a6e3a1; color: #1e1e2e; }
