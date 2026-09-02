@@ -89,8 +89,11 @@ fn map_event(
         AgentEvent::Temp { ts, status, sensors } => {
             out.push(SampleEvent::TempUpdate { timestamp: ts_of(ts), status, sensors });
         }
-        AgentEvent::Gpu { ts, busy, mhz } => {
-            out.push(SampleEvent::GpuUpdate { timestamp: ts_of(ts), busy, mhz });
+        AgentEvent::Gpu { ts, busy, util, mhz, maxmhz } => {
+            out.push(SampleEvent::GpuUpdate { timestamp: ts_of(ts), busy, util, mhz, maxmhz });
+        }
+        AgentEvent::GpuProc { ts, pid, busy } => {
+            out.push(SampleEvent::GpuProcUpdate { pid: pid.to_string(), timestamp: ts_of(ts), busy });
         }
         AgentEvent::GpuMem { ts, pid, bytes, global } => {
             out.push(SampleEvent::GpuMemUpdate { pid: pid.to_string(), timestamp: ts_of(ts), bytes, global });
@@ -196,6 +199,7 @@ fn brief_event(ev: &SampleEvent) -> String {
             format!("TempUpdate status={} sensors={}", status, sensors.len())
         }
         SampleEvent::GpuUpdate { busy, mhz, .. } => format!("GpuUpdate busy={:.1}% mhz={}", busy, mhz),
+        SampleEvent::GpuProcUpdate { pid, busy, .. } => format!("GpuProcUpdate pid={} busy={:.1}%", pid, busy),
         SampleEvent::GpuMemUpdate { pid, bytes, .. } => {
             format!("GpuMemUpdate pid={} mem={:.1}MB", pid, *bytes as f64 / 1e6)
         }
@@ -289,6 +293,8 @@ fn is_running(state: State<'_, AppState>) -> Result<bool, String> {
 type IoExportPoints = Vec<(f64, f64, f64, f64, f64)>;
 /// GPU 显存导出行：(ms, 进程 MB, 整机 MB)
 type GpuMemExportPoints = Vec<(f64, f64, f64)>;
+/// GPU 系统导出行：(ms, busy%, util%, mhz)
+type GpuExportPoints = Vec<(f64, f64, f64, u32)>;
 
 /// 导出前端持有的完整会话历史为 CSV（GUI 不流式落盘，数据在前端内存中）。
 /// 写到 log/<pkg>/<导出时刻>/ 下的各指标子目录，返回目录路径。
@@ -304,10 +310,11 @@ fn export_csv(
     fps: std::collections::HashMap<String, Vec<(f64, f64, u32)>>,
     freq: std::collections::HashMap<String, Vec<(f64, f64)>>,
     temp: std::collections::HashMap<String, Vec<(f64, f64, i32)>>,
-    gpu: Vec<(f64, f64, u32)>,
+    gpu: GpuExportPoints,
     io: std::collections::HashMap<String, IoExportPoints>,
     net: Vec<(f64, f64, f64)>,
     gpumem: std::collections::HashMap<String, GpuMemExportPoints>,
+    gpuproc: std::collections::HashMap<String, Vec<(f64, f64)>>,
 ) -> Result<String, String> {
     use std::io::Write;
     let dir = std::path::PathBuf::from("log")
@@ -390,9 +397,21 @@ fn export_csv(
         let d = dir.join("gpu");
         std::fs::create_dir_all(&d).map_err(|e| e.to_string())?;
         let mut f = std::fs::File::create(d.join("gpu_data.csv")).map_err(|e| e.to_string())?;
-        writeln!(f, "Timestamp,Busy (%),Clock (MHz)").map_err(|e| e.to_string())?;
-        for (t, busy, mhz) in &gpu {
-            writeln!(f, "{},{:.2},{}", fmt_ts(*t), busy, mhz).map_err(|e| e.to_string())?;
+        writeln!(f, "Timestamp,Busy (%),Util (%),Clock (MHz)").map_err(|e| e.to_string())?;
+        for (t, busy, util, mhz) in &gpu {
+            writeln!(f, "{},{:.2},{:.2},{}", fmt_ts(*t), busy, util, mhz).map_err(|e| e.to_string())?;
+        }
+        wrote = true;
+    }
+    if !gpuproc.is_empty() {
+        let d = dir.join("gpu");
+        std::fs::create_dir_all(&d).map_err(|e| e.to_string())?;
+        for (pid, pts) in &gpuproc {
+            let mut f = std::fs::File::create(d.join(format!("gpu_proc_{}_data.csv", pid))).map_err(|e| e.to_string())?;
+            writeln!(f, "Timestamp,Busy (%)").map_err(|e| e.to_string())?;
+            for (t, busy) in pts {
+                writeln!(f, "{},{:.2}", fmt_ts(*t), busy).map_err(|e| e.to_string())?;
+            }
         }
         wrote = true;
     }
@@ -515,13 +534,15 @@ mod tests {
         freq.insert("cpu1".to_string(), vec![(1700000000000.0, 2246.0)]);
         let mut temp = std::collections::HashMap::new();
         temp.insert("soc0".to_string(), vec![(1700000000000.0, 42.5, 0i32)]);
-        let gpu = vec![(1700000000000.0, 37.5, 585u32)];
+        let gpu = vec![(1700000000000.0, 37.5, 33.8, 585u32)];
         let mut io = std::collections::HashMap::new();
         io.insert("1234".to_string(), vec![(1700000000000.0, 12.0, 3.0, 0.0, 1.0)]);
         let net = vec![(1700000000000.0, 123.0, 45.0)];
         let mut gpumem = std::collections::HashMap::new();
         gpumem.insert("1234".to_string(), vec![(1700000000000.0, 154.4, 2639.1)]);
-        let dir = export_csv(pkg.clone(), cpu, Default::default(), fps, freq, temp, gpu, io, net, gpumem).unwrap();
+        let mut gpuproc = std::collections::HashMap::new();
+        gpuproc.insert("1234".to_string(), vec![(1700000000000.0, 14.4)]);
+        let dir = export_csv(pkg.clone(), cpu, Default::default(), fps, freq, temp, gpu, io, net, gpumem, gpuproc).unwrap();
         let cpu_csv = std::fs::read_to_string(format!("{}/cpu/cpu_1234_data.csv", dir)).unwrap();
         assert!(cpu_csv.starts_with("Timestamp,Process CPU (%)\n"));
         assert!(cpu_csv.contains(",12.50\n"));
@@ -535,8 +556,11 @@ mod tests {
         assert!(temp_csv.starts_with("Timestamp,Status,Sensor,TempC\n"));
         assert!(temp_csv.contains(",0,soc0,42.5\n"));
         let gpu_csv = std::fs::read_to_string(format!("{}/gpu/gpu_data.csv", dir)).unwrap();
-        assert!(gpu_csv.starts_with("Timestamp,Busy (%),Clock (MHz)\n"));
-        assert!(gpu_csv.contains(",37.50,585\n"));
+        assert!(gpu_csv.starts_with("Timestamp,Busy (%),Util (%),Clock (MHz)\n"));
+        assert!(gpu_csv.contains(",37.50,33.80,585\n"));
+        let gpuproc_csv = std::fs::read_to_string(format!("{}/gpu/gpu_proc_1234_data.csv", dir)).unwrap();
+        assert!(gpuproc_csv.starts_with("Timestamp,Busy (%)\n"));
+        assert!(gpuproc_csv.contains(",14.40\n"));
         let io_csv = std::fs::read_to_string(format!("{}/io/io_1234_data.csv", dir)).unwrap();
         assert!(io_csv.starts_with("Timestamp,Read (KB/s),Write (KB/s),Disk Read (KB/s),Disk Write (KB/s)\n"));
         assert!(io_csv.contains(",12.00,3.00,0.00,1.00\n"));
@@ -553,6 +577,7 @@ mod tests {
     fn test_export_csv_empty_errors() {
         let r = export_csv(
             "x".into(),
+            Default::default(),
             Default::default(),
             Default::default(),
             Default::default(),
