@@ -17,7 +17,7 @@
 |--------|------|
 | ca01aa6 | xperformance/src/trace.rs 新模块：录制 + trace_processor 定位/引导 + SQL 分析 + 报告；main.rs 集成 `--trace N`（独立/并行两模式 + 限时采样）；xperf-core utils 加 `is_interrupted()`（含 CLAUDE/WORKSPACE/SESSION 文档） |
 | 4b6a00d | code review 修复：①idle 口径 bug（实测发现 sched 表含 swapper 切片：utid=0 挂 upid=0 无名进程，不排除则空闲机器每核 busy 恒 ~99.7%、(内核线程) 桶被 idle 淹没 80%+ → top_procs/per_core 加 `utid != 0`，真机复测每核 3.4%~22.1% 合理、真实进程浮现）②cpufreq 去掉 limit 16 ③引导下载加超时（curl -m/wget -T 60）④trace_analysis.txt 写失败告警；单测锁定 idle 排除 |
-| （本条目补 hash） | GUI 深挖支持：trace.rs 下沉 xperf-core（record 参数化输出目录、analyze_and_report 返回报告文本、去打印——CLI/GUI 共用）；GUI 加 `start_trace` 命令 + `spawn_trace` 线程（`trace` 事件推 recording/recorded/done/error 进度）+ 侧栏秒数/按钮 + 报告面板 + `--trace N` 命令行自动启动（脚本化验证路径）+ 关窗置中断标志；CLI 行为不变（下沉后独立/并行真机回归通过） |
+| 944e854 | GUI 深挖支持：trace.rs 下沉 xperf-core（record 参数化输出目录、analyze_and_report 返回报告文本、去打印——CLI/GUI 共用）；GUI 加 `start_trace` 命令 + `spawn_trace` 线程（`trace` 事件推 recording/recorded/done/error 进度）+ 侧栏秒数/按钮 + 报告面板 + `--trace N` 命令行自动启动（脚本化验证路径）+ 关窗置中断标志；CLI 行为不变（下沉后独立/并行真机回归通过） |
 
 ### 完成内容
 
