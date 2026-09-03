@@ -193,6 +193,21 @@ fn find_ndk_linker() -> Option<PathBuf> {
     fallback.map(|(_, p)| p)
 }
 
+/// 目录树下最新文件的 mtime（递归；目录不可读/为空返回 None）
+fn newest_mtime_under(dir: &Path) -> Option<std::time::SystemTime> {
+    std::fs::read_dir(dir).ok()?
+        .flatten()
+        .filter_map(|e| {
+            let p = e.path();
+            if p.is_dir() {
+                newest_mtime_under(&p)
+            } else {
+                std::fs::metadata(&p).ok().and_then(|m| m.modified().ok())
+            }
+        })
+        .max()
+}
+
 /// 若本机尚未交叉编译 agent 二进制则自动构建；源码变更（mtime 更新）时也自动重建。
 /// （链接器：config.toml 默认值，探测到本机 NDK 时用 CARGO_TARGET_..._LINKER 环境变量覆盖，Mac/Linux 均可）
 pub fn ensure_agent_built() -> Result<PathBuf> {
@@ -200,13 +215,11 @@ pub fn ensure_agent_built() -> Result<PathBuf> {
     let needs_build = if !bin.exists() {
         true
     } else {
-        // 源码变更检测：main.rs mtime 比二进制新则重建
-        let src = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap()
-            .join("xperf-agent/main.rs");
-        match (std::fs::metadata(&src), std::fs::metadata(&bin)) {
-            (Ok(s), Ok(b)) => s.modified().ok() > b.modified().ok(),
-            _ => false,
-        }
+        // 源码变更检测：src 下任一 .rs 比 mtime 新则重建（agent 已拆多模块，不能只盯 main.rs）
+        let src_dir = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap()
+            .join("xperf-agent/src");
+        let bin_mtime = std::fs::metadata(&bin).ok().and_then(|m| m.modified().ok());
+        newest_mtime_under(&src_dir) > bin_mtime
     };
     if needs_build {
         eprintln!("agent 需要构建/重建（aarch64-linux-android）...");
