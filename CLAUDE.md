@@ -55,10 +55,10 @@ GUI:  start_sampling / 自动启动 → spawn_sampling()（std::thread 阻塞读
 
 - **设备端**：xperf-agent 常驻，直接读 /proc（CPU/线程）、smaps_rollup 或 dumpsys meminfo（内存）、本地 dumpsys SurfaceFlinger（FPS），按绝对节拍（start + round×interval，防漂移）逐轮输出 JSON 行
 - **主机侧**：只是表现层（CLI 打印/流式 CSV/图表；GUI emit 给前端）。ADB 断开 → exec-out EOF → `reconnect_agent` 每 500ms 轮询等设备回来，重新部署+启动 agent，主机侧状态（时序/峰值/CSV）保留；Ctrl-C → 关闭连接 → agent 写 stdout 失败自行退出
-- **xperf-core 的 Sampler/cpu/memory/fps 轮询模块是参考实现（含完整单测），CLI/GUI 已不再调用**；agent 复制了其中的解析逻辑（零依赖独立发布的要求）
+- **xperf-core 已无轮询实现**（原 Sampler/cpu/memory/fps 参考实现已删除，225d89b）；core 只保留协议类型（ThreadCpuInfo/MemoryDetails/FpsTimeSeriesData/PidStats/SampleEvent）+ agent 传输层 + platform/marker；采样全在 agent（零依赖独立发布，解析逻辑与 core 类型对应）
 - **GUI 前端**：CPU/内存/FPS 折线（series 保留完整会话历史，窗口跟随 10min / 全部历史切换，绘制时二分裁剪 + stride 抽稀防卡顿）、Top 线程表（500ms 节流渲染）、峰值面板（新峰值才更新 DOM）、导出 CSV（`export_csv` 命令写 `log/<pkg>/<导出时刻>/`）
 
-### CPU 采样口径（agent 与参考实现一致）
+### CPU 采样口径（agent）
 
 单核口径，与 `adb top` 一致：100% = 占满一个核，多线程可超 100%。
 
@@ -140,6 +140,24 @@ CLI 退出图表用通用 helper `generate_multi_line_chart`（xperformance/util
 
 ---
 
+### 平台抽象（xperf-core/src/platform/）
+
+Platform trait + `adb devices -l` product 字段自动检测（HU_SS3/HU_SS2MAXF/HU_SS2PRO/HU_SS4 → 对应平台，否则 Android）。host 检测后经 spawn_agent 传 `--platform`/`--qnx-host` 给 agent。
+
+**GPU 通道按平台选路**（agent `detect_gpu_path_ex`）：kgsl sysfs（Android/SS2）→ QNX telnet（SS3：172.31.101.52，写 /dev/kgsl-control 开统计，slog2info -W 流读，独立线程）→ topgpu（SS2MAX，需 push 工具）→ ligfxprofilerd logcat（SS4）→ dumpsys gpu 显存保底。SS3/SS4 有每进程 GPU busy（gpuproc 事件，按 comm 名归因，`lookup_pid` 15 字符截断匹配）。
+
+**SS2MAX 特性**：温度走 sysfs thermal zones 兜底（thermalservice sensors 列表为空但 HAL 有数据，条件须 `!sensors.is_empty()`）；IO 需 adb root（agent 自动 try_adb_root + id 验证）；GPU 显存无数据源。
+
+---
+
+### C 类验证能力
+
+- `--threshold cpu>80,mem>500,fps<30,gpu>90`：实时告警（静止界面 fps=0 不触发低值规则）+ 退出验证报告（触发次数/极值/总结论）
+- `--cold-start .MainActivity`：am start -W 解析（30s 超时，status!=ok 报错）
+- 打点：CLI Unix socket `/tmp/xperf-marker.sock`（`echo 标签 | nc -U ...`，每连接线程+10s 读超时）或 GUI 按钮 → 图表竖线 + markers.csv
+
+---
+
 ### agent（设备端采样器，xperf-agent）
 
 **为什么**：adb 轮询单轮固定 6+ 次调用（每次 ~13ms 起，`dumpsys meminfo` ~100ms），低间隔下开销超过间隔本身，且每次 adb 调用都扰动被测系统。agent 常驻设备直接读 /proc（微秒级），NDJSON 经 `adb exec-out` 长连接流式回传（PerfDog Agent 同构思路，但免装 APK：纯静态二进制）。当前 CLI/GUI 的**唯一**采样路径。
@@ -147,7 +165,7 @@ CLI 退出图表用通用 helper `generate_multi_line_chart`（xperformance/util
 **部署**：
 - 本机二进制：`target/aarch64-linux-android/release/xperf-agent`（不存在时自动执行 `cargo build -p xperf-agent --target aarch64-linux-android --release`；需 NDK，链接器配置在 `.cargo/config.toml`，当前绑定 NDK 25.1.8937393 / API 26）
 - 设备端路径：`/data/local/tmp/xperf-agent`
-- 更新机制（`agent::deploy_agent`）：比对本机文件大小与设备上 `stat -c %s`，不一致或不存在才 `adb push` + `chmod 755`，避免每次重复推送
+- 更新机制（`agent::deploy_agent`）：大小+mtime 双判（源码变更自动重建：ensure_agent_built 比较 main.rs mtime vs 二进制 mtime）；deploy 前自动 `try_adb_root`（IO 等需 root 的指标）
 - 手动重建推送：`cargo build -p xperf-agent --target aarch64-linux-android --release && adb push target/aarch64-linux-android/release/xperf-agent /data/local/tmp/`
 
 **要点**：

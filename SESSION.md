@@ -7,6 +7,43 @@
 
 ---
 
+## 2026-09-03（三）— 平台抽象 + 五平台 GPU + C 类验证 + SS2MAX 实测 + 两轮 review 修复
+
+**任务线**：B 类收尾后的全面扩展——平台抽象（5 平台 trait）、各平台 GPU 通道、C 类验证能力、SS2MAX 真机实测、两轮 code review 全量修复、死代码清理。
+
+### 完成内容（commits 旧→新）
+
+| commit | 内容 |
+|--------|------|
+| 2058fcc | 平台抽象层：Platform trait + 5 平台文件 + adb devices -l 检测 + agent --platform/--qnx-host |
+| 58ceae5 | 各平台 GPU：topgpu（SS2MAX）/ ligfxprofilerd（SS4）/ kgsl（Android）通道 + 单测 |
+| a56a6f5 | C 类：--threshold 阈值告警+退出报告 / --cold-start 冷启动 |
+| 0f7ad9d | C 类：时间轴打点（Unix socket + GUI 按钮 + 图表竖线 + markers.csv） |
+| 178fd16 | SS2MAX 温度修复：thermalservice sensors 为空走 sysfs 兜底（44 传感器） |
+| c3a2ee6 | SS2MAX 实测结论：IO/GPU 显存 SELinux 限制 + agent 提示 |
+| 7f8fda1 | agent 自动 adb root（deploy 前 try_adb_root + id 验证） |
+| 020e3ed | review 修复（严重 3 + 一般 6）：qnx-host OnceLock / FPS 基线误计 / GUI 关窗 / marker 阻塞 / QNX 泄漏 / adb root 文案等 |
+| 14d514c | review 修复（一般 9）：alerts min / deploy mtime / json_escape / comm 截断 / aggs 清理 / coldstart 超时 / 退出码 / 路径遍历 |
+| 02ee9bc | 二轮 review 修复：memory bail 文案 / lookup_pid UTF-8 panic / 重扫 exit 补发 / coldstart 30s / 包名校验前置 |
+| d7eb4aa | marker 读超时 / agent 源码变更自动重建 / Tauri async / CSV 转义 |
+| 225d89b | **删除 xperf-core 轮询参考实现**（-1653 行，D 类决策闭环） |
+| 737ed45 | agent src 布局迁移（拆分第一步） |
+
+### 关键结论与基线
+
+- **GPU 五通道架构**：detect_gpu_path_ex(platform) 按平台选路——kgsl sysfs（有即用）/ QNX telnet（SS3）/ topgpu（SS2MAX，需工具）/ ligfxprofilerd logcat（SS4）/ dumpsys gpu 显存保底；所有通道补采显存。QNX/topgpu/ligfx 各自独立读线程（stdin 句柄须移交读线程持有，否则 drop 即 EOF 子进程退出）
+- **SS2MAX 实测**（d1f39648c1f，SA8155P）：GPU 走 kgsl sysfs 直通（gpubusy+gpuclk 可读）；温度 44 sysfs 传感器（thermalservice HAL 有数据但 sensors 列表空——条件必须是 !sensors.is_empty() 而非 status.is_some()||...）；IO/GPU 显存被 SELinux 拦（agent shell uid 2000），**adb root 后 IO 可读**（try_adb_root 自动尝试 + id 验证）；GPU 显存无数据源（dumpsys gpu 无 Memory snapshot + debugfs 不存在）
+- **SS3 QNX 通道细节**：telnet 172.31.101.52 root 免密；写 /dev/kgsl-control 开统计（gpu_set_log_level 4 + gpubusystats + gpu_per_process_busy）；slog2info -W（-w 会回放历史）；grep kgsl 挡 VHAL 刷屏；login:/# 提示符无换行须逐字节读；统计周期支持 50ms（clamp 100ms-1s 跟 interval）
+- **code review 两轮修复 30+ 项**：最关键的三个是（1）qnx-host 双 OnceLock 静默失效（模块级 static 修）；（2）FPS None 基线全缓冲误计（127 帧全算新帧→虚高数倍，改为只计窗口时长内的帧）；（3）agent 重扫 retain 先于 per-pid 检测导致 exit 事件丢失（重扫补发 exit+清理 4 张 map）
+- **死代码删除**：xperf-core 的 Sampler/sample_cpu/sample_memory/FpsPidState/get_all_processes 全删（与 agent 路径行为已分叉，留着误导）；保留 ThreadCpuInfo/MemoryDetails/FpsTimeSeriesData/PidStats/SampleEvent 协议类型。core 2600→1044 行
+- **易踩坑**：`timeout cmd | head` 会让输出重复块（head 关管道后工具重复捕获），重定向文件即正常——非代码 bug；Tauri 非 async 命令阻塞主线程（list_packages/export_csv 已改 async）；`&name[..15]` 多字节 UTF-8 截断 panic（用 chars().take()）
+
+### 遗留问题
+
+见 WORKSPACE.md E 节。下轮优先：agent 单文件拆分（src 布局已就位，拆完须真机全指标回归）→ perfetto 深挖 → simpleperf。
+
+---
+
 ## 2026-09-02（二）— B 类指标全覆盖：CPU 频率/温度/GPU/IO/网络
 
 **任务线**：WORKSPACE.md B 类四项全部落地（agent+协议+CLI+GUI）。
