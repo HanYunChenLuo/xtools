@@ -25,13 +25,35 @@ pub struct ColdStartResult {
 }
 
 /// 执行 am start -W 并解析结果。activity 格式：".MainActivity" 或完整类名
+/// 超时：macOS 无 `timeout` 命令，用 spawn+wait_timeout 手动实现
 pub fn measure(package: &str, activity: &str) -> Result<ColdStartResult> {
     let component = format!("{}/{}", package, activity);
-    let output = Command::new("timeout")
-        .args(["15", "adb", "shell", "am", "start", "-W", &component])
-        .output()?;
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    parse_am_start_w(&stdout, &component)
+    let mut child = Command::new("adb")
+        .args(["shell", "am", "start", "-W", &component])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()?;
+    // 手动超时：15s 无输出则 kill
+    let start = std::time::Instant::now();
+    let timeout = std::time::Duration::from_secs(15);
+    let output = loop {
+        match child.try_wait()? {
+            Some(_) => {
+                let mut out = String::new();
+                use std::io::Read;
+                child.stdout.take().unwrap().read_to_string(&mut out).ok();
+                break out;
+            }
+            None => {
+                if start.elapsed() > timeout {
+                    let _ = child.kill();
+                    anyhow::bail!("am start -W 超时（15s）");
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+        }
+    };
+    parse_am_start_w(&output, &component)
 }
 
 fn parse_am_start_w(output: &str, component: &str) -> Result<ColdStartResult> {

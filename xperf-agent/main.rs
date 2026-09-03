@@ -747,10 +747,14 @@ fn json_escape(s: &str) -> String {
 
 /// 进程名归因：QNX/topgpu/ligfx 显示名可能完整（包名>15字符），/proc/comm 截断到 15 字符。
 /// 匹配策略：先精确匹配，失败则截断到 15 字符再匹配。
+/// 注意：多字节 UTF-8 字符（如中文进程名）不能用字节切片（&name[..15] 会 panic），
+/// 用 chars().take() 保证安全。comm 截断到 15 字节后可能与其他进程前缀冲突
+/// （如 com.lixiang.car.x.svm 和 com.lixiang.car.x.browser 都截为 com.lixiang.car），
+/// 后插入者覆盖先者——GPU busy 可能错归因到同前缀的另一个 pid，这是数据源限制。
 fn lookup_pid(pid_names: &std::collections::HashMap<String, u32>, name: &str) -> Option<u32> {
     pid_names.get(name).copied().or_else(|| {
-        let truncated = &name[..name.len().min(15)];
-        pid_names.get(truncated).copied()
+        let truncated: String = name.chars().take(15).collect();
+        pid_names.get(&truncated).copied()
     })
 }
 
@@ -1283,6 +1287,11 @@ fn main() {
                     active_pids.push(*pid); // 新 PID 首轮建基线（states 中无记录）
                 }
             }
+            // 消失的 PID：重扫剔除前先发 exit 事件（避免 per-pid 循环检测窗口竞态丢失）
+            let exited: Vec<u32> = active_pids.iter().filter(|p| !found.contains(p)).copied().collect();
+            for pid in &exited {
+                emit(&format!("{{\"t\":\"exit\",\"pid\":{}}}", pid));
+            }
             active_pids.retain(|p| found.contains(p));
             if found.is_empty() {
                 // 每轮重扫都报：让主机读循环在无进程期间也能定期收到行（保持 Ctrl-C 响应）
@@ -1571,12 +1580,12 @@ fn main() {
         }
 
         for pid in exited {
+            // 重扫已发 exit 事件（避免窗口竞态丢失），这里只做状态清理
             active_pids.retain(|&p| p != pid);
             states.remove(&pid);
             fps_states.remove(&pid);
             io_states.remove(&pid);
             pkg_cache.remove(&pid);
-            emit(&format!("{{\"t\":\"exit\",\"pid\":{}}}", pid));
         }
     }
 }

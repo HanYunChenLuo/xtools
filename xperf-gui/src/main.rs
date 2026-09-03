@@ -242,7 +242,8 @@ async fn start_sampling(
     }
 
     // 包名校验：防路径遍历（包名会拼入日志目录路径）
-    if !package.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_') {
+    if package.is_empty() || package == "." || package == ".." || package.len() > 256
+        || !package.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-') {
         *state.running.lock().map_err(|e| e.to_string())? = false;
         return Err(format!("非法包名: {}", package));
     }
