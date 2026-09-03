@@ -7,6 +7,45 @@
 
 ---
 
+## 2026-09-03（三）下午 — SS3 QNX 通道真机回归：发现并修复 kgsl 统计链停滞
+
+**任务线**：WORKSPACE 遗留项——SS3 设备在线，补 gpu/qnx.rs 拆分后的真机回归。
+
+### Commits
+
+| commit | 内容 |
+|--------|------|
+| （本次） | qnx.rs：fd3 长活连接写入 + slog 行去重 + 看门狗自愈；gpu/mod.rs：spawn_stream_parser keepalive 改 Arc<Mutex<ChildStdin>>、parse 改闭包 |
+
+### 完成内容
+
+- 回归发现真 bug：QNX frame 流"首条后停走"，跨会话交替通/停（A停→B通→C停→…），agent 会话 15-30s 只有 1 条 gpu 事件
+- 黑盒定位（重启车机前后 10+ 组对照实验）：
+  - **kgsl 统计链是驱动全局的**（开机自带 5000ms 链），会话死亡/fd 关闭都不清理（泄漏到整机重启；frame 计数持续递增证明）
+  - `echo X > /dev/kgsl-control` 即开即死连接撞上存量链：只 flush 一个窗口（elapsed=5001ms 之类）即停
+  - 长活连接（`exec 3>/dev/kgsl-control` + `>&3` 写入）撞存量链：全链重相位（计数归零、锁步）后持续输出
+  - 多条链锁步时同一 slog 行重复 N 份（实测 4 链 ×4 拷贝）；`kgsl_driver_cleanup_full` 对已死进程清理失败（slog 有 WARNING）
+- 修复（xperf-agent/src/gpu/qnx.rs）：
+  1. 启动命令序列改 `exec 3>` 持 fd 写入（写入时连接存活是链持续输出的必要条件）
+  2. 读线程 parse 闭包按"与上一行完全相同"去重（Sys/Proc 各记上一条，锁步重复行总相邻）
+  3. 看门狗：frame 流静默超宽限（2×周期+3s）经同一 telnet 会话 fd3 重写 gpubusystats 自愈（≤3 次，恢复归零）
+  4. spawn_stream_parser（gpu/mod.rs）keepalive 参数改 `Option<Arc<Mutex<ChildStdin>>>`（读线程保活 + 看门狗共享写入），parse 参数 fn 指针改 `impl Fn` 闭包（携带去重/计数状态）
+- 验证：60 测试全绿、clippy 零警告；SS3 真机——4 条泄漏链硬场景下启动顿 ~5s + 1 次自愈后稳定 1/s（busy 10.1%/util 8.0%/507MHz）；gpu/gpuproc/gpumem 三类事件与 CSV（gpu_data / gpu_proc_9671 / gpumem）全通；连续 3 轮 kill/重跑稳定；CLI 端到端（--cpu --gpu）正常
+
+### 关键结论与基线
+
+- QNX slog 行格式不变（frame N: freq/busy/utilization；For process[PID] = 'comm 名'）；gpuproc 按 comm 归因验证通过（eid → pid 9671 @9.3%，svm 空闲时无 gpuproc 属正常）
+- kgsl-control 无清理/查询接口，未知命令静默忽略；QNX 侧工具极简（/bin 仅 ksh/login/sh/camera，无 base64/od/tr/sort），二进制取证困难
+- 真机包名教训：`com.lixiang.car.x.svm`（lixiang 无点）——ps 输出误读成 li.xiang 导致 noproc 排查弯路，od -c 字节级核对才定位
+- run_cmd 输出偶发整段复制伪影（同时间戳同内容重复）：判断以文件落盘统计为准
+
+### 遗留问题
+
+- 驱动全局链泄漏无法清理（无接口），多次会话后存量链带来少量同值重复样本（去重缓解、重启清零）——见 WORKSPACE E
+- 首次会话/泄漏态启动有 ~5s GPU 数据延迟（看门狗自愈路径），干净态即时
+
+---
+
 ## 2026-09-03（三）晚 — agent 单文件模块化拆分 + mtime 检查修复 + SS2MAX 回归
 
 **任务线**：WORKSPACE D 类第一项——xperf-agent 1848 行单文件拆分（src 布局已就位），拆完真机回归。

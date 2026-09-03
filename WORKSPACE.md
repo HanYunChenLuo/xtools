@@ -2,7 +2,7 @@
 
 > 本文件记录跨会话的待办事项（backlog）。每次会话的历史总结见 `SESSION.md`。
 > 完成一项就把状态改为 ✅ 并注明完成的 commit；新增想法随时追加。
-> 最后更新：2026-09-03
+> 最后更新：2026-09-03（SS3 QNX 回归 + kgsl 链停滞修复）
 
 ## 当前状态速览
 
@@ -15,7 +15,7 @@
 - GUI：9 张折线图 + 实时数值面板 + Top 线程 + 峰值 + 间隔档位下拉 + 实际周期标注 + 勾选即时生效（自动重启会话）+ 打点竖线
 - agent 部署：自动尝试 adb root（IO 等需 root）；src 树内任一 .rs mtime 变化自动重建
 - 测试：**60 全绿**（agent 23 个测试随模块迁移），clippy 零警告
-- 设备：SS3 6eb792dfb0f（adbd root，QNX GPU 已验证；拆分后 QNX 通道待复验）；SS2MAX d1f39648c1f（adb root 可用，IO/kgsl/44 温度传感器已验证；gpubusy 计数器停走属数据源限制）
+- 设备：SS3 6eb792dfb0f（adbd root，QNX GPU 通道**已真机回归**，见 D-2）；SS2MAX d1f39648c1f（adb root 可用，IO/kgsl/44 温度传感器已验证；gpubusy 计数器停走属数据源限制）
 
 ---
 
@@ -38,14 +38,15 @@
 
 ## D. 结构改进（下轮候补）
 
-- [x] ~~agent 单文件拆分~~（531798a + 99d1b74 review 修复）：main.rs 1848 行 → 10 文件（main 493 + proc/mem/fps/thermal + gpu/{mod,kgsl,qnx,topgpu,ligfx}），三份读线程骨架抽公共 `gpu::spawn_stream_parser`，四段相同的 gpumem 补采臂合并；测试 23 个随模块迁移全绿。真机回归：SS2MAX 新旧 agent 同机对比事件分布/wire 格式/smaps 值一致。附带修复 host 侧 `ensure_agent_built` 只盯 main.rs 的 mtime 检查（改扫 src 树，touch 子模块已验证触发重建）。**SS3 QNX 通道拆分后未真机回归**（设备不在线），接入时补验
+- [x] ~~agent 单文件拆分~~（531798a + 99d1b74 review 修复）：main.rs 1848 行 → 10 文件（main 493 + proc/mem/fps/thermal + gpu/{mod,kgsl,qnx,topgpu,ligfx}），三份读线程骨架抽公共 `gpu::spawn_stream_parser`，四段相同的 gpumem 补采臂合并；测试 23 个随模块迁移全绿。真机回归：SS2MAX 新旧 agent 同机对比事件分布/wire 格式/smaps 值一致。附带修复 host 侧 `ensure_agent_built` 只盯 main.rs 的 mtime 检查（改扫 src 树，touch 子模块已验证触发重建）
+- [x] ~~SS3 QNX 通道真机回归 + kgsl 统计链停滞修复~~（2026-09-03）：回归发现 QNX frame 流"1 条后停走、跨会话交替通/停"。黑盒实验（重启车机前后共 10+ 组对照）定位根因：**kgsl 统计链是驱动全局的，会话/fd 关闭都不清理**（泄漏直到整机重启）；`echo >` 式即开即死连接写入撞存量链只 flush 一窗即停，长活连接（`exec 3>`）写入则全链重相位持续输出；多链锁步产生重复行。修复（qnx.rs）：① 启动命令改 `exec 3>` 持 fd 写入；② slog 行按"与上一行完全相同"去重（Sys/Proc 各一条）；③ 看门狗兜底（frame 静默超 3×周期经 fd3 重写自愈，≤3 次）。真机验证：4 条泄漏链硬场景下启动顿 ~5s + 1 次自愈后稳定 1/s；gpu/gpuproc/gpumem 三类事件与 CSV 全通（eid→pid 9671 归因正确）；连续多轮 kill/重跑稳定。已知残留：存量链的窗口 flush 会带来少量同值重复样本（数值正确，重启清零）
 - [x] ~~xperf-core 轮询参考实现删除~~（225d89b，-1653 行；保留 ThreadCpuInfo/MemoryDetails/FpsTimeSeriesData/PidStats/SampleEvent 等协议类型）
 
 ## E. 已知遗留（评估过，低风险不阻塞）
 
 - SS2MAX GPU 显存无数据源（dumpsys gpu 无 Memory snapshot 段 + debugfs 不存在，平台限制）
+- SS3 kgsl 统计链驱动全局泄漏（见 D-2）：多次 agent 会话后 slog 中存量链带来少量同值重复样本（已按行去重缓解，重启车机清零；驱动无清理接口，kgsl_driver_cleanup_full 对已死进程清理失败有 WARNING）
 - SS2MAX gpubusy 计数器恒 `0 0`（2026-09-03 实测 30 次采样全零，total_time 停走 → kgsl busy 通道无事件；gpuclk 正常 427MHz）——数据源限制，新旧 agent 行为一致
-- SS3 QNX 流式通道（gpu/qnx.rs）拆分后未真机回归——解析函数有单测、spawn_stream_parser 逻辑与旧内联线程逐行对齐，SS3 设备接入时跑一次 `--gpu --platform ss3` 确认
 - SS4 ligfx Frequency 单位待真机核实（Hz vs MHz）
 - 多设备连接时所有 adb 命令不带 -s 会失败（单设备场景无影响）
 - GUI add_marker 不写 markers.csv / 不进 export_csv（关窗丢失，仅图表竖线）
@@ -55,6 +56,7 @@
 
 ## 已完成
 
+- ✅ SS3 QNX 通道真机回归 + kgsl 统计链停滞修复：fd3 长活连接写入 / 行级去重 / 看门狗自愈（2026-09-03）
 - ✅ agent 模块化拆分：1848 行单文件 → 10 文件（proc/mem/fps/thermal/gpu 五通道），公共 spawn_stream_parser，host 侧 mtime 检查同步修复（531798a + 99d1b74）
 - ✅ 平台抽象层：5 平台 trait + 自动检测 + agent 参数传递（2058fcc）
 - ✅ 各平台 GPU 通道实现：topgpu/ligfxprofilerd/kgsl（58ceae5）

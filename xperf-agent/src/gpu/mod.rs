@@ -95,10 +95,10 @@ enum GpuEvent {
 fn spawn_stream_parser(
     child: std::process::Child,
     reader: std::io::BufReader<std::process::ChildStdout>,
-    keepalive: Option<std::process::ChildStdin>,
+    keepalive: Option<Arc<Mutex<std::process::ChildStdin>>>,
     eof_err: Option<&'static str>,
     pid_names: &Arc<Mutex<HashMap<String, u32>>>,
-    parse: fn(&str) -> Option<GpuEvent>,
+    parse: impl Fn(&str) -> Option<GpuEvent> + Send + 'static,
 ) {
     let pid_names = pid_names.clone();
     std::thread::spawn(move || {
