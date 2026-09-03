@@ -16,7 +16,19 @@ const CSV_TS_FMT: &str = "%Y-%m-%d %H:%M:%S%.3f";
 // 存储当前执行期间的timestamp目录路径
 static TIMESTAMP_DIR: OnceLock<Mutex<Option<PathBuf>>> = OnceLock::new();
 
+/// 校验包名格式（防止路径遍历）
+fn validate_package_name(pkg: &str) -> Result<()> {
+    if pkg.is_empty() || pkg.len() > 255 {
+        anyhow::bail!("包名不能为空且不超过 255 字符: {}", pkg);
+    }
+    if !pkg.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-') {
+        anyhow::bail!("包名包含非法字符: {}", pkg);
+    }
+    Ok(())
+}
+
 pub fn create_log_dir_if_needed(package: &str) -> Result<PathBuf> {
+    validate_package_name(package)?;
     let log_dir = PathBuf::from("log").join(package);
     if !log_dir.exists() {
         fs::create_dir_all(&log_dir)?;

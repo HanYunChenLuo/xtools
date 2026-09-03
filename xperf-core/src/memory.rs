@@ -38,6 +38,12 @@ pub async fn sample_memory(pid: &str) -> Result<(u64, DateTime<Local>, MemoryDet
     let timestamp = Local::now();
     let output = utils::run_adb_command(&["shell", "dumpsys", "meminfo", pid])?.stdout;
 
+    // 进程死亡时 dumpsys meminfo 输出空或报错文本（如 "No process found"），
+    // 返回 Err 让调用方走 PidDisappeared 路径
+    if output.trim().is_empty() || output.contains("No process") || output.contains("No such process") {
+        anyhow::bail!("Process {} not found", pid);
+    }
+
     let mut total_pss = 0;
     let mut memory_details = MemoryDetails::default();
     let mut in_app_summary = false;
@@ -168,11 +174,11 @@ TOTAL SWAP PSS:      0
     }
 
     #[tokio::test]
-    async fn test_sample_memory_empty_output_returns_zero() {
+    async fn test_sample_memory_empty_output_returns_err() {
         let _lock = crate::utils::ADB_TEST_LOCK.lock().await;
         crate::utils::set_adb_runner_for_test(empty_runner);
-        let (total_pss, _ts, _details) = sample_memory("99999").await.unwrap();
-        assert_eq!(total_pss, 0); // 无 TOTAL PSS 行 → 0
+        // 空输出（进程死亡）→ Err（区分"进程死"与"内存=0"）
+        assert!(sample_memory("99999").await.is_err());
         crate::utils::clear_adb_runner_for_test();
     }
 }

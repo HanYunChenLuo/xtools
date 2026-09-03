@@ -137,7 +137,7 @@ fn check_threshold(
     let time_str = t.format("%H:%M:%S").to_string();
     for t in triggered {
         println!("{}", format!("[{}] ⚠️ 告警: {} {:.1} {} {}", time_str, t.metric, value, t.op, t.value).red().bold());
-        stats.lock().unwrap().record(&t.raw, value, &time_str);
+        stats.lock().unwrap().record(&t.raw, value, &time_str, t.op);
     }
 }
 
@@ -546,6 +546,7 @@ async fn monitor_process_agent(args: &Args, flags: xperf_core::MetricFlags) -> R
                 if let Some(s) = pid_stats.get_mut(&pid.to_string()) {
                     s.active = false;
                 }
+                aggs.remove(&pid); // 清理陈旧聚合数据，避免退出后仍打印旧值
                 println!("[{}] PID {} 已退出", Local::now().format("%H:%M:%S"), pid.to_string().yellow());
             }
             AgentEvent::Noproc => {} // 无进程期间 agent 每秒报一次，无需逐条打印
@@ -1066,6 +1067,7 @@ async fn main() -> Result<()> {
     run_cold_start(&args);
     if let Err(e) = monitor_process(&args).await {
         eprintln!("Monitor error: {}", e);
+        std::process::exit(1);
     }
     Ok(())
 }

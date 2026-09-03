@@ -728,8 +728,30 @@ fn now_ms() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
 }
 
+/// JSON 字符串转义：处理引号、反斜杠和控制字符（\n \r \t 等会破坏 NDJSON 行帧结构）
 fn json_escape(s: &str) -> String {
-    s.replace('\\', "\\\\").replace('"', "\\\"")
+    let mut out = String::with_capacity(s.len() + 8);
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if c < '\x20' => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// 进程名归因：QNX/topgpu/ligfx 显示名可能完整（包名>15字符），/proc/comm 截断到 15 字符。
+/// 匹配策略：先精确匹配，失败则截断到 15 字符再匹配。
+fn lookup_pid(pid_names: &std::collections::HashMap<String, u32>, name: &str) -> Option<u32> {
+    pid_names.get(name).copied().or_else(|| {
+        let truncated = &name[..name.len().min(15)];
+        pid_names.get(truncated).copied()
+    })
 }
 
 fn emit(line: &str) {
@@ -1086,7 +1108,7 @@ fn main() {
                                         now_ms(), busy, util, mhz, maxmhz
                                     )),
                                     Some(QnxGpuSample::Proc { name, busy }) => {
-                                        let pid = pid_names2.lock().unwrap().get(&name).copied();
+                                        let pid = lookup_pid(&pid_names2.lock().unwrap(), &name);
                                         if let Some(pid) = pid {
                                             emit(&format!(
                                                 "{{\"t\":\"gpuproc\",\"ts\":{},\"pid\":{},\"busy\":{:.2}}}",
@@ -1175,7 +1197,7 @@ fn main() {
                                     "{{\"t\":\"gpu\",\"ts\":{},\"busy\":{:.2},\"mhz\":0}}", now_ms(), busy
                                 )),
                                 Some(TopGpuSample::Proc(name, busy)) => {
-                                    let pid = pid_names2.lock().unwrap().get(&name).copied();
+                                    let pid = lookup_pid(&pid_names2.lock().unwrap(), &name);
                                     if let Some(pid) = pid {
                                         emit(&format!(
                                             "{{\"t\":\"gpuproc\",\"ts\":{},\"pid\":{},\"busy\":{:.2}}}",
@@ -1210,7 +1232,7 @@ fn main() {
                                     now_ms(), busy, util, mhz
                                 )),
                                 Some(LigfxSample::Proc { name, busy, util: _ }) => {
-                                    let pid = pid_names2.lock().unwrap().get(&name).copied();
+                                    let pid = lookup_pid(&pid_names2.lock().unwrap(), &name);
                                     if let Some(pid) = pid {
                                         emit(&format!(
                                             "{{\"t\":\"gpuproc\",\"ts\":{},\"pid\":{},\"busy\":{:.2}}}",

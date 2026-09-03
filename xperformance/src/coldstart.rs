@@ -27,8 +27,8 @@ pub struct ColdStartResult {
 /// 执行 am start -W 并解析结果。activity 格式：".MainActivity" 或完整类名
 pub fn measure(package: &str, activity: &str) -> Result<ColdStartResult> {
     let component = format!("{}/{}", package, activity);
-    let output = Command::new("adb")
-        .args(["shell", "am", "start", "-W", &component])
+    let output = Command::new("timeout")
+        .args(["15", "adb", "shell", "am", "start", "-W", &component])
         .output()?;
     let stdout = String::from_utf8_lossy(&output.stdout);
     parse_am_start_w(&stdout, &component)
@@ -44,12 +44,15 @@ fn parse_am_start_w(output: &str, component: &str) -> Result<ColdStartResult> {
         let line = line.trim();
         if let Some(v) = line.strip_prefix("Status:") { status = v.trim().into(); }
         else if let Some(v) = line.strip_prefix("Activity:") { activity = v.trim().into(); }
-        else if let Some(v) = line.strip_prefix("ThisTime:") { this_time = v.trim().parse().unwrap_or(0); }
-        else if let Some(v) = line.strip_prefix("TotalTime:") { total_time = v.trim().parse().unwrap_or(0); }
-        else if let Some(v) = line.strip_prefix("WaitTime:") { wait_time = v.trim().parse().unwrap_or(0); }
+        else if let Some(v) = line.strip_prefix("ThisTime:") { this_time = v.trim().parse().map_err(|_| anyhow::anyhow!("ThisTime 解析失败: {}", v))?; }
+        else if let Some(v) = line.strip_prefix("TotalTime:") { total_time = v.trim().parse().map_err(|_| anyhow::anyhow!("TotalTime 解析失败: {}", v))?; }
+        else if let Some(v) = line.strip_prefix("WaitTime:") { wait_time = v.trim().parse().map_err(|_| anyhow::anyhow!("WaitTime 解析失败: {}", v))?; }
     }
     if status.is_empty() {
         anyhow::bail!("am start -W 无输出（组件 {} 可能不存在或无法启动）\n原始输出:\n{}", component, output);
+    }
+    if status != "ok" {
+        anyhow::bail!("am start -W 失败（Status: {}）\n原始输出:\n{}", status, output);
     }
     Ok(ColdStartResult { activity, this_time_ms: this_time, total_time_ms: total_time, wait_time_ms: wait_time, status })
 }
@@ -87,5 +90,11 @@ mod tests {
     #[test]
     fn test_parse_empty() {
         assert!(parse_am_start_w("no output", "x/.y").is_err());
+    }
+
+    #[test]
+    fn test_parse_error_status() {
+        let out = "Starting: Intent { cmp=x/.y }\nStatus: error\nActivity: x/.y\n";
+        assert!(parse_am_start_w(out, "x/.y").is_err());
     }
 }

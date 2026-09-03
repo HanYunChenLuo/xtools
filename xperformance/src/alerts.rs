@@ -21,17 +21,28 @@ pub struct Threshold {
 pub struct AlertStats {
     /// 规则 → (触发次数, 最近一次触发时间)
     pub triggers: HashMap<String, (u32, String)>,
-    /// 规则 → 最大观测值
-    pub max_observed: HashMap<String, f32>,
+    /// 规则 → 极值（> 规则记最大观测值，< 规则记最小观测值）
+    pub extremes: HashMap<String, f32>,
+    /// 规则 → 操作符（用于决定极值方向）
+    pub ops: HashMap<String, char>,
 }
 
 impl AlertStats {
-    pub fn record(&mut self, rule: &str, value: f32, time: &str) {
+    pub fn record(&mut self, rule: &str, value: f32, time: &str, op: char) {
         let e = self.triggers.entry(rule.into()).or_default();
         e.0 += 1;
         e.1 = time.into();
-        let m = self.max_observed.entry(rule.into()).or_insert(f32::MIN);
-        if value > *m { *m = value; }
+        self.ops.insert(rule.into(), op);
+        let m = self.extremes.entry(rule.into()).or_insert(match op {
+            '>' => f32::MIN,
+            '<' => f32::MAX,
+            _ => 0.0,
+        });
+        match op {
+            '>' => { if value > *m { *m = value; } }
+            '<' => { if value < *m { *m = value; } }
+            _ => {}
+        }
     }
 }
 
@@ -82,15 +93,16 @@ pub fn generate_report(thresholds: &[Threshold], stats: &AlertStats) -> String {
     let mut all_pass = true;
     for t in thresholds {
         let triggers = stats.triggers.get(&t.raw).map(|(n, _)| *n).unwrap_or(0);
-        let max_val = stats.max_observed.get(&t.raw).copied().unwrap_or(0.0);
+        let extreme = stats.extremes.get(&t.raw).copied().unwrap_or(0.0);
         let last_time = stats.triggers.get(&t.raw).map(|(_, t)| t.as_str()).unwrap_or("-");
         let pass = triggers == 0;
         if !pass { all_pass = false; }
+        let extreme_label = match t.op { '>' => "峰值", '<' => "谷值", _ => "极值" };
         lines.push(format!(
-            "  {} {} {} → {} (触发 {} 次, 峰值 {:.1}, 最近 {})",
+            "  {} {} {} → {} (触发 {} 次, {} {:.1}, 最近 {})",
             t.metric, t.op, t.value,
             if pass { "✅ 达标" } else { "❌ 超标" },
-            triggers, max_val, last_time
+            triggers, extreme_label, extreme, last_time
         ));
     }
     lines.push(format!("  总结论: {}", if all_pass { "✅ 全部达标" } else { "❌ 存在超标" }));
@@ -138,10 +150,20 @@ mod tests {
     fn test_report_fail() {
         let t = parse_thresholds(&["cpu>80".into()]);
         let mut stats = AlertStats::default();
-        stats.record("cpu>80", 85.0, "12:00:00");
+        stats.record("cpu>80", 85.0, "12:00:00", '>');
         let report = generate_report(&t, &stats);
         assert!(report.contains("❌ 超标"));
         assert!(report.contains("触发 1 次"));
         assert!(report.contains("峰值 85.0"));
+    }
+
+    #[test]
+    fn test_report_less_than() {
+        let t = parse_thresholds(&["fps<30".into()]);
+        let mut stats = AlertStats::default();
+        stats.record("fps<30", 15.0, "12:00:00", '<');
+        let report = generate_report(&t, &stats);
+        assert!(report.contains("❌ 超标"));
+        assert!(report.contains("谷值 15.0"));
     }
 }
