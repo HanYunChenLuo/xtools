@@ -7,6 +7,42 @@
 
 ---
 
+## 2026-09-03（三）晚二 — perfetto `--trace N` 深挖模式
+
+**任务线**：WORKSPACE C 类第二项——perfetto 深挖模式（2026-09-01 已验证可行性，本轮落地为产品功能）。
+
+### Commits
+
+| commit | 内容 |
+|--------|------|
+| （本条目补 hash） | xperformance/src/trace.rs 新模块：录制 + trace_processor 定位/引导 + SQL 分析 + 报告；main.rs 集成 `--trace N`（独立/并行两模式 + 限时采样）；xperf-core utils 加 `is_interrupted()` |
+
+### 完成内容
+
+- **先实测后编码**：SS3 真机先录 10s trace 逐条验证 SQL（sched/thread_state 状态码 R/R+/Running/S/D、process 表 full name、cpu_counter_track、actual_frame_timeline_slice、多语句 -q 文件的输出格式），全部通过才写代码
+- 录制链路：`adb shell perfetto -c - --txt -o /data/misc/perfetto-traces/xperf_<ts>.pftrace`（stdin 喂 text proto，v15.0 实测可行）；`write_into_file: true` + 2s 刷盘（实测录制中文件持续增长，长录制内存有界）；录完 pull 到 `log/<pkg>/<ts>/trace/` 并清理设备端
+- trace_processor 定位链：官方缓存 `~/.local/share/perfetto/prebuilts/trace_processor_shell*` → PATH → /tmp 自举脚本 → 均无从 get.perfetto.dev 下载引导；分析失败不致命（trace 已保存，提示 ui.perfetto.dev）
+- SQL 分析：单文件多语句单次执行（trace 只加载一次）+ marker 分段 + `===END===` 哨兵；**实测查询出错会中止整个文件后续语句** → 按"表必然存在 → 可能缺失"排序，帧时间线殿后；[NULL] 值、quote-aware CSV 解析、空段登记（区分"空数据"与"未执行到"）均有单测
+- 报告段：trace 窗口（boot 基线）、包 CPU 总量（单核口径 % 窗口）、包线程 CPU top15、抢占/调度延迟（thread_state R/R+）、系统 CPU top（upid=0 桶标"内核线程"）、每核 busy/切换、CPU 频率（SS3 GVM 无 cpufreq ftrace 事件，如实标注）、帧时间线全局统计 + 最差 5 帧；产物 .pftrace + trace_analysis.txt + trace_queries.sql 同目录留存
+- CLI 两模式：`--trace 10` 独立（无指标 flag 时只录 trace，注册 Ctrl-C handler）；`--cpu --trace 10` 并行（后台线程录制 + 采样限时同窗口，到点自动结束，采样/图表/CSV 正常产出后 join 分析）
+- Ctrl-C 修复（真机发现）：SIGINT 杀整个前台进程组 → adb 一并死，原先误报"录制失败: [659 Connected...]"且前缀重复两遍 → 区分信号中断（ExitStatusExt::signal）与失败退出码，消息改为"录制被中断 + 设备残留路径（traced TTL 后停止写入，可手动 pull）"；等待循环查 `is_interrupted()` 提前放弃
+- 验证（SS3 全 6 场景）：独立 10s（11.8MB，包线程毫秒级明细全出）、并行 10s（限时结束/同目录/图表共存）、并行 Ctrl-C、独立 Ctrl-C、不存在的包（"无调度事件"如实上报）、1s 极限窗口；60s 长录制的超时/中断路径已有兜底（duration+25s 手动超时）
+- 测试 67 全绿（新增 6：config 字段/SQL 转义与排序/CSV 解析/sections 解析/[NULL]/报告渲染），clippy 零警告
+
+### 关键结论与基线
+
+- v15.0 配置坑：ProcessStatsConfig 的 `scan_period_ms`/`proc_stats_poll_period_ms` 字段都不存在，省略子配置用默认值即可（进程/线程全名映射正常）
+- SS3 GVM 无 `cpu_frequency` ftrace 事件（`/sys/kernel/tracing/events/cpu_frequency` 不存在，只有 devfreq）——trace 里频率段恒空，如实标注；实时频率走 agent `--freq`（sysfs 可读）
+- trace_processor 多语句输出：结果集 = 表头 + 数据行 + 空行；查询失败 abort 整文件剩余语句且退出码非零，但已完成语句的 stdout 仍有效（只要非空就继续解析）
+- 10s trace ≈ 11.8MB / sched ~14 万事件；帧时间线 231 帧无归属（与 2026-09-01 结论一致）；adb pull root 0600 文件 OK（adbd root）
+
+### 遗留问题
+
+- 长录制（>60s）超时/中断路径未真机实测（有兜底逻辑）；600s 上限内 write_into_file 理论无内存问题
+- simpleperf 调用栈采样（"CPU 高在哪个函数"）为下轮 C 类候选
+
+---
+
 ## 2026-09-03（三）下午 — SS3 QNX 通道真机回归：发现并修复 kgsl 统计链停滞
 
 **任务线**：WORKSPACE 遗留项——SS3 设备在线，补 gpu/qnx.rs 拆分后的真机回归。

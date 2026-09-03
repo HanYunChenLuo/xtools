@@ -92,6 +92,11 @@ pub fn set_interrupt_flag() {
     INTERRUPT_FLAG.store(true, AtomicOrdering::SeqCst);
 }
 
+/// 是否已收到 Ctrl-C（set_interrupt_flag 置位）
+pub fn is_interrupted() -> bool {
+    INTERRUPT_FLAG.load(AtomicOrdering::SeqCst)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

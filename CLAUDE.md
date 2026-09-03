@@ -158,6 +158,18 @@ Platform trait + `adb devices -l` product 字段自动检测（HU_SS3/HU_SS2MAXF
 - `--cold-start .MainActivity`：am start -W 解析（30s 超时，status!=ok 报错）
 - 打点：CLI Unix socket `/tmp/xperf-marker.sock`（`echo 标签 | nc -U ...`，每连接线程+10s 读超时）或 GUI 按钮 → 图表竖线 + markers.csv
 
+### perfetto 深挖模式（`--trace N`，xperformance/src/trace.rs）
+
+「录制-分析」模式，与实时采样互补：采样回答"什么时候高"，trace 回答"为什么高"。可与采样指标并行（`--cpu --trace 10`：后台线程录制 + 采样限时同窗口，到点自动结束）或单独使用（无指标 flag 时只录 trace）。
+
+- **录制链路**：`adb shell perfetto -c - --txt -o /data/misc/perfetto-traces/xperf_<ts>.pftrace`，配置经 stdin 喂入（text proto）；`write_into_file: true` + 2s 刷盘（v15.0 实测流式落盘可用，长录制内存有界）；数据源 = ftrace（sched_switch/sched_waking/cpu_frequency/sched_process_exit）+ process_stats（进程/线程名映射）+ frametimeline。录完 adb pull 到 `log/<pkg>/<ts>/trace/` 并清理设备端文件。
+- **trace_processor 定位链**：`~/.local/share/perfetto/prebuilts/trace_processor_shell*`（get.perfetto.dev 官方脚本缓存）→ PATH → `/tmp/trace_processor`（自举脚本）→ 均无则从 get.perfetto.dev 下载引导。分析失败不致命（trace 文件已保存，提示 ui.perfetto.dev 手动分析）。
+- **SQL 分析**：全部查询写一个文件单次执行（trace 只加载一次），marker 查询 `select '===段名===' as m;` 分段，结尾 `===END===` 哨兵判断执行完整性。**查询出错会中止整个文件后续语句**，故按"表必然存在 → 可能缺失"排序，帧时间线表殿后。输出为"表头+数据行+空行"的 CSV 结果集序列，[NULL] 值需按空处理。
+- **报告段**（trace_analysis.txt + trace_queries.sql 同目录留存）：trace 窗口/boot 基线、包 CPU 总量（单核口径 % 窗口）、包线程 CPU 时间 top15、抢占/调度延迟（thread_state R/R+：唤醒→上核的 runnable 时间）、系统 CPU top（upid=0 桶标注"内核线程"）、每核 busy/切换次数、CPU 频率（**SS3 GVM 无 cpufreq ftrace 事件，如实标注**，实时值用 --freq）、帧时间线全局统计+最差 5 帧（此平台无进程/图层归属，与 agent 图层 FPS 互补）。
+- **Ctrl-C 语义**：SIGINT 发给整个前台进程组 → adb 被一并杀死（退出码为信号）→ 与非零 code 区分，报"录制被中断 + 设备残留路径"；采样产物不受影响。独立模式注册 handler 优雅退出，录制等待循环查 `xperf_core::utils::is_interrupted()` 可提前放弃。
+- **实测基线（SS3）**：10s trace ≈ 11.8MB、sched ~14 万事件；svm 空闲时包内仍可见线程级毫秒级 CPU/抢占明细；不存在的包名 → "无调度事件"如实上报；1s 极限窗口正常。
+
+
 ---
 
 ### agent（设备端采样器，xperf-agent）
@@ -198,6 +210,7 @@ Platform trait + `adb devices -l` product 字段自动检测（HU_SS3/HU_SS2MAXF
 | 内存图表（每 PID + 汇总） | 同上 | `log/<pkg>/<ts>/memory/` |
 | 线程时序图 | `--thread --cpu`，退出时有数据 | `log/<pkg>/<ts>/thread/` |
 | B 类图表（freq 每核/temp 每传感器/io 每 PID/net/gpu） | 退出时对应序列 > 1 点 | `log/<pkg>/<ts>/{freq,thermal,io,net,gpu}/` |
+| perfetto 深挖（--trace N） | 录制完成即拉回；分析随即落盘 | `log/<pkg>/<ts>/trace/{*.pftrace, trace_analysis.txt, trace_queries.sql}` |
 
 - 内存中的时序序列只服务退出图表：超过 2×30k 点时每 2 取 1 原地抽稀（`CHART_SERIES_CAP`，保完整时间范围、分辨率随运行时长自适应降级）；CSV 始终全量。
 - `CpuTimeSeriesData.top_threads` 已无读者，CLI agent 路径不再写入（线程明细走 thread_time_series + 流式 CSV）。
