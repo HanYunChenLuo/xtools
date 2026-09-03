@@ -14,7 +14,7 @@
 - 落盘：CLI 流式 CSV（csv_escape 转义）+ 退出图表；GUI 完整历史 + CSV 导出
 - GUI：9 张折线图 + 实时数值面板 + Top 线程 + 峰值 + 间隔档位下拉 + 实际周期标注 + 勾选即时生效（自动重启会话）+ 打点竖线
 - agent 部署：自动尝试 adb root（IO 等需 root）；src 树内任一 .rs mtime 变化自动重建
-- 测试：**60 全绿**（agent 23 个测试随模块迁移），clippy 零警告
+- 测试：**61 全绿**（agent 24 个：解析 + watchdog_step 决策），clippy 零警告
 - 设备：SS3 6eb792dfb0f（adbd root，QNX GPU 通道**已真机回归**，见 D-2）；SS2MAX d1f39648c1f（adb root 可用，IO/kgsl/44 温度传感器已验证；gpubusy 计数器停走属数据源限制）
 
 ---
@@ -45,7 +45,7 @@
 ## E. 已知遗留（评估过，低风险不阻塞）
 
 - SS2MAX GPU 显存无数据源（dumpsys gpu 无 Memory snapshot 段 + debugfs 不存在，平台限制）
-- SS3 kgsl 统计链（见 D-2/CLAUDE.md）：三层清理已落地（agent 退出钩子 + setsid + host 条件兜底），SIGINT/Ctrl-C/正常退出路径真机验证停链成功、下一会话零自愈即起流；残余风险仅 agent 被 SIGKILL 暴杀（无钩子机会）与 reboot 后首会话（开机 5000ms 链在流，走一次看门狗自愈 ~8s）
+- SS3 kgsl 统计链（见 D-2/CLAUDE.md）：三层清理已落地（agent 退出钩子 + setsid + host 条件兜底，**均带 pgrep 多会话并发保护**），SIGINT/Ctrl-C/正常退出路径真机验证停链成功、下一会话零自愈即起流；残余风险仅 agent 被 SIGKILL 暴杀（无钩子机会）与 reboot 后首会话（开机 5000ms 链在流，走一次看门狗自愈 ~8s）
 - SS2MAX gpubusy 计数器恒 `0 0`（2026-09-03 实测 30 次采样全零，total_time 停走 → kgsl busy 通道无事件；gpuclk 正常 427MHz）——数据源限制，新旧 agent 行为一致
 - SS4 ligfx Frequency 单位待真机核实（Hz vs MHz）
 - 多设备连接时所有 adb 命令不带 -s 会失败——**理由修正（五轮 review）**：设备清单本就有 SS3/SS2MAX 两台，"单设备场景"不成立，同时连两台时全工具链失效；修复需 adb 调用全局加 -s（serial 来自初始 devices -l 检测），列为候补
@@ -57,7 +57,7 @@
 
 ## 已完成
 
-- ✅ SS3 QNX 通道真机回归 + kgsl 统计链停滞修复：fd3 长活连接写入 / 行级去重 / 看门狗自愈（2026-09-03）
+- ✅ SS3 QNX 通道真机回归 + 五轮 review 修复链（2026-09-03）：回归发现 kgsl 统计链停滞 bug；后续 review 连续翻案产出——fd3 活连接写入/行去重/看门狗（3 连续缺失+纯函数单测）/心跳空行探活/三层链清理（退出钩子+setsid+host 条件兜底）/pgrep 多会话并发保护。全部真机验证（commit 明细见 SESSION.md 当日条目）
 - ✅ agent 模块化拆分：1848 行单文件 → 10 文件（proc/mem/fps/thermal/gpu 五通道），公共 spawn_stream_parser，host 侧 mtime 检查同步修复（531798a + 99d1b74）
 - ✅ 平台抽象层：5 平台 trait + 自动检测 + agent 参数传递（2058fcc）
 - ✅ 各平台 GPU 通道实现：topgpu/ligfxprofilerd/kgsl（58ceae5）
