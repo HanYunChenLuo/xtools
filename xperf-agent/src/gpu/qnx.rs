@@ -1,6 +1,7 @@
 //! QNX host 通道（SS3/8295）：GPU 由 QNX host 管理，GVM 内无 kgsl 任何节点。
-//! busybox telnet 登录 QNX（root 免密）→ 写 /dev/kgsl-control 开统计 →
+//! busybox telnet 登录 QNX（root 免密）→ exec 3> 长活连接写 /dev/kgsl-control 开统计 →
 //! slog2info -W 流式读 kgsl slog（-W 不回放历史，-w 会先倒 backlog；grep 挡 VHAL 刷屏）。
+//! 统计链为驱动全局且不随会话清理：多链锁步产生重复行（按上一行去重），看门狗兜底停走。
 //! 读线程独立于节拍循环，不占用采样轮。
 
 use super::{spawn_stream_parser, GpuEvent};
@@ -8,6 +9,7 @@ use crate::emit;
 use std::collections::HashMap;
 use std::fs;
 use std::io::Write;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -122,11 +124,16 @@ fn spawn_qnx_gpu(period_ms: u64) -> Option<(std::process::Child, std::process::C
         read_until(&mut reader, "login:", deadline)?;
         stdin.write_all(b"root\n").ok()?;
         read_until(&mut reader, "# ", deadline)?;
+        // 写入必须走 exec 3> 的长活连接（写入时连接存活 → 统计链重相位后持续输出）；
+        // echo > 式即开即死连接撞上存量链时，链只 flush 一个窗口即停（真机实测）。
+        // 注意：管道必须后台执行（&）。前台时 shell 阻塞在管道上，
+        // 看门狗自愈写入的命令会滞留 tty 缓冲永不执行。
         let cmds = format!(
-            "echo gpu_set_log_level 4 > /dev/kgsl-control\n\
-             echo gpubusystats {} > /dev/kgsl-control\n\
-             echo gpu_per_process_busy {} > /dev/kgsl-control\n\
-             slog2info -W | grep kgsl\n",
+            "exec 3>/dev/kgsl-control\n\
+             echo gpu_set_log_level 4 >&3\n\
+             echo gpubusystats {} >&3\n\
+             echo gpu_per_process_busy {} >&3\n\
+             slog2info -W | grep kgsl &\n",
             period_ms, period_ms
         );
         stdin.write_all(cmds.as_bytes()).ok()?;
@@ -144,16 +151,94 @@ fn spawn_qnx_gpu(period_ms: u64) -> Option<(std::process::Child, std::process::C
 pub(super) fn start(interval_ms: u64, pid_names: &Arc<Mutex<HashMap<String, u32>>>) {
     let period = interval_ms.clamp(100, 1000);
     match spawn_qnx_gpu(period) {
-        Some((child, stdin, reader)) => spawn_stream_parser(
-            child,
-            reader,
-            Some(stdin),
-            Some("QNX GPU 流断开，--gpu 停止"),
-            pid_names,
-            parse_line,
-        ),
+        Some((child, stdin, reader)) => {
+            // stdin 共享：读线程持有保活，看门狗锁定自愈重写
+            let stdin = Arc::new(Mutex::new(stdin));
+            // Sys（frame）样本计数：看门狗据此检测 busy 窗口流停走
+            let sys_count = Arc::new(AtomicU64::new(0));
+            // kgsl 统计链是驱动全局的，且每次写入会叠加/重相位一条链（会话死亡不清理，
+            // 直到整机重启）。多条链锁步时同一行会重复出现 N 份——按"与上一行完全相同"
+            // 去重（Sys 与 Proc 各记上一条；链锁步时重复行总是相邻）。
+            let dedupe = Arc::new(Mutex::new((String::new(), String::new())));
+            let (cnt, ded) = (sys_count.clone(), dedupe.clone());
+            let parse = move |line: &str| {
+                let ev = parse_line(line);
+                match &ev {
+                    Some(GpuEvent::Sys { .. }) => {
+                        let mut d = ded.lock().unwrap();
+                        if d.0 == line {
+                            return None; // 锁步链重复行
+                        }
+                        d.0 = line.to_string();
+                        cnt.fetch_add(1, Ordering::Relaxed);
+                    }
+                    Some(GpuEvent::Proc { .. }) => {
+                        let mut d = ded.lock().unwrap();
+                        if d.1 == line {
+                            return None;
+                        }
+                        d.1 = line.to_string();
+                    }
+                    None => {}
+                }
+                ev
+            };
+            spawn_stream_parser(
+                child,
+                reader,
+                Some(stdin.clone()),
+                Some("QNX GPU 流断开，--gpu 停止"),
+                pid_names,
+                parse,
+            );
+            spawn_watchdog(period, stdin, sys_count);
+        }
         None => emit("{\"t\":\"err\",\"msg\":\"QNX 通道启动失败（telnet 登录或 kgsl 统计开启失败），--gpu 停止\"}"),
     }
+}
+
+/// QNX kgsl 统计链看门狗（2026-09-03 真机实测的行为兜底）：
+/// - 统计链为驱动全局，会话/fd 关闭都不清理；echo> 式死写入者撞存量链只 flush 一窗即停
+/// - 长活连接（exec 3>）写入时连接存活 → 存量链全部重相位（计数归零）后持续输出
+///
+/// 正常路径下 fd3 活写入后 frame 流持续，看门狗不动作；若未知状态导致 frame 流静默
+/// 超宽限期，通过同一会话的 fd3 重写 gpubusystats 自愈（重相位走活写入者路径）。
+/// 写入失败（读线程已 kill telnet）即退出；恢复后 retries 归零。
+fn spawn_watchdog(period_ms: u64, stdin: Arc<Mutex<std::process::ChildStdin>>, sys_count: Arc<AtomicU64>) {
+    std::thread::spawn(move || {
+        let period = Duration::from_millis(period_ms);
+        // 启动宽限：telnet 登录 + slog2info 起流 + 首个窗口完成需 2~3s
+        let start = Instant::now();
+        let grace = period * 2 + Duration::from_secs(3);
+        let mut last = 0u64;
+        let mut retries = 0u32;
+        loop {
+            std::thread::sleep(period);
+            let c = sys_count.load(Ordering::Relaxed);
+            if c > last {
+                last = c;
+                retries = 0;
+                continue;
+            }
+            if Instant::now() - start < grace {
+                continue; // 流尚未出首样，不判断停走
+            }
+            if retries >= 3 {
+                return; // 自愈无效，等主机侧重连重建通道
+            }
+            retries += 1;
+            emit(&format!(
+                "{{\"t\":\"err\",\"msg\":\"QNX GPU frame 流停走，经 fd3 重写 gpubusystats 自愈（第 {} 次）\"}}",
+                retries
+            ));
+            let Ok(mut w) = stdin.lock() else { return };
+            if w.write_all(format!("echo gpubusystats {} >&3\n", period_ms).as_bytes()).is_err() {
+                return; // 通道已断（读线程已 kill 子进程），看门狗退出
+            }
+            // 重相位后首个窗口完成需 ~1-2s，期间不重复检查
+            std::thread::sleep(period * 3);
+        }
+    });
 }
 
 #[cfg(test)]
