@@ -1,11 +1,12 @@
-use crate::utils;
-use anyhow::Result;
+//! 内存数据类型（采样逻辑已迁移至 xperf-agent 设备端实现，本文件只保留协议类型）
+
+use crate::CHART_SERIES_CAP;
 use chrono::{DateTime, Local};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 
-// 定义内存详细类别结构
-#[derive(Debug, Clone, Default, Serialize)]
+/// 进程内存分类明细（dumpsys meminfo App Summary，单位 KB）
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct MemoryDetails {
     pub java_heap: u64,
     pub native_heap: u64,
@@ -17,7 +18,8 @@ pub struct MemoryDetails {
     pub total_pss: u64,
 }
 
-#[derive(Debug, Clone, Default)]
+/// 内存时序（抽稀上限由 CHART_SERIES_CAP 控制）
+#[derive(Default)]
 pub struct MemoryTimeSeriesData {
     pub timestamps: VecDeque<DateTime<Local>>,
     pub memory_details: VecDeque<MemoryDetails>,
@@ -25,160 +27,11 @@ pub struct MemoryTimeSeriesData {
 
 impl MemoryTimeSeriesData {
     pub fn add_data_point(&mut self, timestamp: DateTime<Local>, details: MemoryDetails) {
-        if self.timestamps.len() >= 2 * crate::CHART_SERIES_CAP {
+        if self.timestamps.len() >= 2 * CHART_SERIES_CAP {
             crate::decimate(&mut self.timestamps);
             crate::decimate(&mut self.memory_details);
         }
         self.timestamps.push_back(timestamp);
         self.memory_details.push_back(details);
-    }
-}
-
-pub async fn sample_memory(pid: &str) -> Result<(u64, DateTime<Local>, MemoryDetails)> {
-    let timestamp = Local::now();
-    let output = utils::run_adb_command(&["shell", "dumpsys", "meminfo", pid])?.stdout;
-
-    // 进程死亡时 dumpsys meminfo 输出空或报错文本（如 "No process found"），
-    // 返回 Err 让调用方走 PidDisappeared 路径
-    if output.trim().is_empty() || output.contains("No process") || output.contains("No such process") {
-        anyhow::bail!("Process not found for pid: {}", pid);
-    }
-
-    let mut total_pss = 0;
-    let mut memory_details = MemoryDetails::default();
-    let mut in_app_summary = false;
-    let mut header_passed = false; // 用于跳过标题行
-
-    // 解析App Summary部分
-    for line in output.lines() {
-        let line = line.trim();
-
-        // 检测App Summary部分开始
-        if line.contains("App Summary") {
-            in_app_summary = true;
-            continue;
-        }
-
-        // 跳过PSS/RSS标题行
-        if in_app_summary && (line.contains("Pss(KB)") || line.contains("------")) {
-            header_passed = line.contains("------");
-            continue;
-        }
-
-        // 如果已经过了App Summary部分，则退出解析
-        if in_app_summary && line.is_empty() {
-            in_app_summary = false;
-            continue;
-        }
-
-        // 解析App Summary部分的内存信息
-        if in_app_summary && header_passed {
-            let parts: Vec<&str> = line.split(':').collect();
-            if parts.len() >= 2 {
-                let category = parts[0].trim();
-                let values: Vec<&str> = parts[1].split_whitespace().collect();
-
-                if !values.is_empty() {
-                    if let Ok(kb) = values[0].parse::<u64>() {
-                        match category {
-                            "Java Heap" => memory_details.java_heap = kb,
-                            "Native Heap" => memory_details.native_heap = kb,
-                            "Code" => memory_details.code = kb,
-                            "Stack" => memory_details.stack = kb,
-                            "Graphics" => memory_details.graphics = kb,
-                            "Private Other" => memory_details.private_other = kb,
-                            "System" => memory_details.system = kb,
-                            "TOTAL" | "TOTAL PSS" => {
-                                memory_details.total_pss = kb;
-                                total_pss = kb;
-                            }
-                            _ => {} // 忽略其他类别
-                        }
-                    }
-                }
-            }
-        }
-
-        // 如果不在App Summary中，仍然需要查找TOTAL PSS作为备用
-        if !in_app_summary && line.starts_with("TOTAL PSS:") {
-            let parts: Vec<&str> = line.split_whitespace().collect();
-            if parts.len() >= 3 {
-                if let Ok(kb) = parts[2].parse::<u64>() {
-                    total_pss = kb;
-                    if memory_details.total_pss == 0 {
-                        memory_details.total_pss = kb;
-                    }
-                }
-            }
-        }
-    }
-
-    Ok((total_pss, timestamp, memory_details))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// 模拟 `adb shell dumpsys meminfo <pid>` 的 App Summary 输出
-    fn meminfo_output() -> &'static str {
-        "\
-TOTAL PSS:    453901
-TOTAL SWAP PSS:      0
-
--------- App Summary --------
-                           Pss(KB)
-                           ------
-        Java Heap:     7268
-       Native Heap:   116908
-              Code:    37100
-             Stack:      512
-          Graphics:        0
-     Private Other:    12000
-            System:   280113
-
-           TOTAL PSS:   453901
-"
-    }
-
-    fn meminfo_runner(args: &[&str]) -> anyhow::Result<crate::utils::ProcOutput> {
-        // dumpsys meminfo <pid>
-        if args.len() >= 4 && args[1] == "dumpsys" && args[2] == "meminfo" {
-            return Ok(crate::utils::ProcOutput {
-                stdout: meminfo_output().to_string(),
-            });
-        }
-        Ok(crate::utils::ProcOutput { stdout: String::new() })
-    }
-
-    #[tokio::test]
-    async fn test_sample_memory_parses_app_summary() {
-        let _lock = crate::utils::ADB_TEST_LOCK.lock().await;
-        crate::utils::set_adb_runner_for_test(meminfo_runner);
-        let (total_pss, _ts, details) = sample_memory("15803").await.unwrap();
-        assert_eq!(total_pss, 453901);
-        assert_eq!(details.java_heap, 7268);
-        assert_eq!(details.native_heap, 116908);
-        assert_eq!(details.code, 37100);
-        assert_eq!(details.stack, 512);
-        assert_eq!(details.graphics, 0);
-        assert_eq!(details.private_other, 12000);
-        assert_eq!(details.system, 280113);
-        assert_eq!(details.total_pss, 453901);
-        crate::utils::clear_adb_runner_for_test();
-    }
-
-    /// 进程不存在时 dumpsys 输出空 → total_pss 保持 0
-    fn empty_runner(_args: &[&str]) -> anyhow::Result<crate::utils::ProcOutput> {
-        Ok(crate::utils::ProcOutput { stdout: String::new() })
-    }
-
-    #[tokio::test]
-    async fn test_sample_memory_empty_output_returns_err() {
-        let _lock = crate::utils::ADB_TEST_LOCK.lock().await;
-        crate::utils::set_adb_runner_for_test(empty_runner);
-        // 空输出（进程死亡）→ Err（区分"进程死"与"内存=0"）
-        assert!(sample_memory("99999").await.is_err());
-        crate::utils::clear_adb_runner_for_test();
     }
 }
