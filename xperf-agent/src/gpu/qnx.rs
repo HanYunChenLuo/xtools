@@ -201,9 +201,12 @@ pub(super) fn start(interval_ms: u64, pid_names: &Arc<Mutex<HashMap<String, u32>
 /// - 统计链为驱动全局，会话/fd 关闭都不清理；echo> 式死写入者撞存量链只 flush 一窗即停
 /// - 长活连接（exec 3>）写入时连接存活 → 存量链全部重相位（计数归零）后持续输出
 ///
-/// 正常路径下 fd3 活写入后 frame 流持续，看门狗不动作；若未知状态导致 frame 流静默
-/// 超宽限期，通过同一会话的 fd3 重写 gpubusystats 自愈（重相位走活写入者路径）。
-/// 写入失败（读线程已 kill telnet）即退出；恢复后 retries 归零。
+/// 正常路径下 fd3 活写入后 frame 流持续，看门狗不动作；若未知状态导致 frame 流静默，
+/// 通过同一会话的 fd3 重写 gpubusystats 自愈（重相位走活写入者路径）。
+/// 判定须连续 3 个周期无新样本：实测窗口周期 ~1001.5ms 略长于检查周期 1000ms，
+/// 相位每周期漂移 ~1.5ms，长会话中单次缺失是正常漂移（约每 11 分钟必现一次），
+/// 3 连续缺失（3 秒级无任何窗口完成）才构成真停走。
+/// 先尝试写入、成功才报自愈（通道已断时静默退出，不产生误导 err）；恢复后计数归零。
 fn spawn_watchdog(period_ms: u64, stdin: Arc<Mutex<std::process::ChildStdin>>, sys_count: Arc<AtomicU64>) {
     std::thread::spawn(move || {
         let period = Duration::from_millis(period_ms);
@@ -211,30 +214,40 @@ fn spawn_watchdog(period_ms: u64, stdin: Arc<Mutex<std::process::ChildStdin>>, s
         let start = Instant::now();
         let grace = period * 2 + Duration::from_secs(3);
         let mut last = 0u64;
-        let mut retries = 0u32;
+        let mut misses = 0u32; // 连续无新 frame 的检查次数
+        let mut heals = 0u32; // 自愈次数（恢复后归零，长会话可反复自愈）
         loop {
             std::thread::sleep(period);
             let c = sys_count.load(Ordering::Relaxed);
             if c > last {
                 last = c;
-                retries = 0;
+                misses = 0;
+                heals = 0;
                 continue;
             }
             if Instant::now() - start < grace {
                 continue; // 流尚未出首样，不判断停走
             }
-            if retries >= 3 {
-                return; // 自愈无效，等主机侧重连重建通道
+            misses += 1;
+            if misses < 3 {
+                continue; // 单次缺失多为窗口相位漂移，不动作
             }
-            retries += 1;
+            if heals >= 3 {
+                return; // 连续自愈无效，等主机侧重连重建通道
+            }
+            heals += 1;
+            misses = 0;
+            let cmd = format!("echo gpubusystats {} >&3\n", period_ms);
+            {
+                let Ok(mut w) = stdin.lock() else { return };
+                if w.write_all(cmd.as_bytes()).is_err() {
+                    return; // 通道已断（读线程已 kill 子进程），静默退出
+                }
+            }
             emit(&format!(
                 "{{\"t\":\"err\",\"msg\":\"QNX GPU frame 流停走，经 fd3 重写 gpubusystats 自愈（第 {} 次）\"}}",
-                retries
+                heals
             ));
-            let Ok(mut w) = stdin.lock() else { return };
-            if w.write_all(format!("echo gpubusystats {} >&3\n", period_ms).as_bytes()).is_err() {
-                return; // 通道已断（读线程已 kill 子进程），看门狗退出
-            }
             // 重相位后首个窗口完成需 ~1-2s，期间不重复检查
             std::thread::sleep(period * 3);
         }
