@@ -142,7 +142,13 @@ fn sample_layer(layer: &mut LayerState) -> Result<Option<FpsSample>> {
     // 本窗口新帧：时间戳晚于上次缓冲末尾的帧
     let new_frames: Vec<u64> = match last_present {
         Some(last) => presents.into_iter().filter(|&t| t > last).collect(),
-        None => presents, // 上次缓冲为空 → 缓冲内全部是"新"帧
+        // 上次缓冲为空（None）：不把整个历史缓冲计入（FPS 虚高），
+        // 只计最近 elapsed 时长内的帧（缓冲最新帧 ≈ now，下界 = latest - elapsed）
+        None => {
+            let elapsed_ns = (elapsed * 1e9) as u64;
+            let cutoff = latest.unwrap_or(0).saturating_sub(elapsed_ns);
+            presents.into_iter().filter(|&t| t > cutoff).collect()
+        }
     };
     let frame_count = new_frames.len() as u32;
     let fps = frame_count as f32 / elapsed;

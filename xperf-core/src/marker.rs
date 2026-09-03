@@ -27,19 +27,20 @@ pub fn start_marker_listener(sock_path: &str) -> Option<Receiver<Marker>> {
     std::thread::spawn(move || {
         for stream in listener.incoming() {
             let Ok(s) = stream else { continue };
-            let Ok(s2) = s.try_clone() else { continue };
-            let mut reader = BufReader::new(s2);
-            let mut line = String::new();
-            if reader.read_line(&mut line).is_err() { continue; }
-            let label = line.trim().to_string();
-            if label.is_empty() { continue; }
-            let ts = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_millis() as u64)
-                .unwrap_or(0);
-            if tx.send(Marker { label, timestamp_ms: ts }).is_err() {
-                return; // 接收端已 drop
-            }
+            let tx = tx.clone();
+            // 每连接独立线程，避免空连接阻塞后续打点
+            std::thread::spawn(move || {
+                let mut reader = BufReader::new(s);
+                let mut line = String::new();
+                if reader.read_line(&mut line).is_err() { return; }
+                let label = line.trim().to_string();
+                if label.is_empty() { return; }
+                let ts = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as u64)
+                    .unwrap_or(0);
+                let _ = tx.send(Marker { label, timestamp_ms: ts });
+            });
         }
     });
     Some(rx)

@@ -123,14 +123,16 @@ fn run_cold_start(args: &Args) {
 }
 
 /// 阈值检查：超阈值时实时打印告警并记录统计
+/// is_active: 该指标是否处于活跃状态（FPS 静止界面 frames=0 时不触发低值告警）
 fn check_threshold(
     thresholds: &[alerts::Threshold],
     stats: &Arc<std::sync::Mutex<alerts::AlertStats>>,
     metric: &str,
     value: f32,
     t: &DateTime<Local>,
+    is_active: bool,
 ) {
-    let triggered = alerts::check_value(thresholds, metric, value);
+    let triggered = alerts::check_value(thresholds, metric, value, is_active);
     if triggered.is_empty() { return; }
     let time_str = t.format("%H:%M:%S").to_string();
     for t in triggered {
@@ -304,7 +306,7 @@ async fn monitor_process_agent(args: &Args, flags: xperf_core::MetricFlags) -> R
                     s.cpu_usage = cpu;
                     s.cpu_time = Some(t);
                 }
-                check_threshold(&thresholds, &alert_stats, "cpu", cpu, &t);
+                check_threshold(&thresholds, &alert_stats, "cpu", cpu, &t, true);
                 if args.thread {
                     let per_pid = thread_time_series.entry(pid.to_string()).or_default();
                     for t2 in threads {
@@ -369,7 +371,7 @@ async fn monitor_process_agent(args: &Args, flags: xperf_core::MetricFlags) -> R
                     s.memory_usage = pss;
                     s.memory_time = Some(t);
                 }
-                check_threshold(&thresholds, &alert_stats, "mem", pss as f32 / 1024.0, &t); // MB
+                check_threshold(&thresholds, &alert_stats, "mem", pss as f32 / 1024.0, &t, true); // MB
                 let a = aggs.entry(pid).or_default();
                 a.pss = pss;
                 a.rss = rss;
@@ -396,7 +398,8 @@ async fn monitor_process_agent(args: &Args, flags: xperf_core::MetricFlags) -> R
                 s.active = true;
                 s.fps_data.add_data_point(t, fps, jank, &layer);
                 csv.fps_row(&args.package, pid, t, &layer, fps, jank);
-                check_threshold(&thresholds, &alert_stats, "fps", fps, &t);
+                // 静止界面（frames=0）不触发低 FPS 告警
+                check_threshold(&thresholds, &alert_stats, "fps", fps, &t, frames > 0);
                 let a = aggs.entry(pid).or_default();
                 a.fps = Some((layer, fps, jank));
             }
@@ -477,7 +480,7 @@ async fn monitor_process_agent(args: &Args, flags: xperf_core::MetricFlags) -> R
                 csv.gpu_row(&args.package, t, busy, util, mhz, maxmhz);
                 extra.push_gpu(t, busy, util, mhz);
                 latest_gpu = Some((busy, mhz));
-                check_threshold(&thresholds, &alert_stats, "gpu", busy, &t);
+                check_threshold(&thresholds, &alert_stats, "gpu", busy, &t, true);
             }
             AgentEvent::GpuProc { ts, pid, busy } => {
                 let Some(t) = DateTime::from_timestamp_millis(ts as i64)

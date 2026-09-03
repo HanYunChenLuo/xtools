@@ -215,23 +215,17 @@ pub fn ensure_agent_built() -> Result<PathBuf> {
     Ok(bin)
 }
 
-/// 尝试 adb root（生产构建可能失败，静默忽略）
+/// 尝试 adb root（生产构建可能失败，静默忽略）。
+/// 不解析 adb root 文案（各版本不同），直接 `adb shell id` 验证 uid。
 fn try_adb_root() {
-    if let Ok(o) = Command::new("adb").args(["root"]).output() {
-        let stdout = String::from_utf8_lossy(&o.stdout);
-        let stderr = String::from_utf8_lossy(&o.stderr);
-        if stdout.contains("cannot") || stderr.contains("cannot") {
-            eprintln!("adb root: 生产构建不支持（继续以 shell 运行）");
-        } else if stdout.contains("restarting") {
-            eprintln!("adb root: adbd 重启为 root，等待恢复…");
-            let _ = Command::new("adb").args(["wait-for-device"]).output();
-            let id = crate::run_adb_command(&["shell", "id"]).map(|o| o.stdout).unwrap_or_default();
-            if id.contains("uid=0") {
-                eprintln!("adb root: 成功（uid=0）");
-            } else {
-                eprintln!("adb root: 未生效（{}），继续以 shell 运行", id.trim());
-            }
-        }
+    let _ = Command::new("adb").args(["root"]).output();
+    // adbd 重启后等设备回来
+    let _ = Command::new("adb").args(["wait-for-device"]).output();
+    let id = crate::run_adb_command(&["shell", "id"]).map(|o| o.stdout).unwrap_or_default();
+    if id.contains("uid=0") {
+        eprintln!("adb root: 成功（uid=0）");
+    } else {
+        eprintln!("adb root: 未生效（{}），IO/GPU 显存等指标不可用", id.trim());
     }
 }
 
