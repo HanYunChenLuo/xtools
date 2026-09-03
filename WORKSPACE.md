@@ -2,7 +2,7 @@
 
 > 本文件记录跨会话的待办事项（backlog）。每次会话的历史总结见 `SESSION.md`。
 > 完成一项就把状态改为 ✅ 并注明完成的 commit；新增想法随时追加。
-> 最后更新：2026-09-03（SS3 QNX 回归发现停滞 bug，五轮 review 产出：fd3 活连接/去重/看门狗/心跳/三层链清理/并发保护）
+> 最后更新：2026-09-03（perfetto `--trace N` 深挖模式落地：录制+SQL 归因，独立/并行两模式，SS3 真机 6 场景验证）
 
 ## 当前状态速览
 
@@ -14,7 +14,7 @@
 - 落盘：CLI 流式 CSV（csv_escape 转义）+ 退出图表；GUI 完整历史 + CSV 导出
 - GUI：9 张折线图 + 实时数值面板 + Top 线程 + 峰值 + 间隔档位下拉 + 实际周期标注 + 勾选即时生效（自动重启会话）+ 打点竖线
 - agent 部署：自动尝试 adb root（IO 等需 root）；src 树内任一 .rs mtime 变化自动重建
-- 测试：**61 全绿**（agent 24 个：解析 + watchdog_step 决策），clippy 零警告
+- 测试：**67 全绿**（agent 24 个：解析 + watchdog_step 决策；trace 6 个：config/SQL/解析/报告），clippy 零警告
 - 设备：SS3 6eb792dfb0f（adbd root，QNX GPU 通道**已真机回归**，见 D-2）；SS2MAX d1f39648c1f（adb root 可用，IO/kgsl/44 温度传感器已验证；gpubusy 计数器停走属数据源限制）
 
 ---
@@ -32,7 +32,7 @@
 - [x] ~~阈值告警 / 退出验证报告~~（a56a6f5 + 02ee9bc 静止误报修复）
 - [x] ~~时间轴事件标记~~（0f7ad9d：CLI Unix socket + GUI 按钮 + 图表竖线）
 - [x] ~~冷启动时间~~（a56a6f5：am start -W）
-- [ ] **perfetto `--trace N` 深挖模式**：已端到端验证可行（perfetto v15.0，trace 须写 `/data/misc/perfetto-traces/`；此车机 frametimeline 无 layer 归属，与 agent 图层方案互补）
+- [x] ~~perfetto `--trace N` 深挖模式~~（2026-09-03）：录制（stdin 喂 text proto 配置 + write_into_file 流式落盘）→ pull → trace_processor SQL 归因（包线程 CPU/抢占延迟/系统 top/每核 busy/频率/帧时间线）；支持与采样并行（同窗口限时）或独立使用；Ctrl-C 语义明确（区分信号中断与失败，提示设备残留）。真机 SS3 端到端验证（10s/1s/空包/并行/Ctrl-C 并行与独立共 6 场景）。详见 CLAUDE.md「perfetto 深挖模式」
 - [ ] simpleperf 调用栈采样（回答"CPU 高在哪个函数"）
 - [ ] 基线对比（两次运行 diff）
 
@@ -57,6 +57,7 @@
 
 ## 已完成
 
+- ✅ perfetto `--trace N` 深挖模式（2026-09-03）：trace.rs 录制（stdin 喂配置 + write_into_file 流式落盘）+ trace_processor SQL 归因（包线程 CPU/抢占/系统 top/每核/频率/帧时间线）；独立与并行两模式，Ctrl-C 语义明确；SS3 真机 6 场景验证（commit 见 SESSION.md 当日条目）
 - ✅ SS3 QNX 通道真机回归 + 五轮 review 修复链（2026-09-03）：回归发现 kgsl 统计链停滞 bug；后续 review 连续翻案产出——fd3 活连接写入/行去重/看门狗（3 连续缺失+纯函数单测）/心跳空行探活/三层链清理（退出钩子+setsid+host 条件兜底）/pgrep 多会话并发保护。全部真机验证（commit 明细见 SESSION.md 当日条目）
 - ✅ agent 模块化拆分：1848 行单文件 → 10 文件（proc/mem/fps/thermal/gpu 五通道），公共 spawn_stream_parser，host 侧 mtime 检查同步修复（531798a + 99d1b74）
 - ✅ 平台抽象层：5 平台 trait + 自动检测 + agent 参数传递（2058fcc）

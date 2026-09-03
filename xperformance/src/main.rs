@@ -12,6 +12,7 @@ use tokio::time::Instant;
 mod utils;
 mod alerts;
 mod coldstart;
+mod trace;
 use utils as cli_utils;
 use utils::validate_package_name;
 
@@ -71,6 +72,11 @@ struct Args {
     /// 冷启动时间测量：am start -W 指定 Activity（如 .MainActivity），输出 TotalTime/WaitTime/Complete
     #[arg(long)]
     cold_start: Option<String>,
+
+    /// 深挖模式：录制 N 秒 perfetto trace（ftrace 调度/频率 + frametimeline），拉回主机用 trace_processor SQL 归因
+    /// （包线程 CPU/抢占延迟/系统 CPU top/每核 busy/频率/帧时间线）；可与采样指标并行（同窗口对照）或单独使用
+    #[arg(long, value_name = "SECONDS", value_parser = clap::value_parser!(u64).range(1..=600))]
+    trace: Option<u64>,
 }
 
 fn check_adb() -> Result<()> {
@@ -103,12 +109,23 @@ async fn monitor_process(args: &Args) -> Result<(), Box<dyn std::error::Error>> 
 
     let flags = metric_flags(args);
     if !flags.any() {
+        if let Some(n) = args.trace {
+            // 纯深挖模式：不采样，只录 trace + 分析。
+            // 注册 Ctrl-C handler：默认行为直接杀进程，设备端残留文件无从提示
+            ctrlc::set_handler(|| {
+                xperf_core::utils::set_interrupt_flag();
+                println!("\n程序正在退出...");
+            })
+            .ok();
+            let rec = trace::record(&args.package, n)?;
+            return trace::analyze_and_report(&rec, &args.package).map_err(Into::into);
+        }
         println!("No monitoring options selected. Use --cpu/--memory/--fps/--freq/--thermal/--gpu/--io/--net");
         return Ok(());
     }
 
-    // 统一走设备端 agent 采样（无 adb 轮询路径）
-    monitor_process_agent(args, flags).await
+    // 统一走设备端 agent 采样（无 adb 轮询路径）；--trace 时采样限时与录制同窗口
+    monitor_process_agent(args, flags, args.trace.map(std::time::Duration::from_secs)).await
 }
 
 /// 冷启动测量（独立于采样，先执行再开始监控）
@@ -158,7 +175,12 @@ fn metric_flags(args: &Args) -> xperf_core::MetricFlags {
 /// 统一采样路径：设备端 agent 常驻采样 + exec-out 事件流。
 /// 输出策略：interval ≥ 500ms 逐条详细打印（低频率，同旧轮询模式的信息量）；
 /// < 500ms 时按 ~1s 聚合打印（逐条会刷屏），全量明细均在退出 CSV 中。
-async fn monitor_process_agent(args: &Args, flags: xperf_core::MetricFlags) -> Result<(), Box<dyn std::error::Error>> {
+/// stop_after：限时采样（--trace N 与录制同窗口，到点自动结束）；None = Ctrl-C 退出。
+async fn monitor_process_agent(
+    args: &Args,
+    flags: xperf_core::MetricFlags,
+    stop_after: Option<std::time::Duration>,
+) -> Result<(), Box<dyn std::error::Error>> {
     use xperf_core::agent::{self, AgentEvent};
 
     let bin = agent::ensure_agent_built()?;
@@ -167,6 +189,14 @@ async fn monitor_process_agent(args: &Args, flags: xperf_core::MetricFlags) -> R
     println!("平台: {} ({})", platform.name(), platform.description());
     let mut stream = agent::spawn_agent(Some(&args.package), args.interval, flags, Some(&*platform))?;
     println!("agent 已部署并启动（间隔 {}ms）", args.interval);
+
+    // perfetto 深挖（--trace N）：后台线程录制，与采样同窗口（agent 启动后同时开跑）
+    let trace_handle = args.trace.map(|n| {
+        println!("perfetto 深挖：后台录制 {}s trace，采样同步限时", n);
+        let pkg = args.package.clone();
+        std::thread::spawn(move || trace::record(&pkg, n))
+    });
+    let deadline = stop_after.map(|d| Instant::now() + d);
 
     let verbose = args.interval >= 500;
     let thresholds = alerts::parse_thresholds(&args.threshold);
@@ -223,6 +253,13 @@ async fn monitor_process_agent(args: &Args, flags: xperf_core::MetricFlags) -> R
     let mut extra = cli_utils::ExtraSeries::default();
 
     while running.load(Ordering::SeqCst) {
+        // 限时采样（--trace N 同窗口）：到点自动结束
+        if let Some(d) = deadline {
+            if Instant::now() >= d {
+                println!("{}", "限时采样结束".green());
+                break;
+            }
+        }
         // 处理打点事件（非阻塞）
         if let Some(rx) = &marker_rx {
             while let Ok(m) = rx.try_recv() {
@@ -638,6 +675,14 @@ async fn monitor_process_agent(args: &Args, flags: xperf_core::MetricFlags) -> R
     if !thresholds.is_empty() {
         let stats = alert_stats.lock().unwrap();
         println!("{}", alerts::generate_report(&thresholds, &stats));
+    }
+    // perfetto 深挖：录制与采样同窗口应已完成，join 后做 SQL 分析（录制失败不影响采样产出）
+    if let Some(h) = trace_handle {
+        match h.join() {
+            Ok(Ok(rec)) => trace::analyze_and_report(&rec, &args.package)?,
+            Ok(Err(e)) => println!("{}", format!("perfetto 录制失败: {}", e).yellow()),
+            Err(_) => println!("{}", "perfetto 录制线程异常退出".yellow()),
+        }
     }
     Ok(())
 }
