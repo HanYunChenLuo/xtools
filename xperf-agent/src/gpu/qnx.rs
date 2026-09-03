@@ -194,8 +194,12 @@ pub(super) fn start(interval_ms: u64, pid_names: &Arc<Mutex<HashMap<String, u32>
             // 退出清理：经 telnet 下发 echo>（死写入者）式 gpubusystats 停止全部统计链
             // （fd3 活连接存在时同样有效，真机实测）。不停链则链泄漏到整机重启，且下一
             // 会话 fd3 写入撞活链会停走、走 ~8s 看门狗自愈路径；停链后下一会话锁步即起。
+            // 多会话并发时跳过（会杀掉对方采样中的流，由对方看门狗自愈恢复）。
             let teardown = stdin.clone();
             crate::register_exit_hook(Box::new(move || {
+                if other_agents_running() {
+                    return;
+                }
                 if let Ok(mut w) = teardown.lock() {
                     let _ = w.write_all(
                         format!("echo gpubusystats {} > /dev/kgsl-control\n", period).as_bytes(),
@@ -239,6 +243,19 @@ fn watchdog_step(have_new: bool, past_grace: bool, misses: u32, heals: u32) -> W
         return WatchdogAction::GiveUp;
     }
     WatchdogAction::Heal
+}
+
+/// 设备上是否还有其他 xperf-agent 会话在跑（多会话并发保护）。
+/// 退出清理若在对方采样中停链，其 GPU 流会断 5-8s 才被自家看门狗自愈——
+/// 有并发会话时跳过清理（链泄漏留给最后一个会话收尾，无害）。
+/// `[n]` 正则技巧：检测命令自身/载体 shell 的命令行（字面含 `xperf-age[n]t`）不匹配。
+fn other_agents_running() -> bool {
+    std::process::Command::new("sh")
+        .arg("-c")
+        .arg("pgrep -fc 'xperf-age[n]t'")
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().parse::<u32>().unwrap_or(0) > 1)
+        .unwrap_or(false)
 }
 
 /// QNX kgsl 统计链看门狗（2026-09-03 真机实测的行为兜底）：
