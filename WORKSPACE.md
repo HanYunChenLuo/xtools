@@ -12,7 +12,7 @@
 - **GPU 五通道**（detect_gpu_path_ex 按平台选路）：kgsl sysfs（Android/SS2）/ QNX telnet（SS3，真 busy%/util%/频率+每进程）/ topgpu（SS2MAX）/ ligfxprofilerd logcat（SS4）/ dumpsys gpu 显存保底；全部补采 dumpsys gpu 显存
 - **C 类验证能力**：阈值告警（--threshold，静止界面不误报）+ 退出验证报告 + 冷启动（--cold-start）+ 时间轴打点（Unix socket / GUI 按钮 + 图表竖线 + markers.csv）
 - 落盘：CLI 流式 CSV（csv_escape 转义）+ 退出图表；GUI 完整历史 + CSV 导出
-- GUI：9 张折线图 + 实时数值面板 + Top 线程 + 峰值 + 间隔档位下拉 + 实际周期标注 + 勾选即时生效（自动重启会话）+ 打点竖线
+- GUI：9 张折线图 + 实时数值面板 + Top 线程 + 峰值 + 间隔档位下拉 + 实际周期标注 + 勾选即时生效（自动重启会话）+ 打点竖线 + perfetto 深挖（秒数+按钮 → 报告面板）
 - agent 部署：自动尝试 adb root（IO 等需 root）；src 树内任一 .rs mtime 变化自动重建
 - 测试：**67 全绿**（agent 24 个：解析 + watchdog_step 决策；trace 6 个：config/SQL/解析/报告），clippy 零警告
 - 设备：SS3 6eb792dfb0f（adbd root，QNX GPU 通道**已真机回归**，见 D-2）；SS2MAX d1f39648c1f（adb root 可用，IO/kgsl/44 温度传感器已验证；gpubusy 计数器停走属数据源限制）

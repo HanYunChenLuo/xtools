@@ -220,6 +220,18 @@ fn brief_event(ev: &SampleEvent) -> String {
 
 struct AppState {
     running: Arc<Mutex<bool>>,
+    /// 深挖录制进行中（与采样互不干扰，可并行）
+    trace_running: Arc<Mutex<bool>>,
+}
+
+/// 包名校验：防路径遍历（包名会拼入日志目录路径）
+fn validate_package(package: &str) -> Result<(), String> {
+    if package.is_empty() || package == "." || package == ".." || package.len() > 256
+        || !package.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-') {
+        Err(format!("非法包名: {}", package))
+    } else {
+        Ok(())
+    }
 }
 
 #[tauri::command]
@@ -247,10 +259,9 @@ async fn start_sampling(
     }
 
     // 包名校验：防路径遍历（包名会拼入日志目录路径）
-    if package.is_empty() || package == "." || package == ".." || package.len() > 256
-        || !package.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-') {
+    if let Err(e) = validate_package(&package) {
         *state.running.lock().map_err(|e| e.to_string())? = false;
-        return Err(format!("非法包名: {}", package));
+        return Err(e);
     }
 
     let flags = MetricFlags { cpu, memory, fps, freq, thermal, gpu, io, net };
@@ -263,6 +274,74 @@ async fn start_sampling(
 fn stop_sampling(state: State<'_, AppState>) -> Result<(), String> {
     let mut running = state.running.lock().map_err(|e| e.to_string())?;
     *running = false;
+    Ok(())
+}
+
+/// 后台深挖线程（start_trace 命令与 --trace 自动启动共用）：
+/// 录制 → 拉回 → trace_processor SQL 分析，全程 emit("trace", {stage, message}) 推进度。
+/// stage: recording（录制中）/ recorded（已拉回，分析中）/ done（message=完整报告文本）/ error。
+/// 与采样会话互不干扰（可并行；GUI 采样不限时，窗口对照靠报告与图表的时间戳）。
+fn spawn_trace(app: tauri::AppHandle, package: String, seconds: u64, running: Arc<Mutex<bool>>) {
+    eprintln!("[trace] 启动: package={} seconds={}", package, seconds);
+    std::thread::spawn(move || {
+        let emit_stage = |stage: &str, message: String| {
+            let _ = app.emit("trace", serde_json::json!({ "stage": stage, "message": message }));
+        };
+        let dir = std::path::PathBuf::from("log")
+            .join(&package)
+            .join(Local::now().format("%Y%m%d_%H%M%S").to_string())
+            .join("trace");
+        emit_stage("recording", format!("录制 {}s perfetto trace…（窗口内操作被测应用）", seconds));
+        let rec = match xperf_core::trace::record(seconds, &dir) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("[trace] 录制失败: {}", e);
+                emit_stage("error", format!("录制失败: {}", e));
+                *running.lock().unwrap() = false;
+                return;
+            }
+        };
+        eprintln!(
+            "[trace] 已拉回: {}（{:.1} MB）",
+            rec.local_path.display(),
+            rec.bytes as f64 / 1e6
+        );
+        emit_stage(
+            "recorded",
+            format!("已拉回 {}（{:.1} MB），SQL 分析中…", rec.local_path.display(), rec.bytes as f64 / 1e6),
+        );
+        match xperf_core::trace::analyze_and_report(&rec, &package) {
+            Ok(report) => emit_stage("done", report),
+            Err(e) => {
+                eprintln!("[trace] 分析失败: {}", e);
+                emit_stage("error", format!("{}", e));
+            }
+        }
+        *running.lock().unwrap() = false;
+    });
+}
+
+/// 深挖模式：录制 N 秒 perfetto trace 并 SQL 归因（详见 xperf-core/src/trace.rs）
+#[tauri::command]
+async fn start_trace(
+    package: String,
+    seconds: u64,
+    state: State<'_, AppState>,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    {
+        let mut t = state.trace_running.lock().map_err(|e| e.to_string())?;
+        if *t {
+            return Err("深挖录制进行中，请等待完成".into());
+        }
+        *t = true;
+    }
+    if let Err(e) = validate_package(&package) {
+        *state.trace_running.lock().map_err(|e| e.to_string())? = false;
+        return Err(e);
+    }
+    let seconds = seconds.clamp(1, 600);
+    spawn_trace(app, package, seconds, state.trace_running.clone());
     Ok(())
 }
 
@@ -486,7 +565,7 @@ async fn export_csv(
 }
 
 fn main() {
-    // 支持命令行自动启动：xperf-gui --package <pkg> [--interval 1000] [--cpu] [--memory] [--fps] [--freq] [--io] [--net] [--gpu] [--thermal]
+    // 支持命令行自动启动：xperf-gui --package <pkg> [--interval 1000] [--cpu] [--memory] [--fps] [--freq] [--io] [--net] [--gpu] [--thermal] [--trace N]
     // （便于脚本化/验证；不传参数则手动在前端操作）
     let args: Vec<String> = std::env::args().collect();
     let get_opt = |name: &str| -> Option<String> {
@@ -497,6 +576,7 @@ fn main() {
     let has_flag = |name: &str| args.iter().any(|a| a == name);
     let auto_package = get_opt("--package");
     let auto_interval: u64 = get_opt("--interval").and_then(|v| v.parse().ok()).unwrap_or(1000).max(50);
+    let auto_trace: Option<u64> = get_opt("--trace").and_then(|v| v.parse().ok());
     let auto_flags = MetricFlags {
         cpu: has_flag("--cpu"),
         memory: has_flag("--memory"),
@@ -511,6 +591,7 @@ fn main() {
     tauri::Builder::default()
         .manage(AppState {
             running: Arc::new(Mutex::new(false)),
+            trace_running: Arc::new(Mutex::new(false)),
         })
         .setup(move |app| {
             if let Some(package) = auto_package.clone() {
@@ -527,11 +608,22 @@ fn main() {
                     };
                     spawn_sampling(
                         app.handle().clone(),
-                        package,
+                        package.clone(),
                         auto_interval,
                         flags,
                         state.running.clone(),
                     );
+                }
+                // 深挖自动启动（--trace N，可与采样并行）
+                if let Some(n) = auto_trace {
+                    let n = n.clamp(1, 600);
+                    let state = app.state::<AppState>();
+                    let mut t = state.trace_running.lock().unwrap();
+                    if !*t {
+                        *t = true;
+                        drop(t);
+                        spawn_trace(app.handle().clone(), package, n, state.trace_running.clone());
+                    }
                 }
             }
             Ok(())
@@ -539,6 +631,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             start_sampling,
             stop_sampling,
+            start_trace,
             diag_log,
             list_packages,
             is_running,
@@ -549,6 +642,9 @@ fn main() {
             // 关窗时停止采样：置 running=false，采样线程在下一轮循环检测到后退出，
             // exec-out 管道断开 → 设备端 agent 因 stdout 写失败自行退出
             if let tauri::WindowEvent::CloseRequested { .. } = event {
+                // 深挖录制线程不等待（最长 600s），置中断标志让其尽快退出；
+                // 未及退出时设备端 perfetto 由 traced TTL 兜底停止（残留文件无害）
+                xperf_core::utils::set_interrupt_flag();
                 let state = window.state::<AppState>();
                 let mut running = state.running.lock().unwrap();
                 if *running {

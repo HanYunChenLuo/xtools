@@ -4,6 +4,7 @@ pub mod fps;
 pub mod marker;
 pub mod memory;
 pub mod platform;
+pub mod trace;
 pub mod utils;
 
 pub use agent::MetricFlags;
