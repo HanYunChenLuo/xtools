@@ -496,8 +496,8 @@ document.getElementById('traceBtn').addEventListener('click', async () => {
   }
 });
 
-// 打开 ui.perfetto.dev + 文件管理器定位 trace 文件，拖入浏览器窗口即加载
-// （不走网络加载：被 ui.perfetto.dev CSP 与 Chrome LNA loopback 权限双重拦截，见后端注释）
+// 打开浏览器 Perfetto UI 并自动加载 trace：本地镜像 UI + 同源深链（全自动）；
+// 离线/镜像失败自动回退拖拽方式（后端 open_perfetto_ui 处理，msg 含结果说明）
 document.getElementById('openPerfBtn').addEventListener('click', async () => {
   if (!currentTracePath) return;
   try {

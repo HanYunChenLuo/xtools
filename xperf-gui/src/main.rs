@@ -347,16 +347,23 @@ async fn start_trace(
     Ok(())
 }
 
-/// 打开 ui.perfetto.dev + 文件管理器（定位 trace 文件），用户拖入浏览器即加载。
-/// 走文件拖拽而非本地 HTTP + ?url= 深链：后者被 ui.perfetto.dev 的 CSP connect-src
-/// 白名单与 Chrome LNA loopback 权限双重拦截（实测 Chrome 152，详见 core trace.rs 注释）。
+/// 在浏览器打开 Perfetto UI 并自动加载 trace。
+/// 优先本地镜像 UI + 同源加载（全自动，首次使用需联网镜像约 20 个资源）；
+/// 失败（离线/无 Chrome/无法访问 ui.perfetto.dev）自动回退拖拽方式。
 #[tauri::command]
 fn open_perfetto_ui(trace_path: String) -> Result<String, String> {
     let path = std::path::PathBuf::from(&trace_path);
     if !path.is_file() {
         return Err(format!("trace 文件不存在: {}", trace_path));
     }
-    xperf_core::trace::reveal_trace_and_open_ui(&path).map_err(|e| e.to_string())
+    match xperf_core::trace::open_trace_in_local_ui(&path) {
+        Ok(msg) => Ok(msg),
+        Err(e) => {
+            eprintln!("[trace] 自动加载不可用，回退拖拽: {}", e);
+            let msg = xperf_core::trace::reveal_trace_and_open_ui(&path).map_err(|e| e.to_string())?;
+            Ok(format!("自动加载不可用（{}）。{}", e, msg))
+        }
+    }
 }
 
 /// 诊断命令：前端 JS 执行时调用，把消息写到 /tmp/xperf_gui_diag.log。

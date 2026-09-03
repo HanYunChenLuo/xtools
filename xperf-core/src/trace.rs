@@ -25,6 +25,7 @@ use std::collections::HashMap;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 /// get.perfetto.dev 官方下载脚本缓存原生二进制的目录（~/.local/share/perfetto/prebuilts）
@@ -671,7 +672,288 @@ pub fn analyze_and_report(rec: &RecordedTrace, package: &str) -> Result<String> 
     Ok(text)
 }
 
-// ==================== 浏览器打开（ui.perfetto.dev 拖拽） ====================
+// ==================== 浏览器自动分析（本地镜像 Perfetto UI，同源加载） ====================
+
+/// 镜像缓存目录（~/.cache/xperf/perfetto_ui）
+const UI_CACHE_SUBDIR: &str = ".cache/xperf/perfetto_ui";
+
+/// 单例本地服务器状态：端口 + trace 注册表（文件名 → 本地路径）。
+/// 服务器线程只起一次、随进程存活；每次分析把 trace 注册进表，URL 直接指向它。
+static UI_SERVER: OnceLock<(u16, &'static std::sync::Mutex<HashMap<String, PathBuf>>)> =
+    OnceLock::new();
+
+/// 从 netlog JSON 提取 ui.perfetto.dev 的静态资源清单（去 query、去 SW）。
+fn extract_ui_assets(netlog: &str) -> Vec<String> {
+    let mut urls: Vec<String> = serde_json::from_str::<serde_json::Value>(netlog)
+        .map(|v| {
+            v["events"]
+                .as_array()
+                .map(|evs| {
+                    evs.iter()
+                        .filter_map(|e| e["params"]["url"].as_str())
+                        .filter(|u| {
+                            u.starts_with("https://ui.perfetto.dev/")
+                                && !u.contains('#')
+                                && !u.contains("service_worker")
+                        })
+                        .map(|u| u.split('?').next().unwrap_or(u).to_string())
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default()
+        })
+        .unwrap_or_default();
+    urls.sort();
+    urls.dedup();
+    urls
+}
+
+/// 定位 Chrome/Chromium（headless 资源发现用）；找不到返回 None（回退拖拽方案）
+fn find_chrome() -> Option<PathBuf> {
+    for name in ["google-chrome", "chromium", "chromium-browser"] {
+        let out = Command::new("sh")
+            .args(["-c", &format!("command -v {name}")])
+            .output()
+            .ok()?;
+        if out.status.success() {
+            let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if !s.is_empty() {
+                return Some(PathBuf::from(s));
+            }
+        }
+    }
+    // macOS 常见安装路径
+    let mac = PathBuf::from("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome");
+    if mac.is_file() {
+        return Some(mac);
+    }
+    None
+}
+
+/// 首次使用时镜像 ui.perfetto.dev 到本地缓存：headless Chrome 跑一遍 UI 收集资源清单
+/// + curl 逐个下载；已有缓存直接返回。
+///
+/// UI 是纯静态 SPA：index.html 内嵌 loader 动态加载 `/v58.3-xxx/` 资源，静态爬虫
+/// 抓不全，运行时发现才可靠。
+fn ensure_perfetto_ui_mirror() -> Result<PathBuf> {
+    let dir = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_default()
+        .join(UI_CACHE_SUBDIR);
+    // 完整性检查：index.html 与 frontend_bundle.js 存在即视为缓存有效
+    if dir.join("index.html").is_file() {
+        let has_bundle = std::fs::read_dir(&dir)
+            .map(|rd| {
+                rd.flatten().any(|e| {
+                    let n = e.file_name().to_string_lossy().into_owned();
+                    n == "frontend_bundle.js" || n.starts_with("v")
+                })
+            })
+            .unwrap_or(false);
+        if has_bundle {
+            return Ok(dir);
+        }
+    }
+    std::fs::create_dir_all(&dir)?;
+    let chrome = find_chrome().context("未找到 Chrome/Chromium（镜像 Perfetto UI 需要）")?;
+    eprintln!("[trace] 首次使用：headless Chrome 收集 ui.perfetto.dev 资源清单…");
+    let netlog = std::env::temp_dir().join(format!("xperf_ui_netlog_{}.json", std::process::id()));
+    let profile = std::env::temp_dir().join(format!("xperf_ui_profile_{}", std::process::id()));
+    let status = Command::new(&chrome)
+        .args([
+            "--headless=new",
+            "--disable-gpu",
+            "--no-first-run",
+            "--virtual-time-budget=30000",
+            &format!("--log-net-log={}", netlog.display()),
+            &format!("--user-data-dir={}", profile.display()),
+            "https://ui.perfetto.dev/#!/viewer",
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    let assets = match (status, std::fs::read_to_string(&netlog)) {
+        (Ok(s), Ok(log)) if s.success() => extract_ui_assets(&log),
+        _ => Vec::new(),
+    };
+    let _ = std::fs::remove_file(&netlog);
+    let _ = std::fs::remove_dir_all(&profile);
+    if assets.is_empty() {
+        anyhow::bail!("资源清单收集失败（无法访问 ui.perfetto.dev 或 headless Chrome 异常）");
+    }
+    eprintln!("[trace] 镜像 {} 个资源…", assets.len());
+    let mut ok = 0usize;
+    for url in &assets {
+        // URL path → 本地相对路径（首页 → index.html）
+        let rel = url
+            .strip_prefix("https://ui.perfetto.dev/")
+            .filter(|p| !p.is_empty())
+            .unwrap_or("");
+        let local = if rel.is_empty() { dir.join("index.html") } else { dir.join(rel) };
+        if let Some(parent) = local.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let ok_dl = Command::new("curl")
+            .args(["-fsSL", "-o"])
+            .arg(&local)
+            .arg(url)
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if ok_dl {
+            ok += 1;
+        } else if rel.is_empty() {
+            anyhow::bail!("下载 index.html 失败: {url}");
+        } else {
+            // netlog 清单含浏览器探测性 404（如 /assets/assets/... 双层路径，浏览器会
+            // fallback 到版本化路径），跳过即可；全部失败才算镜像失败
+            eprintln!("[trace] 跳过不可用资源: {url}");
+        }
+    }
+    if ok < assets.len() / 2 {
+        anyhow::bail!("镜像下载成功率过低（{}/{}）", ok, assets.len());
+    }
+    if !dir.join("index.html").is_file() {
+        anyhow::bail!("镜像不完整（缺 index.html）");
+    }
+    Ok(dir)
+}
+
+/// 本地服务器 Content-Type（按扩展名）
+fn ui_mime(path: &Path) -> &'static str {
+    match path.extension().and_then(|e| e.to_str()).unwrap_or("") {
+        "js" => "text/javascript",
+        "css" => "text/css",
+        "wasm" => "application/wasm",
+        "json" => "application/json",
+        "html" => "text/html",
+        "png" => "image/png",
+        "woff2" => "font/woff2",
+        "md" => "text/plain",
+        _ => "application/octet-stream",
+    }
+}
+
+/// 起单例本地服务器：mirror 静态文件 + 动态注册的 trace 文件（/<文件名>）；
+/// service_worker.js 固定 404（镜像无 SW，避免离线缓存拦截）。
+/// 返回（端口, trace 注册表句柄）。并发竞争时后到者复用先到者的服务器。
+fn ui_server(mirror: &Path) -> Result<(u16, &'static std::sync::Mutex<HashMap<String, PathBuf>>)> {
+    use std::net::TcpListener;
+
+    if let Some((port, registry)) = UI_SERVER.get() {
+        return Ok((*port, registry));
+    }
+    let listener = TcpListener::bind("127.0.0.1:0").context("绑定本地端口失败")?;
+    let port = listener.local_addr().context("获取本地端口失败")?.port();
+    // 注册表与 UI_SERVER 里存的是同一个引用（线程读写它，open_trace_in_local_ui 往里注册）
+    let registry: &'static std::sync::Mutex<HashMap<String, PathBuf>> =
+        Box::leak(Box::new(std::sync::Mutex::new(HashMap::new())));
+    if UI_SERVER.set((port, registry)).is_err() {
+        // 并发竞争输掉：复用先到者的服务器（刚 bind 的 listener drop 自动关端口）
+        let (p, r) = UI_SERVER.get().expect("set 失败说明已有值");
+        return Ok((*p, r));
+    }
+    let mirror = mirror.to_path_buf();
+    let reg = registry;
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(stream) = stream else { continue };
+            // 每连接一线程：Chrome 会 preconnect 空闲连接（accept 后不发数据），
+            // 单线程串行处理会阻塞在读这种连接上，堵死后续资源请求（实测页面停在主页）
+            let mirror = mirror.clone();
+            let reg = reg;
+            std::thread::spawn(move || {
+                use std::io::{Read as _, Write as _};
+                let mut stream = stream;
+                let mut buf = [0u8; 4096];
+                let mut req = Vec::new();
+                loop {
+                    match stream.read(&mut buf) {
+                        Ok(0) => break,
+                        Ok(n) => {
+                            req.extend_from_slice(&buf[..n]);
+                            if req.windows(4).any(|w| w == b"\r\n\r\n") || req.len() > 16384 {
+                                break;
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                }
+                let path = String::from_utf8_lossy(&req)
+                    .lines()
+                    .next()
+                    .and_then(|l| l.split(' ').nth(1))
+                    .unwrap_or("/")
+                    .split('?')
+                    .next()
+                    .unwrap_or("/")
+                    .to_string();
+                // 响应：(状态, Content-Type, 数据)
+                let resp: (&str, &'static str, Vec<u8>) = if path == "/service_worker.js" {
+                    ("404 Not Found", "text/plain", Vec::new())
+                } else if let Some(trace) = reg
+                    .lock()
+                    .ok()
+                    .and_then(|m| m.get(&path.trim_start_matches('/').to_string()).cloned())
+                {
+                    match std::fs::read(&trace) {
+                        Ok(data) => ("200 OK", "application/octet-stream", data),
+                        Err(_) => ("404 Not Found", "text/plain", Vec::new()),
+                    }
+                } else {
+                    // 静态文件（防路径穿越：拒绝 ..）
+                    let safe = !path.contains("..");
+                    let fp = if path == "/" { mirror.join("index.html") } else { mirror.join(path.trim_start_matches('/')) };
+                    match (safe, std::fs::read(&fp)) {
+                        (true, Ok(data)) => ("200 OK", ui_mime(&fp), data),
+                        _ => ("404 Not Found", "text/plain", Vec::new()),
+                    }
+                };
+                let header = format!(
+                    "HTTP/1.1 {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    resp.0,
+                    resp.1,
+                    resp.2.len()
+                );
+                let _ = stream.write_all(header.as_bytes());
+                let _ = stream.write_all(&resp.2);
+            });
+        }
+    });
+    Ok((port, registry))
+}
+
+/// 自动在浏览器打开 Perfetto UI 并加载 trace：
+/// 本地镜像 UI（首次联网镜像，之后离线可用）+ 单例本地服务器同源 serve trace +
+/// `#!/viewer?url=/相对路径` 深链——同源 fetch 属 CSP 'self'、http 页面无 mixed content、
+/// loopback→loopback 不跨地址空间无 LNA，全自动加载零交互（实测 Chrome 152 验证通过）。
+/// 服务器随进程存活（浏览器内刷新不受影响）。
+pub fn open_trace_in_local_ui(trace: &Path) -> Result<String> {
+    let mirror = ensure_perfetto_ui_mirror()?;
+    let filename = trace
+        .file_name()
+        .context("trace 路径无文件名")?
+        .to_string_lossy()
+        .into_owned();
+    let (port, registry) = ui_server(&mirror)?;
+    registry
+        .lock()
+        .expect("trace 注册表锁失败")
+        .insert(filename.clone(), trace.to_path_buf());
+    // url 参数必须是绝对 URL：Perfetto SPA 路由对其执行 new URL() 未传 base，
+    // 相对路径（/xxx.pftrace）会抛 "Invalid URL" 异常中断路由初始化，页面停在主页
+    let url = format!("http://127.0.0.1:{port}/#!/viewer?url=http://127.0.0.1:{port}/{filename}");
+    #[cfg(target_os = "macos")]
+    let open = "open";
+    #[cfg(not(target_os = "macos"))]
+    let open = "xdg-open";
+    Command::new(open)
+        .arg(&url)
+        .spawn()
+        .with_context(|| format!("打开浏览器失败（{open}）"))?;
+    Ok(format!("已打开 Perfetto UI 并自动加载: {}", trace.display()))
+}
+
+// ==================== 浏览器打开（ui.perfetto.dev 拖拽，自动加载的回退方案） ====================
 
 /// 打开 ui.perfetto.dev 主页 + 系统文件管理器（定位并高亮 trace 文件），用户把文件拖入
 /// 浏览器窗口即完成加载。
@@ -816,6 +1098,104 @@ mod tests {
         assert_eq!(cell_f64(&row, 1), 3.5);
         assert_eq!(cell_u64(&row, 1), 3);
         assert_eq!(cell_str(&row, 0), "[NULL]");
+    }
+
+    #[test]
+    fn test_extract_ui_assets() {
+        let log = r#"{"events":[
+            {"type":194,"params":{"url":"https://ui.perfetto.dev/#!/viewer"}},
+            {"type":134,"params":{"url":"https://ui.perfetto.dev/v58.3-abc/frontend_bundle.js"}},
+            {"type":134,"params":{"url":"https://ui.perfetto.dev/v58.3-abc/frontend_bundle.js"}},
+            {"type":134,"params":{"url":"https://ui.perfetto.dev/v58.3-abc/frontend.css?x=1"}},
+            {"type":134,"params":{"url":"https://ui.perfetto.dev/service_worker.js"}},
+            {"type":134,"params":{"url":"https://ui.perfetto.dev/"}},
+            {"type":134,"params":{"url":"https://www.google-analytics.com/collect"}},
+            {"type":134,"params":{"url":"https://ui.perfetto.dev/v58.3-abc/trace_processor_memory64.wasm"}}
+        ]}"#;
+        let assets = extract_ui_assets(log);
+        assert_eq!(
+            assets,
+            vec![
+                "https://ui.perfetto.dev/".to_string(),
+                "https://ui.perfetto.dev/v58.3-abc/frontend.css".to_string(),
+                "https://ui.perfetto.dev/v58.3-abc/frontend_bundle.js".to_string(),
+                "https://ui.perfetto.dev/v58.3-abc/trace_processor_memory64.wasm".to_string(),
+            ]
+        );
+        // 非法 JSON / 空事件：空清单
+        assert!(extract_ui_assets("not json").is_empty());
+        assert!(extract_ui_assets("{\"events\":[]}").is_empty());
+    }
+
+    #[test]
+    fn test_ui_server_routes() {
+        use std::io::{Read as _, Write as _};
+        // 假 mirror：index.html + 一个版本目录静态文件
+        let mirror = std::env::temp_dir().join(format!("xperf_ui_srv_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&mirror);
+        std::fs::create_dir_all(mirror.join("v1.0-x")).unwrap();
+        std::fs::write(mirror.join("index.html"), b"<html>ui</html>").unwrap();
+        std::fs::write(mirror.join("v1.0-x/frontend_bundle.js"), b"console.log(1)").unwrap();
+        let trace_dir = std::env::temp_dir().join(format!("xperf_ui_srv_trace_{}", std::process::id()));
+        std::fs::create_dir_all(&trace_dir).unwrap();
+        let trace = trace_dir.join("t.pftrace");
+        std::fs::write(&trace, b"TRACE-DATA").unwrap();
+
+        let (port, registry) = ui_server(&mirror).unwrap();
+        registry.lock().unwrap().insert("t.pftrace".into(), trace.clone());
+        let get = |path: &str| -> String {
+            let mut s = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+            s.write_all(format!("GET {path} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n").as_bytes()).unwrap();
+            let mut buf = Vec::new();
+            s.read_to_end(&mut buf).unwrap();
+            String::from_utf8_lossy(&buf).into_owned()
+        };
+        // 首页 / 静态资源 / 注册的 trace / SW 404 / 路径穿越 404 / 未知 404
+        assert!(get("/").starts_with("HTTP/1.1 200 OK"));
+        assert!(get("/").contains("text/html"));
+        assert!(get("/").ends_with("<html>ui</html>"));
+        assert!(get("/v1.0-x/frontend_bundle.js").starts_with("HTTP/1.1 200 OK"));
+        assert!(get("/v1.0-x/frontend_bundle.js").contains("text/javascript"));
+        assert!(get("/t.pftrace").ends_with("TRACE-DATA"));
+        assert!(get("/service_worker.js").starts_with("HTTP/1.1 404"));
+        assert!(get("/../etc/passwd").starts_with("HTTP/1.1 404"));
+        assert!(get("/no_such_file.js").starts_with("HTTP/1.1 404"));
+        // 单例：再次调用返回同一端口
+        let (port2, _) = ui_server(&mirror).unwrap();
+        assert_eq!(port, port2);
+        let _ = std::fs::remove_dir_all(&mirror);
+        let _ = std::fs::remove_dir_all(&trace_dir);
+    }
+
+    /// 真实联网镜像 + 本地服务器 + headless 验证（手动跑）：
+    /// cargo test -p xperf-core test_real_ui_serve -- --ignored --nocapture &
+    /// 输出的 URL 用浏览器/headless Chrome 访问，应自动加载 trace
+    #[test]
+    #[ignore = "联网镜像 + 起服务器保活 90s，手动验证用"]
+    fn test_real_ui_serve() {
+        let mirror = ensure_perfetto_ui_mirror().expect("mirror 失败");
+        // 镜像质量断言：资源数、index.html、主 bundle、wasm
+        let n: usize = std::fs::read_dir(&mirror).unwrap().count();
+        assert!(n >= 2, "mirror 条目过少: {n}");
+        let html = std::fs::read_to_string(mirror.join("index.html")).expect("index.html");
+        assert!(html.contains("</html>"), "index.html 不完整");
+        let bundle = std::fs::read_dir(&mirror)
+            .unwrap()
+            .flatten()
+            .find(|e| e.file_name().to_string_lossy() == "frontend_bundle.js");
+        if let Some(b) = bundle {
+            assert!(b.metadata().unwrap().len() > 100_000, "frontend_bundle.js 过小");
+        }
+        let trace = std::env::var("XPERF_TEST_TRACE").expect("需设置 XPERF_TEST_TRACE=<trace 路径>");
+        let t = PathBuf::from(&trace);
+        assert!(t.is_file(), "trace 不存在: {trace}");
+        let (port, reg) = ui_server(&mirror).unwrap();
+        let name = t.file_name().unwrap().to_string_lossy().to_string();
+        reg.lock().unwrap().insert(name.clone(), t.clone());
+        // url 参数须绝对 URL（SPA 路由 new URL() 无 base，相对路径抛 Invalid URL）
+        println!("VERIFY_URL: http://127.0.0.1:{port}/#!/viewer?url=http://127.0.0.1:{port}/{name}");
+        // 保活窗口：外部验证期间服务器必须存活
+        std::thread::sleep(std::time::Duration::from_secs(90));
     }
 
     #[test]
