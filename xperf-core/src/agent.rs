@@ -193,7 +193,7 @@ fn find_ndk_linker() -> Option<PathBuf> {
     fallback.map(|(_, p)| p)
 }
 
-/// 目录树下最新文件的 mtime（递归；目录不可读/为空返回 None）
+/// 目录树下最新 .rs 文件的 mtime（递归；目录不可读/为空返回 None）
 fn newest_mtime_under(dir: &Path) -> Option<std::time::SystemTime> {
     std::fs::read_dir(dir).ok()?
         .flatten()
@@ -201,8 +201,10 @@ fn newest_mtime_under(dir: &Path) -> Option<std::time::SystemTime> {
             let p = e.path();
             if p.is_dir() {
                 newest_mtime_under(&p)
-            } else {
+            } else if p.extension().is_some_and(|x| x == "rs") {
                 std::fs::metadata(&p).ok().and_then(|m| m.modified().ok())
+            } else {
+                None
             }
         })
         .max()
