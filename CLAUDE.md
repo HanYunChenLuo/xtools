@@ -183,7 +183,7 @@ Platform trait + `adb devices -l` product 字段自动检测（HU_SS3/HU_SS2MAXF
 - CPU 窗口 = 相邻两轮差值（常驻保有状态，无 phase1/phase2 结构）
 - 需要 root（读他进程的 /proc、smaps_rollup）；内部设备 adbd 已 root
 - 终端输出：interval ≥ 500ms 逐条详细打印；< 500ms 按 ~1s 聚合（avg/max），全量明细在流式 CSV；CSV 时间戳毫秒精度（`%.3f`）
-- 主机断连（EOF）→ 自动重连恢复（见上）；Ctrl-C → exec-out 关闭 → agent 写 stdout 失败自行退出
+- 主机断连（EOF）→ 自动重连恢复（见上）；Ctrl-C → exec-out 关闭 → agent 写 stdout 失败自行退出（节拍循环整轮零输出时发空行探活，一个周期内感知断连；host 侧 next_event 跳过空行，零协议影响）
 
 **验证基线**：svm @ 50ms 间隔，78 样本均值 15.03%，与 adb top 一致；50ms 窗口可见 25-47% 的瞬时毛刺（1s 采样看不到）。
 
