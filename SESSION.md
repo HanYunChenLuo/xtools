@@ -11,13 +11,20 @@
 
 **任务线**：WORKSPACE D 类第一项——xperf-agent 1848 行单文件拆分（src 布局已就位），拆完真机回归。
 
+### Commits
+
+| commit | 内容 |
+|--------|------|
+| 531798a | agent 模块化拆分（10 文件 + 公共 spawn_stream_parser + gpumem 臂合并）+ ensure_agent_built mtime 改扫 src 树 |
+| 99d1b74 | review 修复：mtime 只认 .rs 扩展；read_smaps_rollup/GpuEvent 可见性收紧 |
+
 ### 完成内容
 
-- `xperf-agent/src/` 拆为 10 文件：`main.rs`（490 行：协议头注释/Args/节拍循环/公共工具 emit·json_escape·now_ms·dumpsys）、`proc.rs`（/proc+sysfs 读取 + PidState::sample_cpu）、`mem.rs`（smaps/meminfo，sample_memory）、`fps.rs`（FpsState::sample_round）、`thermal.rs`（sample）、`gpu/{mod,kgsl,qnx,topgpu,ligfx}.rs`
+- `xperf-agent/src/` 拆为 10 文件：`main.rs`（493 行：协议头注释/Args/节拍循环/公共工具 emit·json_escape·now_ms·dumpsys）、`proc.rs`（/proc+sysfs 读取 + PidState::sample_cpu）、`mem.rs`（smaps/meminfo，sample_memory）、`fps.rs`（FpsState::sample_round）、`thermal.rs`（sample）、`gpu/{mod,kgsl,qnx,topgpu,ligfx}.rs`
 - 三份重复读线程骨架（QNX/TopGpu/Ligfx）抽公共 `gpu::spawn_stream_parser`（keepalive stdin 保活 + eof_err 参数化）；三通道样本枚举归一为 `GpuEvent::Sys/Proc`，emit 按通道字段有无按需输出（wire 格式逐字节不变）
 - main 循环里四段完全相同的 gpumem 补采臂（Qnx/TopGpu/Ligfx/DumpMem）合并为一
 - 删除 `detect_gpu_path` 死代码包装
-- **host 侧修复**：`ensure_agent_built` 原来只比较 `xperf-agent/main.rs` mtime——拆分后改子模块不会触发重建；改为 `newest_mtime_under(src)` 扫整棵 src 树取最新 mtime
+- **host 侧修复**：`ensure_agent_built` 原来只比较 `xperf-agent/main.rs` mtime——拆分后改子模块不会触发重建；改为 `newest_mtime_under(src)` 扫整棵 src 树取最新 .rs 的 mtime（review 后收紧：非 .rs 文件不触发）
 - 测试 23 个随模块迁移（全绿，workspace 60）；clippy 零警告；交叉编译通过
 
 ### 真机回归（SS2MAX d1f39648c1f，SS3 不在线）
