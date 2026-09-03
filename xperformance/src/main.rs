@@ -13,6 +13,7 @@ mod utils;
 mod alerts;
 mod coldstart;
 use utils as cli_utils;
+use utils::validate_package_name;
 
 use xperf_core::ThreadCpuInfo;
 
@@ -1064,6 +1065,11 @@ fn generate_memory_summary_chart(
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
+    // 包名校验：启动时即报错，不延迟到 CSV 落盘
+    if let Err(e) = validate_package_name(&args.package) {
+        eprintln!("❌ 包名不合法: {}", e);
+        std::process::exit(1);
+    }
     run_cold_start(&args);
     if let Err(e) = monitor_process(&args).await {
         eprintln!("Monitor error: {}", e);

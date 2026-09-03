@@ -41,7 +41,7 @@ pub async fn sample_memory(pid: &str) -> Result<(u64, DateTime<Local>, MemoryDet
     // 进程死亡时 dumpsys meminfo 输出空或报错文本（如 "No process found"），
     // 返回 Err 让调用方走 PidDisappeared 路径
     if output.trim().is_empty() || output.contains("No process") || output.contains("No such process") {
-        anyhow::bail!("Process {} not found", pid);
+        anyhow::bail!("Process not found for pid: {}", pid);
     }
 
     let mut total_pss = 0;

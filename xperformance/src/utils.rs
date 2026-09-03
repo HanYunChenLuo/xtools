@@ -17,7 +17,7 @@ const CSV_TS_FMT: &str = "%Y-%m-%d %H:%M:%S%.3f";
 static TIMESTAMP_DIR: OnceLock<Mutex<Option<PathBuf>>> = OnceLock::new();
 
 /// 校验包名格式（防止路径遍历）
-fn validate_package_name(pkg: &str) -> Result<()> {
+pub fn validate_package_name(pkg: &str) -> Result<()> {
     if pkg.is_empty() || pkg.len() > 255 {
         anyhow::bail!("包名不能为空且不超过 255 字符: {}", pkg);
     }
