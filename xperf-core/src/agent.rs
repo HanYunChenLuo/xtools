@@ -229,15 +229,24 @@ fn try_adb_root() {
     }
 }
 
-/// 推送 agent 到设备（设备上不存在或大小不一致时）
+/// 推送 agent 到设备（设备上不存在或大小/mtime 不一致时）
+/// 大小+修改时间双判：同尺寸不同版本（改代码但恰好等长）也能被更新。
 pub fn deploy_agent(local: &Path) -> Result<()> {
     // 自动尝试 root（生产构建会静默失败，不影响后续流程）
     try_adb_root();
-    let local_size = std::fs::metadata(local)?.len();
+    let local_meta = std::fs::metadata(local)?;
+    let local_size = local_meta.len();
+    let local_mtime = local_meta.modified().ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
     let remote_size = crate::run_adb_command(&["shell", "stat", "-c", "%s", DEVICE_AGENT_PATH])
         .ok()
         .and_then(|o| o.stdout.trim().parse::<u64>().ok());
-    if remote_size == Some(local_size) {
+    let remote_mtime = crate::run_adb_command(&["shell", "stat", "-c", "%Y", DEVICE_AGENT_PATH])
+        .ok()
+        .and_then(|o| o.stdout.trim().parse::<u64>().ok());
+    if remote_size == Some(local_size) && remote_mtime == Some(local_mtime) {
         return Ok(()); // 已是最新（大小一致）
     }
     crate::run_adb_command(&[
@@ -245,6 +254,8 @@ pub fn deploy_agent(local: &Path) -> Result<()> {
         &local.to_string_lossy(),
         DEVICE_AGENT_PATH,
     ])?;
+    // push 后同步 mtime 对齐本地，使下次部署的 mtime 匹配判断生效
+    let _ = crate::run_adb_command(&["shell", &format!("touch -d @{} {}", local_mtime, DEVICE_AGENT_PATH)]);
     crate::run_adb_command(&["shell", "chmod", "755", DEVICE_AGENT_PATH])?;
     Ok(())
 }

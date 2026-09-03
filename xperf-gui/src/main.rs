@@ -241,6 +241,12 @@ async fn start_sampling(
         *running = true;
     }
 
+    // 包名校验：防路径遍历（包名会拼入日志目录路径）
+    if !package.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_') {
+        *state.running.lock().map_err(|e| e.to_string())? = false;
+        return Err(format!("非法包名: {}", package));
+    }
+
     let flags = MetricFlags { cpu, memory, fps, freq, thermal, gpu, io, net };
     spawn_sampling(app, package, interval, flags, state.running.clone());
 
