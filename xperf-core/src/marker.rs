@@ -30,6 +30,8 @@ pub fn start_marker_listener(sock_path: &str) -> Option<Receiver<Marker>> {
             let tx = tx.clone();
             // 每连接独立线程，避免空连接阻塞后续打点
             std::thread::spawn(move || {
+                // 读超时 10s：空连接不会永久占用线程
+                let _ = s.set_read_timeout(Some(std::time::Duration::from_secs(10)));
                 let mut reader = BufReader::new(s);
                 let mut line = String::new();
                 if reader.read_line(&mut line).is_err() { return; }

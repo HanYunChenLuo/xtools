@@ -193,12 +193,23 @@ fn find_ndk_linker() -> Option<PathBuf> {
     fallback.map(|(_, p)| p)
 }
 
-/// 若本机尚未交叉编译 agent 二进制则自动构建（链接器：config.toml 默认值，
-/// 探测到本机 NDK 时用 CARGO_TARGET_..._LINKER 环境变量覆盖，Mac/Linux 均可）
+/// 若本机尚未交叉编译 agent 二进制则自动构建；源码变更（mtime 更新）时也自动重建。
+/// （链接器：config.toml 默认值，探测到本机 NDK 时用 CARGO_TARGET_..._LINKER 环境变量覆盖，Mac/Linux 均可）
 pub fn ensure_agent_built() -> Result<PathBuf> {
     let bin = agent_binary_path();
-    if !bin.exists() {
-        eprintln!("agent 二进制不存在，正在交叉编译（aarch64-linux-android）...");
+    let needs_build = if !bin.exists() {
+        true
+    } else {
+        // 源码变更检测：main.rs mtime 比二进制新则重建
+        let src = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap()
+            .join("xperf-agent/main.rs");
+        match (std::fs::metadata(&src), std::fs::metadata(&bin)) {
+            (Ok(s), Ok(b)) => s.modified().ok() > b.modified().ok(),
+            _ => false,
+        }
+    };
+    if needs_build {
+        eprintln!("agent 需要构建/重建（aarch64-linux-android）...");
         let mut cmd = Command::new("cargo");
         cmd.args(["build", "-p", "xperf-agent", "--target", "aarch64-linux-android", "--release"])
             .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap());
