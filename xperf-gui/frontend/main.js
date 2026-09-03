@@ -496,13 +496,14 @@ document.getElementById('traceBtn').addEventListener('click', async () => {
   }
 });
 
-// 在浏览器打开 ui.perfetto.dev 并加载本次 trace（后端起本地 HTTP 服务 + 深链）
+// 打开 ui.perfetto.dev + 文件管理器定位 trace 文件，拖入浏览器窗口即加载
+// （不走网络加载：被 ui.perfetto.dev CSP 与 Chrome LNA loopback 权限双重拦截，见后端注释）
 document.getElementById('openPerfBtn').addEventListener('click', async () => {
   if (!currentTracePath) return;
   try {
-    const url = await invoke('open_perfetto_ui', { tracePath: currentTracePath });
-    document.getElementById('status').textContent = '已在浏览器打开 Perfetto UI';
-    _diag('openPerfBtn: ' + url);
+    const msg = await invoke('open_perfetto_ui', { tracePath: currentTracePath });
+    document.getElementById('status').textContent = msg;
+    _diag('openPerfBtn: ' + msg);
   } catch (err) {
     document.getElementById('status').textContent = '打开 Perfetto UI 失败: ' + err;
     _diag('openPerfBtn ERROR: ' + JSON.stringify(err));

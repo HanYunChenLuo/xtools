@@ -347,24 +347,16 @@ async fn start_trace(
     Ok(())
 }
 
-/// 在浏览器打开 ui.perfetto.dev 并加载指定 trace：起本地 HTTP 服务 + 深链 ?url=
-/// （服务随进程存活；进程退出后浏览器内刷新需重新点击按钮）。
+/// 打开 ui.perfetto.dev + 文件管理器（定位 trace 文件），用户拖入浏览器即加载。
+/// 走文件拖拽而非本地 HTTP + ?url= 深链：后者被 ui.perfetto.dev 的 CSP connect-src
+/// 白名单与 Chrome LNA loopback 权限双重拦截（实测 Chrome 152，详见 core trace.rs 注释）。
 #[tauri::command]
 fn open_perfetto_ui(trace_path: String) -> Result<String, String> {
     let path = std::path::PathBuf::from(&trace_path);
     if !path.is_file() {
         return Err(format!("trace 文件不存在: {}", trace_path));
     }
-    let url = xperf_core::trace::open_in_perfetto_ui(&path).map_err(|e| e.to_string())?;
-    #[cfg(target_os = "macos")]
-    let browser_cmd = "open";
-    #[cfg(not(target_os = "macos"))]
-    let browser_cmd = "xdg-open";
-    std::process::Command::new(browser_cmd)
-        .arg(&url)
-        .spawn()
-        .map_err(|e| format!("打开浏览器失败（{}）: {}；可手动访问 {}", browser_cmd, e, url))?;
-    Ok(url)
+    xperf_core::trace::reveal_trace_and_open_ui(&path).map_err(|e| e.to_string())
 }
 
 /// 诊断命令：前端 JS 执行时调用，把消息写到 /tmp/xperf_gui_diag.log。
