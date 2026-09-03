@@ -21,6 +21,7 @@
 //!   {"t":"exit","pid":29697}
 //!   {"t":"noproc"}
 //!   {"t":"err","msg":"..."}
+//!   （空行）                                                    // 心跳：整轮零输出时探活（写失败=主机断连→agent 退出），host 侧 next_event 跳过
 //!
 //! 用法：xperf-agent --package <pkg> [--pid N]... --interval 50 [--cpu] [--memory] [--fps]
 //!                   [--freq] [--io] [--net] [--gpu] [--thermal]
@@ -46,6 +47,7 @@ mod thermal;
 use std::collections::HashMap;
 use std::fs;
 use std::io::Write;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -163,7 +165,13 @@ fn json_escape(s: &str) -> String {
     out
 }
 
+/// 本轮（节拍循环或任一 GPU 读线程）是否已有输出。
+/// 用于心跳：整轮零输出时发一个空行探活——host 的 next_event 跳过空行（零协议影响），
+/// 而 stdout 写失败（主机断连）会在 emit 内 exit(0)，agent 不再残留设备。
+static ROUND_EMITTED: AtomicBool = AtomicBool::new(false);
+
 fn emit(line: &str) {
+    ROUND_EMITTED.store(true, Ordering::Relaxed);
     let mut out = std::io::stdout().lock();
     // 对端断开（adb 连接关闭）时写失败，直接退出
     if writeln!(out, "{}", line).is_err() || out.flush().is_err() {
@@ -309,6 +317,12 @@ fn main() {
 
     loop {
         round += 1;
+        // 心跳：上一轮（含 GPU 读线程）完全零输出时发一个空行探活。emit("") 会置位
+        // 标志故随即复位；读线程在此间隙的输出至多让下一轮多一个空行，host 跳过空行无害。
+        if round >= 2 && !ROUND_EMITTED.swap(false, Ordering::Relaxed) {
+            emit("");
+            ROUND_EMITTED.store(false, Ordering::Relaxed);
+        }
         // 绝对节拍 sleep：本轮目标时刻 = start + round * interval
         let target = start + interval * round as u32;
         let now = Instant::now();
