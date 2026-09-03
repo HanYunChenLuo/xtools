@@ -48,6 +48,10 @@
       <input id="markerLabel" type="text" placeholder="打点标签" style="flex:1;padding:4px;background:#313244;color:#cdd6f4;border:1px solid #45475a;border-radius:3px;font-size:12px" />
       <button id="markerBtn" class="small" style="width:auto;padding:4px 8px;flex-shrink:0">打点</button>
     </div>
+    <div style="display:flex;gap:4px;margin:4px 0">
+      <input id="traceSeconds" type="number" min="1" max="600" value="10" title="录制秒数（1-600）" style="width:52px;padding:4px;background:#313244;color:#cdd6f4;border:1px solid #45475a;border-radius:3px;font-size:12px" />
+      <button id="traceBtn" class="small" style="width:auto;padding:4px 8px;flex-shrink:0">深挖 trace</button>
+    </div>
     <button id="exportBtn" class="small">导出 CSV</button>
     <div id="status">未开始</div>
     <h3>PIDs</h3>
@@ -75,6 +79,10 @@
       <div id="peakPanel" class="panel">
         <h3>峰值</h3>
         <table id="peakTable"><tr><th>PID</th><th>峰值 CPU%</th><th>时间</th><th>峰值 PSS(KB)</th><th>时间</th></tr></table>
+      </div>
+      <div id="tracePanel" class="panel hidden" style="flex: 1 1 420px; max-height: 320px; overflow: auto">
+        <h3>Perfetto 深挖报告</h3>
+        <pre id="traceReport" style="white-space:pre-wrap;font-size:11px;margin:0;color:#cdd6f4"></pre>
       </div>
     </div>
   </div>

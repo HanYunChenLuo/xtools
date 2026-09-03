@@ -12,11 +12,11 @@ use tokio::time::Instant;
 mod utils;
 mod alerts;
 mod coldstart;
-mod trace;
 use utils as cli_utils;
 use utils::validate_package_name;
 
 use xperf_core::ThreadCpuInfo;
+use xperf_core::trace;
 
 #[derive(Parser, Debug)]
 #[command(version, about = "XPerformance Monitor - Android process CPU/memory monitor", long_about = None)]
@@ -117,8 +117,23 @@ async fn monitor_process(args: &Args) -> Result<(), Box<dyn std::error::Error>> 
                 println!("\n程序正在退出...");
             })
             .ok();
-            let rec = trace::record(&args.package, n)?;
-            return trace::analyze_and_report(&rec, &args.package).map_err(Into::into);
+            println!("perfetto 深挖：录制 {}s…", n);
+            let dir = cli_utils::create_timestamp_subdir(&args.package)?.join("trace");
+            let rec = trace::record(n, &dir)?;
+            println!(
+                "{}",
+                format!(
+                    "perfetto trace 已拉回: {}（{:.1} MB）",
+                    rec.local_path.display(),
+                    rec.bytes as f64 / 1e6
+                )
+                .green()
+            );
+            match trace::analyze_and_report(&rec, &args.package) {
+                Ok(text) => println!("{}", text),
+                Err(e) => println!("{}", e.to_string().yellow()),
+            }
+            return Ok(());
         }
         println!("No monitoring options selected. Use --cpu/--memory/--fps/--freq/--thermal/--gpu/--io/--net");
         return Ok(());
@@ -194,7 +209,10 @@ async fn monitor_process_agent(
     let trace_handle = args.trace.map(|n| {
         println!("perfetto 深挖：后台录制 {}s trace，采样同步限时", n);
         let pkg = args.package.clone();
-        std::thread::spawn(move || trace::record(&pkg, n))
+        std::thread::spawn(move || {
+            let dir = cli_utils::create_timestamp_subdir(&pkg)?.join("trace");
+            trace::record(n, &dir)
+        })
     });
     let deadline = stop_after.map(|d| Instant::now() + d);
 
@@ -679,7 +697,21 @@ async fn monitor_process_agent(
     // perfetto 深挖：录制与采样同窗口应已完成，join 后做 SQL 分析（录制失败不影响采样产出）
     if let Some(h) = trace_handle {
         match h.join() {
-            Ok(Ok(rec)) => trace::analyze_and_report(&rec, &args.package)?,
+            Ok(Ok(rec)) => {
+                println!(
+                    "{}",
+                    format!(
+                        "perfetto trace 已拉回: {}（{:.1} MB）",
+                        rec.local_path.display(),
+                        rec.bytes as f64 / 1e6
+                    )
+                    .green()
+                );
+                match trace::analyze_and_report(&rec, &args.package) {
+                    Ok(text) => println!("{}", text),
+                    Err(e) => println!("{}", e.to_string().yellow()),
+                }
+            }
             Ok(Err(e)) => println!("{}", format!("perfetto 录制失败: {}", e).yellow()),
             Err(_) => println!("{}", "perfetto 录制线程异常退出".yellow()),
         }

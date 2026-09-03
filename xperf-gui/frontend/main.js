@@ -442,6 +442,42 @@ document.getElementById('markerBtn').addEventListener('click', async () => {
   _diag('markerBtn: ' + label);
 });
 
+// ---- perfetto 深挖（--trace）：录制 N 秒 → trace_processor SQL 归因 ----
+// trace 事件 stage: recording / recorded / done（message=完整报告）/ error
+listen('trace', (e) => {
+  const { stage, message } = e.payload;
+  document.getElementById('tracePanel').classList.remove('hidden');
+  document.getElementById('traceReport').textContent = message;
+  if (stage === 'done') {
+    document.getElementById('traceBtn').disabled = false;
+    document.getElementById('status').textContent = '深挖完成（报告见下方面板）';
+  } else if (stage === 'error') {
+    document.getElementById('traceBtn').disabled = false;
+    document.getElementById('status').textContent = '深挖失败';
+  }
+  _diag('trace: ' + stage);
+});
+
+document.getElementById('traceBtn').addEventListener('click', async () => {
+  const package = document.getElementById('package').value.trim();
+  if (!package) {
+    document.getElementById('status').textContent = '请先填写包名';
+    return;
+  }
+  const seconds = parseInt(document.getElementById('traceSeconds').value, 10) || 10;
+  try {
+    await invoke('start_trace', { package, seconds });
+    document.getElementById('traceBtn').disabled = true;
+    document.getElementById('tracePanel').classList.remove('hidden');
+    document.getElementById('traceReport').textContent = '录制中（' + seconds + 's）…';
+    document.getElementById('status').textContent = '深挖录制中: ' + package;
+    _diag('traceBtn: ' + package + ' ' + seconds + 's');
+  } catch (err) {
+    document.getElementById('status').textContent = '深挖错误: ' + err;
+    _diag('traceBtn invoke ERROR: ' + JSON.stringify(err));
+  }
+});
+
 document.getElementById('startBtn').addEventListener('click', async () => {
   _diag('startBtn CLICKED');
   const package = document.getElementById('package').value;

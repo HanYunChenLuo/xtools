@@ -1,15 +1,17 @@
 //! perfetto 深挖模式：录制 N 秒系统级 trace，拉回主机用 trace_processor SQL 归因。
+//! CLI（xperformance）与 GUI（xperf-gui）共用——输出目录由调用方传入，报告以文本返回，
+//! 进度/打印均由调用方负责（CLI println，GUI 走 Tauri 事件）。
 //!
 //! 定位：与实时采样互补的「录制-分析」模式——采样回答"什么时候高"，trace 回答"为什么高"：
 //! - 包内每线程的精确 CPU 时间（ftrace sched_switch，微秒级，不受采样间隔量化）
 //! - 抢占/调度延迟（thread_state Runnable：唤醒→上核，谁被抢、被抢多久）
-//! - 同窗口系统级 CPU top（谁在抢核）、每核 busy/上下文切换次数
+//! - 同窗口系统级 CPU top（谁在抢核）、每核 busy/上下文切换次数（排除 idle）
 //! - CPU 频率区间（平台无 cpufreq ftrace 事件时如实标注，如 SS3 GVM 频率归 hypervisor）
 //! - 帧时间线全局统计（此平台 frametimeline 无进程/图层归属，与 agent 图层 FPS 互补）
 //!
 //! 链路：`adb shell perfetto -c - --txt -o /data/misc/perfetto-traces/…`（stdin 喂配置，
 //! write_into_file 流式落盘，长录制内存有界）→ adb pull → `trace_processor -q <sql>` 输出
-//! CSV → 解析打印。trace 文件始终保留，可拖入 https://ui.perfetto.dev 交互分析。
+//! CSV → 解析。trace 文件始终保留，可拖入 https://ui.perfetto.dev 交互分析。
 //!
 //! SQL 执行约定：全部查询写在一个文件里单次执行（trace 只加载一次），marker 查询分段；
 //! 某条查询出错会中止整个文件的后续语句，故按「表必然存在 → 可能缺失」排序——帧时间线
@@ -17,9 +19,8 @@
 //! 从 stderr 取原因。实测基线（SS3，10s trace）：sched 14 万事件，多语句输出为
 //! "表头+数据行+空行"的结果集序列。
 
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use chrono::{DateTime, Local};
-use colored::*;
 use std::collections::HashMap;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -55,15 +56,13 @@ fn trace_config(seconds: u64) -> String {
     )
 }
 
-/// 录制 N 秒 trace 并拉回 `log/<pkg>/<会话时间戳>/trace/`（与采样 CSV 同会话目录）。
+/// 录制 N 秒 trace 并拉回 out_dir（如 `log/<pkg>/<会话时间戳>/trace/`，自动创建）。
 /// 阻塞至录制完成（perfetto duration_ms 到点自动退出并写完文件）。
-pub fn record(package: &str, seconds: u64) -> Result<RecordedTrace> {
-    let dir = crate::utils::create_timestamp_subdir(package)
-        .context("创建输出目录失败")?
-        .join("trace");
-    std::fs::create_dir_all(&dir)?;
+/// 包名校验与进度展示由调用方负责（目录路径含包名，防遍历）。
+pub fn record(seconds: u64, out_dir: &Path) -> Result<RecordedTrace> {
+    std::fs::create_dir_all(out_dir)?;
     let stem = Local::now().format("%Y%m%d_%H%M%S").to_string();
-    let local_path = dir.join(format!("trace_{}.pftrace", stem));
+    let local_path = out_dir.join(format!("trace_{}.pftrace", stem));
     let dev_path = format!("/data/misc/perfetto-traces/xperf_{}.pftrace", stem);
 
     let wall_start = Local::now();
@@ -83,7 +82,7 @@ pub fn record(package: &str, seconds: u64) -> Result<RecordedTrace> {
     loop {
         match child.try_wait()? {
             Some(_) => break,
-            None if xperf_core::utils::is_interrupted() => {
+            None if crate::utils::is_interrupted() => {
                 let _ = child.kill();
                 bail!("录制被 Ctrl-C 中断；设备端可能残留 {}（可手动 adb pull）", dev_path);
             }
@@ -143,10 +142,6 @@ pub fn record(package: &str, seconds: u64) -> Result<RecordedTrace> {
     if bytes == 0 {
         bail!("trace 文件为空（perfetto 未写出数据）");
     }
-    println!(
-        "{}",
-        format!("perfetto trace 已拉回: {}（{:.1} MB）", local_path.display(), bytes as f64 / 1e6).green()
-    );
     Ok(RecordedTrace { local_path, wall_start, wall_end, bytes })
 }
 
@@ -196,7 +191,7 @@ pub fn ensure_trace_processor() -> Result<PathBuf> {
     if let Some(p) = find_trace_processor() {
         return Ok(p);
     }
-    println!("未找到 trace_processor，从 get.perfetto.dev 引导下载…");
+    eprintln!("[trace] 未找到 trace_processor，从 get.perfetto.dev 引导下载…");
     let base = std::env::var_os("HOME")
         .map(PathBuf::from)
         .unwrap_or_default()
@@ -644,46 +639,36 @@ impl Analysis {
     }
 }
 
-/// 分析 + 打印 + 落盘（trace_analysis.txt / trace_queries.sql 与 .pftrace 同目录）。
-/// 分析失败不致命：trace 文件已保存，提示手动 ui.perfetto.dev 分析。
-pub fn analyze_and_report(rec: &RecordedTrace, package: &str) -> Result<()> {
-    let tp = match ensure_trace_processor() {
-        Ok(p) => p,
-        Err(e) => {
-            println!(
-                "{}",
-                format!(
-                    "trace_processor 不可用（{}）；trace 已保存，可拖入 https://ui.perfetto.dev 手动分析: {}",
-                    e,
-                    rec.local_path.display()
-                )
-                .yellow()
-            );
-            return Ok(());
-        }
-    };
+/// 分析 + 落盘（trace_analysis.txt / trace_queries.sql 与 .pftrace 同目录），返回报告文本
+/// （尾部附产物路径行）。失败时错误消息自带"trace 已保存 + 手动分析指引"。
+/// 报告文件写失败不致命（警告拼进返回文本，报告仍然返回）。
+pub fn analyze_and_report(rec: &RecordedTrace, package: &str) -> Result<String> {
+    let tp = ensure_trace_processor().map_err(|e| {
+        anyhow!(
+            "trace_processor 不可用（{}）；trace 已保存，可拖入 https://ui.perfetto.dev 手动分析: {}",
+            e,
+            rec.local_path.display()
+        )
+    })?;
     let sql_path = rec.local_path.with_file_name("trace_queries.sql");
-    match analyze(&tp, &rec.local_path, package, &sql_path) {
-        Ok(a) => {
-            let text = a.report(package, rec);
-            let out_path = rec.local_path.with_file_name("trace_analysis.txt");
-            if let Err(e) = std::fs::write(&out_path, &text) {
-                println!("{}", format!("trace_analysis.txt 写入失败: {}", e).yellow());
-            }
-            println!("{}", text);
-            println!("分析报告: {} | 查询语句: {}", out_path.display(), sql_path.display());
-        }
-        Err(e) => println!(
-            "{}",
-            format!(
-                "trace 分析失败（{}）；trace 已保存，可拖入 https://ui.perfetto.dev 手动分析: {}",
-                e,
-                rec.local_path.display()
-            )
-            .yellow()
-        ),
+    let a = analyze(&tp, &rec.local_path, package, &sql_path).map_err(|e| {
+        anyhow!(
+            "trace 分析失败（{}）；trace 已保存，可拖入 https://ui.perfetto.dev 手动分析: {}",
+            e,
+            rec.local_path.display()
+        )
+    })?;
+    let mut text = a.report(package, rec);
+    let out_path = rec.local_path.with_file_name("trace_analysis.txt");
+    if let Err(e) = std::fs::write(&out_path, &text) {
+        text.push_str(&format!("\n⚠️ trace_analysis.txt 写入失败: {}\n", e));
     }
-    Ok(())
+    text.push_str(&format!(
+        "\n分析报告: {} | 查询语句: {}",
+        out_path.display(),
+        sql_path.display()
+    ));
+    Ok(text)
 }
 
 #[cfg(test)]
