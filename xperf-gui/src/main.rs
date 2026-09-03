@@ -298,6 +298,22 @@ type GpuMemExportPoints = Vec<(f64, f64, f64)>;
 /// GPU 系统导出行：(ms, busy%, util%, mhz)
 type GpuExportPoints = Vec<(f64, f64, f64, u32)>;
 
+/// 打点：前端按钮调用，追加到 markers 列表 + 打印到 stderr（调试用）
+#[tauri::command]
+fn add_marker(label: String, app: tauri::AppHandle) -> String {
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let ts_str = chrono::DateTime::from_timestamp_millis(ts as i64)
+        .map(|t| t.with_timezone(&chrono::Local).format("%H:%M:%S%.3f").to_string())
+        .unwrap_or_default();
+    eprintln!("[marker] {} {}", ts_str, label);
+    // 发事件给前端让图表画竖线
+    let _ = app.emit("marker", serde_json::json!({"label": label, "timestamp": ts}));
+    format!("[{}] 📍 {}", ts_str, label)
+}
+
 /// 导出前端持有的完整会话历史为 CSV（GUI 不流式落盘，数据在前端内存中）。
 /// 写到 log/<pkg>/<导出时刻>/ 下的各指标子目录，返回目录路径。
 /// cpu/mem: pid -> [[ms, value]...]；fps: 图层短名 -> [[ms, fps, jank]...]
@@ -514,6 +530,7 @@ fn main() {
             diag_log,
             list_packages,
             is_running,
+            add_marker,
             export_csv
         ])
         .run(tauri::generate_context!())
