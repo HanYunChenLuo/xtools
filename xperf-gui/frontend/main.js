@@ -442,18 +442,37 @@ document.getElementById('markerBtn').addEventListener('click', async () => {
   _diag('markerBtn: ' + label);
 });
 
-// ---- perfetto 深挖（--trace）：录制 N 秒 → trace_processor SQL 归因 ----
-// trace 事件 stage: recording / recorded / done（message=完整报告）/ error
+// ---- perfetto 分析（--trace）：录制 N 秒 → trace_processor SQL 归因，独立 tab 展示 ----
+// trace 事件 stage: recording / recorded / done（message=完整报告）/ error；recorded/done/error 附 trace_path
+let currentTracePath = null;
+function switchTab(which) {
+  const perf = which === 'perf';
+  document.getElementById('perfContent').classList.toggle('hidden', !perf);
+  document.getElementById('traceContent').classList.toggle('hidden', perf);
+  document.getElementById('tabPerfBtn').classList.toggle('active', perf);
+  document.getElementById('tabTraceBtn').classList.toggle('active', !perf);
+  // 图表容器显隐变化后尺寸需刷新
+  if (perf) setTimeout(() => { for (const c of allCharts) c.resize(); }, 50);
+}
+document.getElementById('tabPerfBtn').addEventListener('click', () => switchTab('perf'));
+document.getElementById('tabTraceBtn').addEventListener('click', () => switchTab('trace'));
+
 listen('trace', (e) => {
-  const { stage, message } = e.payload;
-  document.getElementById('tracePanel').classList.remove('hidden');
+  const { stage, message, trace_path } = e.payload;
+  if (trace_path) {
+    currentTracePath = trace_path;
+    document.getElementById('openPerfBtn').disabled = false;
+    document.getElementById('traceFileLabel').textContent = trace_path;
+  }
   document.getElementById('traceReport').textContent = message;
   if (stage === 'done') {
     document.getElementById('traceBtn').disabled = false;
-    document.getElementById('status').textContent = '深挖完成（报告见下方面板）';
+    document.getElementById('status').textContent = 'Perfetto 分析完成';
+    switchTab('trace');
   } else if (stage === 'error') {
     document.getElementById('traceBtn').disabled = false;
-    document.getElementById('status').textContent = '深挖失败';
+    document.getElementById('status').textContent = 'Perfetto 分析失败';
+    switchTab('trace');
   }
   _diag('trace: ' + stage);
 });
@@ -468,13 +487,25 @@ document.getElementById('traceBtn').addEventListener('click', async () => {
   try {
     await invoke('start_trace', { package, seconds });
     document.getElementById('traceBtn').disabled = true;
-    document.getElementById('tracePanel').classList.remove('hidden');
-    document.getElementById('traceReport').textContent = '录制中（' + seconds + 's）…';
-    document.getElementById('status').textContent = '深挖录制中: ' + package;
+    // 录制期间留在指标页观察实时曲线（采样与录制并行），完成/失败时自动切到分析页
+    document.getElementById('status').textContent = 'Perfetto 分析录制中: ' + package;
     _diag('traceBtn: ' + package + ' ' + seconds + 's');
   } catch (err) {
-    document.getElementById('status').textContent = '深挖错误: ' + err;
+    document.getElementById('status').textContent = 'Perfetto 分析错误: ' + err;
     _diag('traceBtn invoke ERROR: ' + JSON.stringify(err));
+  }
+});
+
+// 在浏览器打开 ui.perfetto.dev 并加载本次 trace（后端起本地 HTTP 服务 + 深链）
+document.getElementById('openPerfBtn').addEventListener('click', async () => {
+  if (!currentTracePath) return;
+  try {
+    const url = await invoke('open_perfetto_ui', { tracePath: currentTracePath });
+    document.getElementById('status').textContent = '已在浏览器打开 Perfetto UI';
+    _diag('openPerfBtn: ' + url);
+  } catch (err) {
+    document.getElementById('status').textContent = '打开 Perfetto UI 失败: ' + err;
+    _diag('openPerfBtn ERROR: ' + JSON.stringify(err));
   }
 });
 
