@@ -3,6 +3,4 @@ name = "xperf-agent"
 version = "0.1.5"
 edition = "2021"
 
-[[bin]]
-name = "xperf-agent"
-path = "main.rs"
+[dependencies]
