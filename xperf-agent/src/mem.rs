@@ -6,7 +6,7 @@ use crate::{dumpsys, emit};
 use std::fs;
 
 /// 读 /proc/<pid>/smaps_rollup：返回 (Pss KB, Rss KB)
-pub(crate) fn read_smaps_rollup(pid: u32) -> Option<(u64, u64)> {
+fn read_smaps_rollup(pid: u32) -> Option<(u64, u64)> {
     let content = fs::read_to_string(format!("/proc/{}/smaps_rollup", pid)).ok()?;
     parse_smaps_rollup(&content)
 }

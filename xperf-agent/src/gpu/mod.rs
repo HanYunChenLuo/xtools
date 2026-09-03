@@ -80,7 +80,8 @@ pub(crate) fn detect_gpu_path_ex(platform: Option<&str>) -> Option<GpuPath> {
 }
 
 /// 流式通道统一事件：三通道（QNX/TopGpu/Ligfx）样本归一后交给公共读线程 emit。
-pub(crate) enum GpuEvent {
+/// 仅 gpu 子树内使用（私有项对子模块可见）。
+enum GpuEvent {
     /// 系统级 busy%；util/maxmhz 按通道有无（wire 上按需输出）
     Sys { mhz: u32, maxmhz: Option<u32>, util: Option<f32>, busy: f32 },
     /// 进程级 busy%（按进程名归因到 Android PID）
