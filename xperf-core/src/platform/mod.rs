@@ -62,23 +62,32 @@ pub trait Platform: Send + Sync {
 
 /// 从 adb devices -l 输出检测平台
 pub fn detect_platform(adb_devices_output: &str) -> Box<dyn Platform> {
+    let mut matched: Vec<PlatformId> = Vec::new();
     for line in adb_devices_output.lines().skip(1) {
         let line = line.trim();
         if line.is_empty() || !line.contains("device") { continue; }
         if let Some(product) = line.split("product:").nth(1).and_then(|s| s.split_whitespace().next()) {
-            match product {
-                "HU_SS2MAXF" => return Box::new(ss2max::Ss2Max),
-                "HU_SS2PRO" => return Box::new(ss2pro::Ss2Pro),
-                "HU_SS3" => return Box::new(ss3::Ss3),
-                "HU_SS4" => return Box::new(ss4::Ss4),
-                _ => {}
-            }
+            let id = match product {
+                "HU_SS2MAXF" => Some(PlatformId::Ss2Max),
+                "HU_SS2PRO" => Some(PlatformId::Ss2Pro),
+                "HU_SS3" => Some(PlatformId::Ss3),
+                "HU_SS4" => Some(PlatformId::Ss4),
+                _ => None,
+            };
+            if let Some(id) = id { matched.push(id); continue; }
         }
         if line.contains("HU_SS4") || line.contains("Smart_space_4") {
-            return Box::new(ss4::Ss4);
+            matched.push(PlatformId::Ss4);
         }
     }
-    Box::new(android::Android)
+    // 多设备匹配：取第一个但打印警告
+    if matched.len() > 1 {
+        eprintln!("⚠️ 检测到 {} 台设备，使用第一台（{}）。多设备场景请确保 adb 目标正确。", matched.len(), matched[0].as_str());
+    }
+    match matched.first() {
+        Some(&id) => from_id(id),
+        None => Box::new(android::Android),
+    }
 }
 
 /// 通过 adb devices -l 实时检测平台

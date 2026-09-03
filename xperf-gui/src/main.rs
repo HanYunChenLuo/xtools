@@ -533,6 +533,20 @@ fn main() {
             add_marker,
             export_csv
         ])
+        .on_window_event(|window, event| {
+            // 关窗时停止采样：置 running=false，采样线程在下一轮循环检测到后退出，
+            // exec-out 管道断开 → 设备端 agent 因 stdout 写失败自行退出
+            if let tauri::WindowEvent::CloseRequested { .. } = event {
+                let state = window.state::<AppState>();
+                let mut running = state.running.lock().unwrap();
+                if *running {
+                    *running = false;
+                    drop(running);
+                    // 等采样线程检测到 running=false 并退出（最长一个 interval 周期）
+                    std::thread::sleep(std::time::Duration::from_millis(1200));
+                }
+            }
+        })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

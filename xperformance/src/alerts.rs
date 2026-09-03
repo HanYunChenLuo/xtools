@@ -58,10 +58,14 @@ pub fn parse_thresholds(rules: &[String]) -> Vec<Threshold> {
     out
 }
 
-/// 检测单次观测值是否超阈值，返回触发的规则
-pub fn check_value<'a>(thresholds: &'a [Threshold], metric: &str, value: f32) -> Vec<&'a Threshold> {
+/// 检测单次观测值是否超阈值，返回触发的规则。
+/// `is_active`: 该指标是否处于"活跃"状态（如 FPS 静止界面 frames=0 时不触发低 FPS 告警）
+pub fn check_value<'a>(thresholds: &'a [Threshold], metric: &str, value: f32, is_active: bool) -> Vec<&'a Threshold> {
     thresholds.iter().filter(|t| {
-        t.metric == metric && match t.op {
+        if t.metric != metric { return false; }
+        // 静止界面（FPS=0 无帧）不触发低值告警（如 fps<30）
+        if !is_active && t.op == '<' { return false; }
+        match t.op {
             '>' => value > t.value,
             '<' => value < t.value,
             _ => false,
@@ -113,9 +117,13 @@ mod tests {
     #[test]
     fn test_check_value() {
         let t = parse_thresholds(&["cpu>80".into(), "cpu<10".into()]);
-        assert_eq!(check_value(&t, "cpu", 85.0).len(), 1); // >80 触发
-        assert_eq!(check_value(&t, "cpu", 50.0).len(), 0); // 不触发
-        assert_eq!(check_value(&t, "cpu", 5.0).len(), 1);  // <10 触发
+        assert_eq!(check_value(&t, "cpu", 85.0, true).len(), 1); // >80 触发
+        assert_eq!(check_value(&t, "cpu", 50.0, true).len(), 0); // 不触发
+        assert_eq!(check_value(&t, "cpu", 5.0, true).len(), 1);  // <10 触发
+        // 静止时低值告警不触发（如 fps<30 在 fps=0 静止界面）
+        let fps_t = parse_thresholds(&["fps<30".into()]);
+        assert_eq!(check_value(&fps_t, "fps", 0.0, false).len(), 0); // 静止不触发
+        assert_eq!(check_value(&fps_t, "fps", 20.0, true).len(), 1); // 活跃低帧触发
     }
 
     #[test]

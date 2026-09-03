@@ -321,22 +321,20 @@ enum GpuPath {
 /// QNX host（GPU 所在侧）默认地址：SS3/8295 平台固定 172.31.101.52（virtio_net eth1 对端）
 const QNX_TELNET_IP_DEFAULT: &str = "172.31.101.52";
 
-/// 当前 QNX 地址（由 --qnx-host 参数覆盖，或用默认值）
+/// QNX 地址（全局一份，由 main() 启动时 set 一次，读线程/主循环共享）
+static QNX_IP: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
 fn qnx_ip() -> &'static str {
-    use std::sync::OnceLock;
-    static IP: OnceLock<String> = OnceLock::new();
-    IP.get_or_init(|| QNX_TELNET_IP_DEFAULT.to_string()).as_str()
+    QNX_IP.get().map(|s| s.as_str()).unwrap_or(QNX_TELNET_IP_DEFAULT)
 }
 
 fn qnx_addr() -> String {
     format!("{}:23", qnx_ip())
 }
 
-/// 设置 QNX 地址（main 启动时调用一次）
+/// 设置 QNX 地址（main 启动时调用一次，必须在任何 qnx_ip() 调用之前）
 fn set_qnx_host(ip: &str) {
-    use std::sync::OnceLock;
-    static IP: OnceLock<String> = OnceLock::new();
-    let _ = IP.set(ip.to_string());
+    let _ = QNX_IP.set(ip.to_string());
 }
 
 /// GPU 路径探测（带平台提示）
@@ -481,19 +479,25 @@ fn spawn_qnx_gpu(period_ms: u64) -> Option<(std::process::Child, std::process::C
         }
     }
     let deadline = Instant::now() + Duration::from_secs(8);
-    read_until(&mut reader, "login:", deadline)?;
-    stdin.write_all(b"root\n").ok()?;
-    // 等 shell prompt：QNX 登录成功后的提示符是 "# "（同样无换行）
-    read_until(&mut reader, "# ", deadline)?;
-    // 开 kgsl 统计并启动持续流（-W 只跟新日志不回放历史；grep 过滤 VHAL 等海量无关日志）
-    let cmds = format!(
-        "echo gpu_set_log_level 4 > /dev/kgsl-control\n\
-         echo gpubusystats {} > /dev/kgsl-control\n\
-         echo gpu_per_process_busy {} > /dev/kgsl-control\n\
-         slog2info -W | grep kgsl\n",
-        period_ms, period_ms
-    );
-    stdin.write_all(cmds.as_bytes()).ok()?;
+    // 登录/初始化失败时 kill 子进程，避免设备上残留 busybox telnet
+    let result = (|| {
+        read_until(&mut reader, "login:", deadline)?;
+        stdin.write_all(b"root\n").ok()?;
+        read_until(&mut reader, "# ", deadline)?;
+        let cmds = format!(
+            "echo gpu_set_log_level 4 > /dev/kgsl-control\n\
+             echo gpubusystats {} > /dev/kgsl-control\n\
+             echo gpu_per_process_busy {} > /dev/kgsl-control\n\
+             slog2info -W | grep kgsl\n",
+            period_ms, period_ms
+        );
+        stdin.write_all(cmds.as_bytes()).ok()?;
+        Some(())
+    })();
+    if result.is_none() {
+        let _ = child.kill();
+        return None;
+    }
     Some((child, stdin, reader))
 }
 
@@ -911,7 +915,14 @@ fn fps_sample_round(st: &mut FpsState, pid: u32, package: &str, ts: u64) {
         }
         let new_frames: Vec<u64> = match last_p {
             Some(lp) => presents.into_iter().filter(|&t| t > lp).collect(),
-            None => presents,
+            // 上轮基线为 None（新图层首轮缓冲为空）：不把整个 127 帧历史计入，
+            // 只计最近 elapsed 时长内的帧（presents 是单调纳秒时间戳，
+            // 缓冲中最新帧 ≈ now，因此下界 = latest - elapsed）
+            None => {
+                let elapsed_ns = (elapsed * 1e9) as u64;
+                let cutoff = latest.unwrap_or(0).saturating_sub(elapsed_ns);
+                presents.into_iter().filter(|&t| t > cutoff).collect()
+            }
         };
         let fps = new_frames.len() as f32 / elapsed;
         let jank = count_jank(last_p, &new_frames);
