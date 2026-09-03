@@ -137,6 +137,28 @@ class LineChart {
       ctx.fillRect(legendX, 11, 10, 10);
       legendX -= 10;
     });
+    // 打点竖线（全局 markers 数组）
+    if (window.markers && window.markers.length > 0) {
+      const plotH = H - B - T;
+      for (const m of window.markers) {
+        const mt = m.timestamp;
+        if (mt < tMin || mt > tMax) continue;
+        const x = L + plotW * (mt - tMin) / span;
+        ctx.strokeStyle = '#f38ba8';
+        ctx.lineWidth = 1.5;
+        ctx.setLineDash([4, 4]);
+        ctx.beginPath();
+        ctx.moveTo(x, T);
+        ctx.lineTo(x, T + plotH);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        // 标签（右对齐，避免越界）
+        ctx.fillStyle = '#f38ba8';
+        ctx.font = '11px system-ui, sans-serif';
+        const tw = ctx.measureText(m.label).width;
+        ctx.fillText(m.label, Math.min(x + 4, W - R - tw), T - 4);
+      }
+    }
   }
   drawAxes(l, t, r, b) {
     const { ctx } = this;
@@ -175,6 +197,7 @@ const gpuHist = [];  // [{t, busy, mhz}]
 const gpumemHist = {}; // pid -> [{t, mb, gmb}]（--gpu 保底路径）
 const gpuprocHist = {}; // pid -> [{t, busy}]（--gpu QNX 路径每进程 busy%）
 let maxkhz = [];     // AgentHello 带的每核最大频率（KHz）
+window.markers = []; // 打点事件（{label, timestamp}），LineChart.draw() 画竖线
 
 // ---- 实时数值面板：各指标最新值，500ms 节流渲染 ----
 const liveData = {}; // key -> { label, value, unit, color }
@@ -402,6 +425,23 @@ function autoCheck(id) {
 }
 _diag('listen(sample) registered');
 
+// ---- 打点：marker 事件（后端 add_marker 发射）→ 加入全局数组并重绘所有图表 ----
+listen('marker', (e) => {
+  const { label, timestamp } = e.payload;
+  window.markers.push({ label, timestamp });
+  for (const c of allCharts) c.draw();
+  _diag('marker: ' + label);
+});
+
+// ---- 打点按钮：输入标签 → 调后端 add_marker → 追加 markers + 重绘 ----
+document.getElementById('markerBtn').addEventListener('click', async () => {
+  const input = document.getElementById('markerLabel');
+  const label = input.value.trim() || '打点';
+  input.value = '';
+  await invoke('add_marker', { label });
+  _diag('markerBtn: ' + label);
+});
+
 document.getElementById('startBtn').addEventListener('click', async () => {
   _diag('startBtn CLICKED');
   const package = document.getElementById('package').value;
@@ -423,6 +463,7 @@ document.getElementById('startBtn').addEventListener('click', async () => {
   for (const k of Object.keys(gpumemHist)) delete gpumemHist[k];
   for (const k of Object.keys(gpuprocHist)) delete gpuprocHist[k];
   for (const k of Object.keys(liveData)) delete liveData[k];
+  window.markers = [];
   gpuHist.length = 0;
   renderPeaks();
   renderPidList();

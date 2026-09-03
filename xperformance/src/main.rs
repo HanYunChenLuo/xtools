@@ -171,6 +171,12 @@ async fn monitor_process_agent(args: &Args, flags: xperf_core::MetricFlags) -> R
     if !thresholds.is_empty() {
         println!("阈值规则: {}", thresholds.iter().map(|t| &t.raw).cloned().collect::<Vec<_>>().join(", "));
     }
+    // 打点监听（Unix socket /tmp/xperf-marker.sock）
+    let marker_rx = xperf_core::start_marker_listener("/tmp/xperf-marker.sock");
+    if marker_rx.is_some() {
+        println!("打点监听: /tmp/xperf-marker.sock（echo '标签' | nc -U /tmp/xperf-marker.sock）");
+    }
+    let mut markers: Vec<xperf_core::Marker> = Vec::new();
 
     let running = Arc::new(AtomicBool::new(true));
     let r = running.clone();
@@ -214,6 +220,16 @@ async fn monitor_process_agent(args: &Args, flags: xperf_core::MetricFlags) -> R
     let mut extra = cli_utils::ExtraSeries::default();
 
     while running.load(Ordering::SeqCst) {
+        // 处理打点事件（非阻塞）
+        if let Some(rx) = &marker_rx {
+            while let Ok(m) = rx.try_recv() {
+                let ts = DateTime::from_timestamp_millis(m.timestamp_ms as i64)
+                    .map(|t| t.with_timezone(&Local))
+                    .unwrap_or_default();
+                println!("{}", format!("[{}] 📍 打点: {}", ts.format("%H:%M:%S%.3f"), m.label).magenta().bold());
+                markers.push(m);
+            }
+        }
         let ev = match stream.next_event() {
             Ok(Some(ev)) => ev,
             // EOF/读错误：adb 长连接断开或 agent 退出 → 等待设备恢复并重连，采样状态保留
@@ -593,6 +609,22 @@ async fn monitor_process_agent(args: &Args, flags: xperf_core::MetricFlags) -> R
     drop(stream); // 杀掉设备端 agent（Drop 里 kill）
     generate_final_outputs(args, &pid_stats, &thread_time_series, &extra)?;
     println!("Process Restarts: {}", restart_count.to_string().red());
+    // 写打点文件
+    if !markers.is_empty() {
+        if let Ok(dir) = cli_utils::create_timestamp_subdir(&args.package) {
+            let path = dir.join("markers.csv");
+            let content: String = markers.iter()
+                .map(|m| {
+                    let ts = DateTime::from_timestamp_millis(m.timestamp_ms as i64)
+                        .map(|t| t.with_timezone(&Local))
+                        .unwrap_or_default();
+                    format!("{},{}\n", ts.format("%H:%M:%S%.3f"), m.label)
+                })
+                .collect();
+            std::fs::write(&path, format!("Timestamp,Label\n{}", content)).ok();
+            println!("打点记录: {} 条 → {}", markers.len(), path.display());
+        }
+    }
     // 验证报告
     if !thresholds.is_empty() {
         let stats = alert_stats.lock().unwrap();

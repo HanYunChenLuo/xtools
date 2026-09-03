@@ -44,6 +44,10 @@
     </label>
     <button id="startBtn">开始监控</button>
     <button id="stopBtn" disabled>停止</button>
+    <div style="display:flex;gap:4px;margin:4px 0">
+      <input id="markerLabel" type="text" placeholder="打点标签" style="flex:1;padding:4px;background:#313244;color:#cdd6f4;border:1px solid #45475a;border-radius:3px;font-size:12px" />
+      <button id="markerBtn" class="small" style="width:auto;padding:4px 8px;flex-shrink:0">打点</button>
+    </div>
     <button id="exportBtn" class="small">导出 CSV</button>
     <div id="status">未开始</div>
     <h3>PIDs</h3>

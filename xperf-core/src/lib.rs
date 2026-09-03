@@ -1,6 +1,7 @@
 pub mod agent;
 pub mod cpu;
 pub mod fps;
+pub mod marker;
 pub mod memory;
 pub mod platform;
 pub mod utils;
@@ -8,6 +9,7 @@ pub mod utils;
 pub use agent::MetricFlags;
 pub use cpu::{CpuSample1, ThreadCpuInfo};
 pub use fps::{FpsPidState, FpsTimeSeriesData};
+pub use marker::{send_marker, start_marker_listener, Marker};
 pub use memory::{MemoryDetails, MemoryTimeSeriesData};
 pub use platform::{detect_platform, detect_platform_live, from_id, Platform, PlatformId};
 pub use utils::{get_all_processes, run_adb_command, run_command, ProcessInfo, ProcOutput};
