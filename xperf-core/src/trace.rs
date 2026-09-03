@@ -671,6 +671,63 @@ pub fn analyze_and_report(rec: &RecordedTrace, package: &str) -> Result<String> 
     Ok(text)
 }
 
+// ==================== 浏览器打开（ui.perfetto.dev 深链） ====================
+
+/// 起本地 HTTP 服务（127.0.0.1 随机端口，只服务该 trace 文件），返回 ui.perfetto.dev 深链
+/// （`#!/viewer?url=` 直开该 trace）。服务器线程随进程退出而终止——浏览器内刷新/重开
+/// 需本进程仍存活（再次点击按钮可重新起服务）。
+/// CORS：https 页面 fetch http://127.0.0.1 属 mixed content，但 Chrome/Firefox 均将
+/// loopback 视为 potentially trustworthy 豁免拦截；仍需 Access-Control-Allow-Origin 头。
+pub fn open_in_perfetto_ui(trace: &Path) -> Result<String> {
+    use std::io::{Read as _, Write as _};
+    use std::net::TcpListener;
+
+    let filename = trace
+        .file_name()
+        .context("trace 路径无文件名")?
+        .to_string_lossy()
+        .into_owned();
+    let path = trace.to_path_buf();
+    let listener = TcpListener::bind("127.0.0.1:0").context("绑定本地端口失败")?;
+    let port = listener.local_addr().context("获取本地端口失败")?.port();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            // 读请求头到空行（浏览器 GET/OPTIONS 头部 < 16KB）
+            let mut buf = [0u8; 4096];
+            let mut req = Vec::new();
+            loop {
+                match stream.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        req.extend_from_slice(&buf[..n]);
+                        if req.windows(4).any(|w| w == b"\r\n\r\n") || req.len() > 16384 {
+                            break;
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+            let is_options = req.starts_with(b"OPTIONS");
+            let body = if is_options { Vec::new() } else { std::fs::read(&path).unwrap_or_default() };
+            let status = if is_options { "204 No Content" } else { "200 OK" };
+            let header = format!(
+                "HTTP/1.1 {}\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\n\
+                 Access-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, OPTIONS\r\n\
+                 Access-Control-Allow-Headers: *\r\nConnection: close\r\n\r\n",
+                status,
+                body.len()
+            );
+            let _ = stream.write_all(header.as_bytes());
+            let _ = stream.write_all(&body);
+        }
+    });
+    Ok(format!(
+        "https://ui.perfetto.dev/#!/viewer?url=http://127.0.0.1:{}/{}",
+        port, filename
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -749,6 +806,36 @@ mod tests {
         assert_eq!(cell_f64(&row, 1), 3.5);
         assert_eq!(cell_u64(&row, 1), 3);
         assert_eq!(cell_str(&row, 0), "[NULL]");
+    }
+
+    #[test]
+    fn test_open_in_perfetto_ui_serves_file() {
+        use std::io::{Read as _, Write as _};
+        let dir = std::env::temp_dir().join(format!("xperf_tp_test_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("t.pftrace");
+        std::fs::write(&f, b"hello-trace").unwrap();
+        let url = open_in_perfetto_ui(&f).unwrap();
+        assert!(url.starts_with("https://ui.perfetto.dev/#!/viewer?url=http://127.0.0.1:"));
+        assert!(url.ends_with("/t.pftrace"));
+        let addr = url.split("url=http://").nth(1).unwrap().split('/').next().unwrap().to_string();
+        // GET：200 + CORS 头 + 文件内容
+        let mut s = std::net::TcpStream::connect(&addr).unwrap();
+        s.write_all(b"GET /t.pftrace HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n").unwrap();
+        let mut buf = Vec::new();
+        s.read_to_end(&mut buf).unwrap();
+        let resp = String::from_utf8_lossy(&buf);
+        assert!(resp.starts_with("HTTP/1.1 200 OK"), "resp: {}", &resp[..60.min(resp.len())]);
+        assert!(resp.contains("Access-Control-Allow-Origin: *"));
+        assert!(resp.contains("Content-Length: 11"));
+        assert!(resp.ends_with("hello-trace"));
+        // OPTIONS 预检：204
+        let mut s = std::net::TcpStream::connect(&addr).unwrap();
+        s.write_all(b"OPTIONS /t.pftrace HTTP/1.1\r\nHost: x\r\nOrigin: https://ui.perfetto.dev\r\nConnection: close\r\n\r\n").unwrap();
+        let mut buf = Vec::new();
+        s.read_to_end(&mut buf).unwrap();
+        assert!(String::from_utf8_lossy(&buf).starts_with("HTTP/1.1 204"));
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

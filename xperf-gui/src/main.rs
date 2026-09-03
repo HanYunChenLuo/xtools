@@ -278,43 +278,45 @@ fn stop_sampling(state: State<'_, AppState>) -> Result<(), String> {
 }
 
 /// 后台深挖线程（start_trace 命令与 --trace 自动启动共用）：
-/// 录制 → 拉回 → trace_processor SQL 分析，全程 emit("trace", {stage, message}) 推进度。
-/// stage: recording（录制中）/ recorded（已拉回，分析中）/ done（message=完整报告文本）/ error。
+/// 录制 → 拉回 → trace_processor SQL 分析，全程 emit("trace") 推进度。
+/// stage: recording / recorded（已拉回，分析中）/ done（message=完整报告文本）/ error；
+/// recorded/done 附 trace_path（前端"在浏览器打开 Perfetto UI"按钮用）。
 /// 与采样会话互不干扰（可并行；GUI 采样不限时，窗口对照靠报告与图表的时间戳）。
 fn spawn_trace(app: tauri::AppHandle, package: String, seconds: u64, running: Arc<Mutex<bool>>) {
     eprintln!("[trace] 启动: package={} seconds={}", package, seconds);
     std::thread::spawn(move || {
-        let emit_stage = |stage: &str, message: String| {
-            let _ = app.emit("trace", serde_json::json!({ "stage": stage, "message": message }));
+        let emit_stage = |stage: &str, message: String, trace_path: Option<String>| {
+            let _ = app.emit(
+                "trace",
+                serde_json::json!({ "stage": stage, "message": message, "trace_path": trace_path }),
+            );
         };
         let dir = std::path::PathBuf::from("log")
             .join(&package)
             .join(Local::now().format("%Y%m%d_%H%M%S").to_string())
             .join("trace");
-        emit_stage("recording", format!("录制 {}s perfetto trace…（窗口内操作被测应用）", seconds));
+        emit_stage("recording", format!("录制 {}s perfetto trace…（窗口内操作被测应用）", seconds), None);
         let rec = match xperf_core::trace::record(seconds, &dir) {
             Ok(r) => r,
             Err(e) => {
                 eprintln!("[trace] 录制失败: {}", e);
-                emit_stage("error", format!("录制失败: {}", e));
+                emit_stage("error", format!("录制失败: {}", e), None);
                 *running.lock().unwrap() = false;
                 return;
             }
         };
-        eprintln!(
-            "[trace] 已拉回: {}（{:.1} MB）",
-            rec.local_path.display(),
-            rec.bytes as f64 / 1e6
-        );
+        let trace_path = rec.local_path.display().to_string();
+        eprintln!("[trace] 已拉回: {}（{:.1} MB）", trace_path, rec.bytes as f64 / 1e6);
         emit_stage(
             "recorded",
-            format!("已拉回 {}（{:.1} MB），SQL 分析中…", rec.local_path.display(), rec.bytes as f64 / 1e6),
+            format!("已拉回 {}（{:.1} MB），SQL 分析中…", trace_path, rec.bytes as f64 / 1e6),
+            Some(trace_path.clone()),
         );
         match xperf_core::trace::analyze_and_report(&rec, &package) {
-            Ok(report) => emit_stage("done", report),
+            Ok(report) => emit_stage("done", report, Some(trace_path)),
             Err(e) => {
                 eprintln!("[trace] 分析失败: {}", e);
-                emit_stage("error", format!("{}", e));
+                emit_stage("error", format!("{}", e), Some(trace_path));
             }
         }
         *running.lock().unwrap() = false;
@@ -332,7 +334,7 @@ async fn start_trace(
     {
         let mut t = state.trace_running.lock().map_err(|e| e.to_string())?;
         if *t {
-            return Err("深挖录制进行中，请等待完成".into());
+            return Err("Perfetto 分析进行中，请等待完成".into());
         }
         *t = true;
     }
@@ -343,6 +345,26 @@ async fn start_trace(
     let seconds = seconds.clamp(1, 600);
     spawn_trace(app, package, seconds, state.trace_running.clone());
     Ok(())
+}
+
+/// 在浏览器打开 ui.perfetto.dev 并加载指定 trace：起本地 HTTP 服务 + 深链 ?url=
+/// （服务随进程存活；进程退出后浏览器内刷新需重新点击按钮）。
+#[tauri::command]
+fn open_perfetto_ui(trace_path: String) -> Result<String, String> {
+    let path = std::path::PathBuf::from(&trace_path);
+    if !path.is_file() {
+        return Err(format!("trace 文件不存在: {}", trace_path));
+    }
+    let url = xperf_core::trace::open_in_perfetto_ui(&path).map_err(|e| e.to_string())?;
+    #[cfg(target_os = "macos")]
+    let browser_cmd = "open";
+    #[cfg(not(target_os = "macos"))]
+    let browser_cmd = "xdg-open";
+    std::process::Command::new(browser_cmd)
+        .arg(&url)
+        .spawn()
+        .map_err(|e| format!("打开浏览器失败（{}）: {}；可手动访问 {}", browser_cmd, e, url))?;
+    Ok(url)
 }
 
 /// 诊断命令：前端 JS 执行时调用，把消息写到 /tmp/xperf_gui_diag.log。
@@ -632,6 +654,7 @@ fn main() {
             start_sampling,
             stop_sampling,
             start_trace,
+            open_perfetto_ui,
             diag_log,
             list_packages,
             is_running,
