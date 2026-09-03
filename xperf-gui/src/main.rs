@@ -582,7 +582,7 @@ mod tests {
         gpumem.insert("1234".to_string(), vec![(1700000000000.0, 154.4, 2639.1)]);
         let mut gpuproc = std::collections::HashMap::new();
         gpuproc.insert("1234".to_string(), vec![(1700000000000.0, 14.4)]);
-        let dir = export_csv(pkg.clone(), cpu, Default::default(), fps, freq, temp, gpu, io, net, gpumem, gpuproc).unwrap();
+        let dir = export_csv(pkg.clone(), cpu, Default::default(), fps, freq, temp, gpu, io, net, gpumem, gpuproc).await.unwrap();
         let cpu_csv = std::fs::read_to_string(format!("{}/cpu/cpu_1234_data.csv", dir)).unwrap();
         assert!(cpu_csv.starts_with("Timestamp,Process CPU (%)\n"));
         assert!(cpu_csv.contains(",12.50\n"));

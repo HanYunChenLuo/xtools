@@ -6,58 +6,6 @@ use std::sync::Mutex;
 // 全局静态变量，用于跟踪中断状态
 static INTERRUPT_FLAG: AtomicBool = AtomicBool::new(false);
 
-#[derive(Debug)]
-pub struct ProcessInfo {
-    pub pid: String,
-    pub start_time: String,
-}
-
-pub fn check_adb_connection() -> bool {
-    if let Ok(output) = Command::new("adb").arg("devices").output() {
-        if output.status.success() {
-            let devices = String::from_utf8_lossy(&output.stdout);
-            return devices.lines().skip(1).any(|line| !line.trim().is_empty());
-        }
-    }
-    false
-}
-
-/// 获取包名下所有进程（cmdline 等于包名的进程，多进程应用可能返回多个）。
-/// pidof 在进程不存在时退出码非零且 stdout 为空，靠 stdout 是否为空判断。
-pub fn get_all_processes(package: &str) -> Result<Vec<ProcessInfo>> {
-    let output = run_adb_command(&["shell", "pidof", package])?;
-    let pids: Vec<&str> = output.stdout.split_whitespace().collect();
-    if pids.is_empty() {
-        anyhow::bail!("Process not found for package: {}", package);
-    }
-    let mut processes = Vec::with_capacity(pids.len());
-    for pid in pids {
-        let start_time = run_adb_command(&[
-            "shell",
-            "stat",
-            "-c",
-            "%y",
-            format!("/proc/{}/cmdline", pid).as_str(),
-        ])?;
-        processes.push(ProcessInfo {
-            pid: pid.to_string(),
-            start_time: start_time.stdout.trim().to_string(),
-        });
-    }
-    Ok(processes)
-}
-
-/// 子进程执行结果。
-///
-/// 注意区分两种"失败"：
-/// - **子进程无法启动**：`run_command` 返回 `Err`。
-/// - **子进程退出码非零**：`stdout` 仍可能含有效内容。例如 `cat` 部分文件缺失、
-///   `pidof` 找不到进程、`grep` 未命中都会返回非零退出码，但 stdout 照常返回。
-///   调用方按语义判断：只需 stdout 内容时直接用 `stdout`。
-///
-/// 后续如需严格判断退出码或诊断 stderr，可在此结构体补充字段：
-///   `success: bool`（退出码是否为 0）、`exit_code: i32`、`stderr: String`。
-#[derive(Debug, Clone)]
 pub struct ProcOutput {
     /// 子进程 stdout（已清洗 ANSI 控制字符）。
     pub stdout: String,
@@ -144,10 +92,6 @@ pub fn set_interrupt_flag() {
     INTERRUPT_FLAG.store(true, AtomicOrdering::SeqCst);
 }
 
-pub fn is_being_interrupted() -> bool {
-    INTERRUPT_FLAG.load(AtomicOrdering::SeqCst)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -204,73 +148,5 @@ mod tests {
         let stdout = "\n";
         let pids: Vec<&str> = stdout.split_whitespace().collect();
         assert!(pids.is_empty());
-    }
-
-    // ---- get_all_processes（注入 mock adb runner）----
-
-    fn mock_runner_for_get_all_processes(args: &[&str]) -> Result<ProcOutput> {
-        if args.len() >= 3 && args[0] == "shell" && args[1] == "pidof" {
-            return Ok(ProcOutput {
-                stdout: "1119 16071\n".to_string(),
-            });
-        }
-        if args.len() >= 5 && args[1] == "stat" {
-            let path = args[4];
-            if let Some(pid_start) = path.find("/proc/") {
-                let rest = &path[pid_start + 6..];
-                if let Some(pid_end) = rest.find('/') {
-                    let pid = &rest[..pid_end];
-                    return Ok(ProcOutput {
-                        stdout: format!("2026-09-01 10:00:00.000000000 +0800 pid={}\n", pid),
-                    });
-                }
-            }
-        }
-        Ok(ProcOutput { stdout: String::new() })
-    }
-
-    #[test]
-    fn test_get_all_processes_multi_pid() {
-        let _lock = ADB_TEST_LOCK.blocking_lock();
-        set_adb_runner_for_test(mock_runner_for_get_all_processes);
-        let procs = get_all_processes("com.lixiang.car.browser").unwrap();
-        assert_eq!(procs.len(), 2);
-        assert_eq!(procs[0].pid, "1119");
-        assert_eq!(procs[1].pid, "16071");
-        assert!(procs[0].start_time.contains("pid=1119"));
-        assert!(procs[1].start_time.contains("pid=16071"));
-        clear_adb_runner_for_test();
-    }
-
-    #[test]
-    fn test_get_all_processes_single_pid() {
-        fn single(args: &[&str]) -> Result<ProcOutput> {
-            if args[1] == "pidof" {
-                return Ok(ProcOutput { stdout: "15803\n".to_string() });
-            }
-            Ok(ProcOutput { stdout: "2026-09-01 10:00:00 +0800\n".to_string() })
-        }
-        let _lock = ADB_TEST_LOCK.blocking_lock();
-        set_adb_runner_for_test(single);
-        let procs = get_all_processes("com.x").unwrap();
-        assert_eq!(procs.len(), 1);
-        assert_eq!(procs[0].pid, "15803");
-        clear_adb_runner_for_test();
-    }
-
-    #[test]
-    fn test_get_all_processes_not_found() {
-        fn empty(_args: &[&str]) -> Result<ProcOutput> {
-            Ok(ProcOutput { stdout: "\n".to_string() })
-        }
-        let _lock = ADB_TEST_LOCK.blocking_lock();
-        set_adb_runner_for_test(empty);
-        let err = get_all_processes("com.nonexistent").unwrap_err();
-        assert!(
-            err.to_string().contains("Process not found"),
-            "应报 Process not found，实际: {}",
-            err
-        );
-        clear_adb_runner_for_test();
     }
 }
