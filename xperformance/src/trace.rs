@@ -205,14 +205,14 @@ pub fn ensure_trace_processor() -> Result<PathBuf> {
     let script = base.join("trace_processor");
     let url = "https://get.perfetto.dev/trace_processor";
     let ok = Command::new("curl")
-        .args(["-fsSL", "-o"])
+        .args(["-fsSL", "-m", "60", "-o"])
         .arg(&script)
         .arg(url)
         .output()
         .map(|o| o.status.success())
         .or_else(|_| {
             Command::new("wget")
-                .args(["-q", "-O"])
+                .args(["-q", "-T", "60", "-O"])
                 .arg(&script)
                 .arg(url)
                 .output()
@@ -317,23 +317,28 @@ fn build_sql(package: &str) -> String {
          where st.state in ('R', 'R+') and p.name = '{pkg}' \
          group by t.tid, t.name order by runnable_ms desc limit 10;\n"
     ));
-    // 5. 系统级 CPU top（upid=0 的内核线程桶 name 为 NULL）
+    // 5. 系统级 CPU top（排除 idle：swapper 切片 utid=0 且挂到 upid=0 的无名进程，
+    //    不排除会把 idle 时间淹没进"(内核线程)"桶，空闲机器上虚占 80%+）
     q.push_str(&marker.replace("%s", "top_procs"));
     q.push_str(
         "select ifnull(p.name, '(内核线程)') as process, sum(s.dur)/1e6 as cpu_ms \
          from sched s join thread t using(utid) join process p on t.upid = p.upid \
-         group by p.name order by cpu_ms desc limit 10;\n",
+         where s.utid != 0 group by p.name order by cpu_ms desc limit 10;\n",
     );
-    // 6. 每核 busy/切换次数
+    // 6. 每核 busy/切换次数（排除 idle 切片与 idle 切换，反映真实调度压力；
+    //    sched 表含切换到 swapper 的切片，不排除则每核恒 ~100%）
     q.push_str(&marker.replace("%s", "per_core"));
-    q.push_str("select cpu, sum(dur)/1e6 as busy_ms, count(*) as switches from sched group by cpu order by cpu;\n");
+    q.push_str(
+        "select cpu, sum(dur)/1e6 as busy_ms, count(*) as switches from sched \
+         where utid != 0 group by cpu order by cpu;\n",
+    );
     // 7. CPU 频率（无 cpufreq ftrace 事件的平台为空结果，如 SS3 GVM）
     q.push_str(&marker.replace("%s", "cpufreq"));
     q.push_str(
         "select ct.cpu, min(c.value)/1e3 as min_mhz, max(c.value)/1e3 as max_mhz, \
          avg(c.value)/1e3 as avg_mhz \
          from counter c join cpu_counter_track ct on c.track_id = ct.id \
-         where ct.name = 'cpufreq' group by ct.cpu order by ct.cpu limit 16;\n",
+         where ct.name = 'cpufreq' group by ct.cpu order by ct.cpu;\n",
     );
     // 8. 帧时间线（表可能不存在 → 放最后，出错只损失本段）
     q.push_str(&marker.replace("%s", "frame_stats"));
@@ -580,7 +585,7 @@ impl Analysis {
             }
         }
 
-        s.push_str("\n── 同窗口系统 CPU top（谁在占核）──\n");
+        s.push_str("\n── 同窗口系统 CPU top（谁在占核，已排除 idle）──\n");
         if self.top_procs.is_empty() {
             s.push_str("  无调度事件\n");
         } else {
@@ -590,7 +595,7 @@ impl Analysis {
         }
 
         if !self.per_core.is_empty() {
-            s.push_str("\n── 每核 busy ──\n");
+            s.push_str("\n── 每核 busy（非 idle）──\n");
             for c in &self.per_core {
                 let p = if self.window_ms > 0.0 { c.busy_ms / self.window_ms * 100.0 } else { 0.0 };
                 s.push_str(&format!(
@@ -662,7 +667,9 @@ pub fn analyze_and_report(rec: &RecordedTrace, package: &str) -> Result<()> {
         Ok(a) => {
             let text = a.report(package, rec);
             let out_path = rec.local_path.with_file_name("trace_analysis.txt");
-            std::fs::write(&out_path, &text).ok();
+            if let Err(e) = std::fs::write(&out_path, &text) {
+                println!("{}", format!("trace_analysis.txt 写入失败: {}", e).yellow());
+            }
             println!("{}", text);
             println!("分析报告: {} | 查询语句: {}", out_path.display(), sql_path.display());
         }
@@ -706,6 +713,14 @@ mod tests {
         let pos_frame = q.find("actual_frame_timeline_slice").unwrap();
         let pos_end = q.rfind("===END===").unwrap();
         assert!(pos_freq < pos_frame && pos_frame < pos_end);
+        // idle（swapper，utid=0）必须从系统级聚合排除：不排除则空闲机器每核
+        // "busy" 恒 ~100%、(内核线程) 桶被 idle 时间淹没
+        let pos_top = q.find("top_procs").unwrap();
+        let top_seg = &q[pos_top..pos_top + 400];
+        assert!(top_seg.contains("s.utid != 0"));
+        let pos_core = q.find("per_core").unwrap();
+        let core_seg = &q[pos_core..pos_core + 300];
+        assert!(core_seg.contains("utid != 0"));
         // marker 分段齐全
         for s in ["bounds", "pkg_total", "pkg_threads", "pkg_runnable", "top_procs", "per_core", "cpufreq", "frame_stats", "worst_frames", "END"] {
             assert!(q.contains(&format!("==={}===", s)), "missing marker {}", s);
