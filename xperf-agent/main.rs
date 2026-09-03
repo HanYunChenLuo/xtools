@@ -690,6 +690,34 @@ fn parse_temperature_entry(s: &str) -> Option<(String, i32, f32)> {
     Some((name, type_, value))
 }
 
+/// 读取 sysfs thermal zones（兜底：thermalservice 无数据时用，如 SS2MAX）。
+/// /sys/class/thermal/thermal_zoneN/{type,temp}：type=传感器名，temp=millidegree Celsius。
+/// 走 shell cat（SELinux 下 agent 可能无法直接 open sysfs，但 shell 命令可以）。
+fn read_sysfs_thermal_zones() -> (Option<i32>, Vec<(String, i32, f32)>) {
+    let cmd = "for z in /sys/class/thermal/thermal_zone*; do echo \"$(cat $z/type 2>/dev/null) $(cat $z/temp 2>/dev/null)\"; done";
+    let out = match std::process::Command::new("sh")
+        .args(["-c", cmd])
+        .output() {
+        Ok(o) => o,
+        Err(_) => return (None, Vec::new()),
+    };
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let mut sensors = Vec::new();
+    for line in stdout.lines() {
+        let line = line.trim();
+        if line.is_empty() { continue; }
+        // "aoss0-usr 39000" → ("aoss0-usr", 39.0)
+        let mut parts = line.rsplitn(2, ' ');
+        let temp_str = match parts.next() { Some(s) => s, None => continue };
+        let name = match parts.next() { Some(s) => s.to_string(), None => continue };
+        if let Ok(milli) = temp_str.parse::<i64>() {
+            sensors.push((name, 0, milli as f32 / 1000.0));
+        }
+    }
+    if sensors.is_empty() { return (None, sensors); }
+    (Some(0), sensors)
+}
+
 // ---------- 输出 ----------
 
 fn now_ms() -> u64 {
@@ -1347,27 +1375,29 @@ fn main() {
             None => {}
         }
 
-        // 温度/热降频：dumpsys thermalservice，限频 ≥2s 一轮
+        // 温度/热降频：dumpsys thermalservice 优先，失败则 sysfs thermal zones 兜底
+        // 限频 ≥2s 一轮（dumpsys ~50ms 会拖长低间隔节拍轮）
         if args.thermal && round.is_multiple_of(thermal_every) {
-            match dumpsys(&["thermalservice"]).as_deref().map(parse_thermalservice) {
-                Some((status, sensors)) if status.is_some() || !sensors.is_empty() => {
-                    let sensors_json: Vec<String> = sensors
-                        .iter()
-                        .map(|(name, type_, value)| format!("[\"{}\",{},{:.1}]", json_escape(name), type_, value))
-                        .collect();
-                    emit(&format!(
-                        "{{\"t\":\"temp\",\"ts\":{},\"status\":{},\"sensors\":[{}]}}",
-                        ts,
-                        status.unwrap_or(-1),
-                        sensors_json.join(",")
-                    ));
-                }
-                _ => {
-                    if !thermal_warned {
-                        emit("{\"t\":\"err\",\"msg\":\"thermalservice 无温度数据（--thermal 持续重试）\"}");
-                        thermal_warned = true;
-                    }
-                }
+            let from_thermal = dumpsys(&["thermalservice"]).as_deref().map(parse_thermalservice);
+            let (status, sensors) = match from_thermal {
+                // thermalservice 有数据才走（sensors 非空），否则走 sysfs 兜底
+                Some((st, s)) if !s.is_empty() => (st, s),
+                _ => read_sysfs_thermal_zones(), // 兜底：sysfs（shell cat，绕过 SELinux）
+            };
+            if !sensors.is_empty() {
+                let sensors_json: Vec<String> = sensors
+                    .iter()
+                    .map(|(name, type_, value)| format!("[\"{}\",{},{:.1}]", json_escape(name), type_, value))
+                    .collect();
+                emit(&format!(
+                    "{{\"t\":\"temp\",\"ts\":{},\"status\":{},\"sensors\":[{}]}}",
+                    ts,
+                    status.unwrap_or(-1),
+                    sensors_json.join(",")
+                ));
+            } else if !thermal_warned {
+                emit("{\"t\":\"err\",\"msg\":\"thermalservice 与 sysfs thermal zones 均无温度数据\"}");
+                thermal_warned = true;
             }
         }
 
