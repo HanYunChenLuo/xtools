@@ -26,11 +26,7 @@ pub struct ColdStartResult {
 
 /// 执行 am start -W 并解析结果。activity 格式：".MainActivity" 或完整类名
 pub fn measure(package: &str, activity: &str) -> Result<ColdStartResult> {
-    let component = if activity.starts_with('.') {
-        format!("{}/{}", package, activity)
-    } else {
-        format!("{}/{}", package, activity)
-    };
+    let component = format!("{}/{}", package, activity);
     let output = Command::new("adb")
         .args(["shell", "am", "start", "-W", &component])
         .output()?;
