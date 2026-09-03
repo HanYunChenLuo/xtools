@@ -294,7 +294,10 @@ pub fn spawn_agent(
     flags: MetricFlags,
     platform: Option<&dyn Platform>,
 ) -> Result<AgentStream> {
-    let mut cmd_args = vec!["exec-out".to_string(), DEVICE_AGENT_PATH.to_string()];
+    // setsid：agent 脱离 adb 会话——adbd 断连清理时不再被信号直杀，而是走 stdout
+    // 写失败（EPIPE）路径：心跳/退出钩子得以执行（QNX 链清理等），随后自行退出。
+    // 真机验证：无 setsid 时 timeout 杀 adb 后 QNX 统计链残留；加 setsid 后钩子生效。
+    let mut cmd_args = vec!["exec-out".to_string(), "setsid".to_string(), DEVICE_AGENT_PATH.to_string()];
     if let Some(pkg) = package {
         cmd_args.extend(["--package".to_string(), pkg.to_string()]);
     }
@@ -329,6 +332,32 @@ fn device_online() -> bool {
                 && String::from_utf8_lossy(&o.stdout).lines().skip(1).any(|l| !l.trim().is_empty())
         })
         .unwrap_or(false)
+}
+
+/// QNX kgsl 统计链停止（会话结束由 host 兜底执行）。
+/// agent 的退出钩子只在 stdout 写失败（EPIPE）路径生效；adb 断连时 adbd 按进程树
+/// 信号直杀 agent（setsid 也挡不住），钩子无机会执行。此函数经独立短 telnet 会话处理：
+/// 先纯观察探测（只读 slog，不动 kgsl-control），frame 流在跑才发 echo>（死写入者）
+/// 停止命令——对已停链写入会将其全部复活（真机实测 toggle 语义），故不可无条件执行。
+pub fn qnx_stop_stats(platform: &dyn crate::platform::Platform, interval_ms: u64) {
+    let Some(ip) = platform.qnx_host() else { return };
+    let period = interval_ms.clamp(100, 1000);
+    // 探测：~5s 纯观察（只读 slog 不写 kgsl-control，无副作用）
+    let probe = format!(
+        "({{ sleep 1; echo root; sleep 1; echo 'slog2info -W | grep frame &'; sleep 3; }} | busybox telnet {})",
+        ip
+    );
+    let Ok(out) = Command::new("adb").arg("shell").arg(&probe).output() else { return };
+    let flowing = String::from_utf8_lossy(&out.stdout).matches("frame ").count();
+    if flowing < 2 {
+        return; // 链未在流（agent 退出钩子已清理 / 本就无链）：不写，死写入者撞停链会复活
+    }
+    // 停链：echo>（死写入者）式写入对流链 = 停止全部（真机实测，fd3 活连接存在时亦有效）
+    let kill = format!(
+        "({{ sleep 1; echo root; sleep 1; echo 'echo gpubusystats {} > /dev/kgsl-control'; sleep 2; }} | busybox telnet {})",
+        period, ip
+    );
+    let _ = Command::new("adb").arg("shell").arg(&kill).output();
 }
 
 /// 断连恢复：事件流 EOF（adb 长连接断开 / agent 进程退出）后调用。
