@@ -197,6 +197,37 @@ pub(super) fn start(interval_ms: u64, pid_names: &Arc<Mutex<HashMap<String, u32>
     }
 }
 
+/// 看门狗单步决策（纯函数，语义由单测锁定——阈值回退会重新引入长测误伤）。
+#[derive(Debug, PartialEq, Eq)]
+enum WatchdogAction {
+    /// 有新样本：misses/heals 归零
+    Progress,
+    /// 宽限期内：不计数不动作
+    Wait,
+    /// 记一次缺失：未达阈值，继续等
+    Count,
+    /// 连续第 3 次缺失且自愈次数未用尽：重写 gpubusystats
+    Heal,
+    /// 达阈值但自愈次数用尽：等主机侧重连重建通道
+    GiveUp,
+}
+
+fn watchdog_step(have_new: bool, past_grace: bool, misses: u32, heals: u32) -> WatchdogAction {
+    if have_new {
+        return WatchdogAction::Progress;
+    }
+    if !past_grace {
+        return WatchdogAction::Wait;
+    }
+    if misses + 1 < 3 {
+        return WatchdogAction::Count;
+    }
+    if heals >= 3 {
+        return WatchdogAction::GiveUp;
+    }
+    WatchdogAction::Heal
+}
+
 /// QNX kgsl 统计链看门狗（2026-09-03 真机实测的行为兜底）：
 /// - 统计链为驱动全局，会话/fd 关闭都不清理；echo> 式死写入者撞存量链只 flush 一窗即停
 /// - 长活连接（exec 3>）写入时连接存活 → 存量链全部重相位（计数归零）后持续输出
@@ -219,37 +250,33 @@ fn spawn_watchdog(period_ms: u64, stdin: Arc<Mutex<std::process::ChildStdin>>, s
         loop {
             std::thread::sleep(period);
             let c = sys_count.load(Ordering::Relaxed);
-            if c > last {
-                last = c;
-                misses = 0;
-                heals = 0;
-                continue;
-            }
-            if Instant::now() - start < grace {
-                continue; // 流尚未出首样，不判断停走
-            }
-            misses += 1;
-            if misses < 3 {
-                continue; // 单次缺失多为窗口相位漂移，不动作
-            }
-            if heals >= 3 {
-                return; // 连续自愈无效，等主机侧重连重建通道
-            }
-            heals += 1;
-            misses = 0;
-            let cmd = format!("echo gpubusystats {} >&3\n", period_ms);
-            {
-                let Ok(mut w) = stdin.lock() else { return };
-                if w.write_all(cmd.as_bytes()).is_err() {
-                    return; // 通道已断（读线程已 kill 子进程），静默退出
+            match watchdog_step(c > last, Instant::now() - start >= grace, misses, heals) {
+                WatchdogAction::Progress => {
+                    last = c;
+                    misses = 0;
+                    heals = 0;
+                }
+                WatchdogAction::Wait => {}
+                WatchdogAction::Count => misses += 1,
+                WatchdogAction::GiveUp => return,
+                WatchdogAction::Heal => {
+                    heals += 1;
+                    misses = 0;
+                    let cmd = format!("echo gpubusystats {} >&3\n", period_ms);
+                    {
+                        let Ok(mut w) = stdin.lock() else { return };
+                        if w.write_all(cmd.as_bytes()).is_err() {
+                            return; // 通道已断（读线程已 kill 子进程），静默退出
+                        }
+                    }
+                    emit(&format!(
+                        "{{\"t\":\"err\",\"msg\":\"QNX GPU frame 流停走，经 fd3 重写 gpubusystats 自愈（第 {} 次）\"}}",
+                        heals
+                    ));
+                    // 重相位后首个窗口完成需 ~1-2s，期间不重复检查
+                    std::thread::sleep(period * 3);
                 }
             }
-            emit(&format!(
-                "{{\"t\":\"err\",\"msg\":\"QNX GPU frame 流停走，经 fd3 重写 gpubusystats 自愈（第 {} 次）\"}}",
-                heals
-            ));
-            // 重相位后首个窗口完成需 ~1-2s，期间不重复检查
-            std::thread::sleep(period * 3);
         }
     });
 }
@@ -282,5 +309,27 @@ mod tests {
         // 无关行
         assert!(parse_line("random log line").is_none());
         assert!(parse_line("frame 1: something without utilization").is_none());
+    }
+
+    /// 看门狗决策语义锁定：单次缺失是窗口相位漂移（实测窗口 ~1001.5ms > 检查周期
+    /// 1000ms，长会话约每 11 分钟必现一次），3 连续缺失才自愈——阈值回退到 1 会
+    /// 重新引入长测误伤（重相位 1-2s 数据缺口 + 误告警行），真机短测无法发现。
+    #[test]
+    fn test_watchdog_step() {
+        use WatchdogAction::*;
+        // 有新样本：任何状态下都归零继续
+        assert_eq!(watchdog_step(true, false, 0, 0), Progress);
+        assert_eq!(watchdog_step(true, true, 2, 2), Progress);
+        // 宽限期内：不计数不动作（即使已连续缺失）
+        assert_eq!(watchdog_step(false, false, 2, 0), Wait);
+        // 单次/两次缺失：只计数不动作
+        assert_eq!(watchdog_step(false, true, 0, 0), Count);
+        assert_eq!(watchdog_step(false, true, 1, 0), Count);
+        // 第 3 次连续缺失 → 自愈
+        assert_eq!(watchdog_step(false, true, 2, 0), Heal);
+        // 恢复后 heals 归零（Progress 分支），再次 3 缺失仍可自愈
+        assert_eq!(watchdog_step(false, true, 2, 1), Heal);
+        // 自愈次数用尽 → 放弃
+        assert_eq!(watchdog_step(false, true, 2, 3), GiveUp);
     }
 }
