@@ -16,6 +16,7 @@
 | commit | 内容 |
 |--------|------|
 | ca01aa6 | xperformance/src/trace.rs 新模块：录制 + trace_processor 定位/引导 + SQL 分析 + 报告；main.rs 集成 `--trace N`（独立/并行两模式 + 限时采样）；xperf-core utils 加 `is_interrupted()`（含 CLAUDE/WORKSPACE/SESSION 文档） |
+| 4b6a00d | code review 修复：①idle 口径 bug（实测发现 sched 表含 swapper 切片：utid=0 挂 upid=0 无名进程，不排除则空闲机器每核 busy 恒 ~99.7%、(内核线程) 桶被 idle 淹没 80%+ → top_procs/per_core 加 `utid != 0`，真机复测每核 3.4%~22.1% 合理、真实进程浮现）②cpufreq 去掉 limit 16 ③引导下载加超时（curl -m/wget -T 60）④trace_analysis.txt 写失败告警；单测锁定 idle 排除 |
 
 ### 完成内容
 
@@ -39,6 +40,8 @@
 ### 遗留问题
 
 - 长录制（>60s）超时/中断路径未真机实测（有兜底逻辑）；600s 上限内 write_into_file 理论无内存问题
+- 限时采样（--trace）+ 采集中途断连：主循环进 reconnect_agent 无限轮询等设备，deadline 不打断重连（Ctrl-C 可退；修复需给 reconnect 回调传 deadline，收益小改动大，记录不修）
+- trace_processor 分析大 trace（600s ~700MB）加载耗时数分钟，无超时（Ctrl-C 可中断，深挖场景等得起，设计如此）
 - simpleperf 调用栈采样（"CPU 高在哪个函数"）为下轮 C 类候选
 
 ---
