@@ -7,6 +7,32 @@
 
 ---
 
+## 2026-09-03（三）晚 — agent 单文件模块化拆分 + mtime 检查修复 + SS2MAX 回归
+
+**任务线**：WORKSPACE D 类第一项——xperf-agent 1848 行单文件拆分（src 布局已就位），拆完真机回归。
+
+### 完成内容
+
+- `xperf-agent/src/` 拆为 10 文件：`main.rs`（490 行：协议头注释/Args/节拍循环/公共工具 emit·json_escape·now_ms·dumpsys）、`proc.rs`（/proc+sysfs 读取 + PidState::sample_cpu）、`mem.rs`（smaps/meminfo，sample_memory）、`fps.rs`（FpsState::sample_round）、`thermal.rs`（sample）、`gpu/{mod,kgsl,qnx,topgpu,ligfx}.rs`
+- 三份重复读线程骨架（QNX/TopGpu/Ligfx）抽公共 `gpu::spawn_stream_parser`（keepalive stdin 保活 + eof_err 参数化）；三通道样本枚举归一为 `GpuEvent::Sys/Proc`，emit 按通道字段有无按需输出（wire 格式逐字节不变）
+- main 循环里四段完全相同的 gpumem 补采臂（Qnx/TopGpu/Ligfx/DumpMem）合并为一
+- 删除 `detect_gpu_path` 死代码包装
+- **host 侧修复**：`ensure_agent_built` 原来只比较 `xperf-agent/main.rs` mtime——拆分后改子模块不会触发重建；改为 `newest_mtime_under(src)` 扫整棵 src 树取最新 mtime
+- 测试 23 个随模块迁移（全绿，workspace 60）；clippy 零警告；交叉编译通过
+
+### 真机回归（SS2MAX d1f39648c1f，SS3 不在线）
+
+- CLI 全指标 500ms 跑 35s：CPU/内存全分类/FPS/频率/温度(sysfs 44 传感器)/IO/网络全流，图表全生成，SIGINT 优雅退出；touch 子模块触发自动重建验证通过
+- **新旧 agent 同机对比**（git worktree 检出拆分前代码，adb 直跑同参数）：事件类型分布、wire 格式、数值量级完全一致（500ms：cpu 17/18、temp 4/4、overrun 14/15；100ms：smaps pss 194503/194439 KB、overrun 65/60）——**无回归**
+- 新发现（数据源限制，非代码问题）：**SS2MAX gpubusy 计数器恒 `0 0`**（30 次采样全零，total_time 停走 → `dtotal>0` 永不成立 → kgsl 通道无事件；gpuclk 正常 427MHz）——新旧行为一致；SVM 的 smaps_rollup Pss ~194MB vs meminfo TOTAL PSS ~378MB（Graphics 220MB 不计入 smaps Pss），两路径差异固有
+
+### 遗留问题
+
+- SS3 QNX 流式通道拆分后未真机回归（解析有单测、读线程逻辑逐行对齐）；SS3 接入时跑 `--gpu --platform ss3` 补验
+- SS2MAX 全指标 500ms 每轮 overrun 0.4-2s（FPS 图层重发现全量 dumpsys ~1.5s+ 是主因，新旧一致，设备算力限制）
+
+---
+
 ## 2026-09-03（三）— 平台抽象 + 五平台 GPU + C 类验证 + SS2MAX 实测 + 两轮 review 修复
 
 **任务线**：B 类收尾后的全面扩展——平台抽象（5 平台 trait）、各平台 GPU 通道、C 类验证能力、SS2MAX 真机实测、两轮 code review 全量修复、死代码清理。
