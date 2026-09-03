@@ -1225,6 +1225,7 @@ fn main() {
     // 温度限频：dumpsys thermalservice ~50ms 级，≥2s 一轮（温度变化慢；低间隔下避免频繁拖长节拍轮）
     let thermal_every = 2000u64.div_ceil(args.interval_ms).max(1);
     let mut thermal_warned = false;
+    let mut io_warned = false;
     // GPU 显存降级路径限频：dumpsys gpu ~11ms，≥1s 一轮
     let gpumem_every = 1000u64.div_ceil(args.interval_ms).max(1);
 
@@ -1494,15 +1495,26 @@ fn main() {
 
             // IO：/proc/<pid>/io 计数器差值 → KB/s（首轮建基线不出数）
             if args.io {
-                if let Some((r, w, dr, dw)) = read_pid_io(pid) {
-                    if let Some((pts, pr, pw, pdr, pdw)) = io_states.insert(pid, (ts, r, w, dr, dw)) {
-                        let dt = ts.saturating_sub(pts) as f32 / 1000.0;
-                        if dt > 0.0 {
-                            let kbs = |cur: u64, prev: u64| cur.saturating_sub(prev) as f32 / 1024.0 / dt;
+                match read_pid_io(pid) {
+                    Some((r, w, dr, dw)) => {
+                        if let Some((pts, pr, pw, pdr, pdw)) = io_states.insert(pid, (ts, r, w, dr, dw)) {
+                            let dt = ts.saturating_sub(pts) as f32 / 1000.0;
+                            if dt > 0.0 {
+                                let kbs = |cur: u64, prev: u64| cur.saturating_sub(prev) as f32 / 1024.0 / dt;
+                                emit(&format!(
+                                    "{{\"t\":\"io\",\"ts\":{},\"pid\":{},\"r\":{:.2},\"w\":{:.2},\"dr\":{:.2},\"dw\":{:.2}}}",
+                                    ts, pid, kbs(r, pr), kbs(w, pw), kbs(dr, pdr), kbs(dw, pdw)
+                                ));
+                            }
+                        }
+                    }
+                    None => {
+                        if !io_warned {
                             emit(&format!(
-                                "{{\"t\":\"io\",\"ts\":{},\"pid\":{},\"r\":{:.2},\"w\":{:.2},\"dr\":{:.2},\"dw\":{:.2}}}",
-                                ts, pid, kbs(r, pr), kbs(w, pw), kbs(dr, pdr), kbs(dw, pdw)
+                                "{{\"t\":\"err\",\"msg\":\"pid {} 的 /proc/PID/io 不可读（非 root 或 SELinux），--io 无数据\"}}",
+                                pid
                             ));
+                            io_warned = true;
                         }
                     }
                 }
