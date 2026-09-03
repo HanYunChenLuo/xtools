@@ -48,7 +48,8 @@
 - SS3 kgsl 统计链（见 D-2/CLAUDE.md）：三层清理已落地（agent 退出钩子 + setsid + host 条件兜底），SIGINT/Ctrl-C/正常退出路径真机验证停链成功、下一会话零自愈即起流；残余风险仅 agent 被 SIGKILL 暴杀（无钩子机会）与 reboot 后首会话（开机 5000ms 链在流，走一次看门狗自愈 ~8s）
 - SS2MAX gpubusy 计数器恒 `0 0`（2026-09-03 实测 30 次采样全零，total_time 停走 → kgsl busy 通道无事件；gpuclk 正常 427MHz）——数据源限制，新旧 agent 行为一致
 - SS4 ligfx Frequency 单位待真机核实（Hz vs MHz）
-- 多设备连接时所有 adb 命令不带 -s 会失败（单设备场景无影响）
+- 多设备连接时所有 adb 命令不带 -s 会失败——**理由修正（五轮 review）**：设备清单本就有 SS3/SS2MAX 两台，"单设备场景"不成立，同时连两台时全工具链失效；修复需 adb 调用全局加 -s（serial 来自初始 devices -l 检测），列为候补
+- QNX 双会话并发交互（五轮 review 实测）：①后启动会话的 fd3 写入给先启动方一次 ~7s GPU 停走（看门狗自愈恢复）；②各方 GPU 事件密度升至 ~2×（双方写入产生非锁步多链，行级全等去重不覆盖，值为真值仅密度偏高）；③退出清理已有并发保护（pgrep 检测其他 agent 跳过停链，agent 钩子 >1 / host 兜底 ≥1+收尸等待，真机验证）——并发监控本身罕见，记录不修
 - GUI add_marker 不写 markers.csv / 不进 export_csv（关窗丢失，仅图表竖线）
 - marker 每连接线程无界（有 10s 读超时兜底）
 

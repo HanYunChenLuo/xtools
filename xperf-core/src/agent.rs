@@ -341,6 +341,22 @@ fn device_online() -> bool {
 /// 停止命令——对已停链写入会将其全部复活（真机实测 toggle 语义），故不可无条件执行。
 pub fn qnx_stop_stats(platform: &dyn crate::platform::Platform, interval_ms: u64) {
     let Some(ip) = platform.qnx_host() else { return };
+    // 多会话并发保护：还有其他 agent 在跑则跳过（停链会杀掉对方采样中的流）。
+    // 先等自身 agent 退出（adbd 异步收尸有 1-2s 延迟，立即探测会把残留的自身
+    // 误判为他人——真机实测），轮询最多 ~5s；之后计数 ≥1 即有他人。
+    // `[n]` 正则防检测命令载体自匹配。
+    let mut others = 0u32;
+    for _ in 0..10 {
+        let Ok(out) = Command::new("adb").arg("shell").arg("pgrep -fc 'xperf-age[n]t'").output() else { return };
+        others = String::from_utf8_lossy(&out.stdout).trim().parse::<u32>().unwrap_or(0);
+        if others == 0 {
+            break; // 自身已收尸且无他人
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+    if others >= 1 {
+        return; // 有其他会话在采样，链留给对方退出时收
+    }
     let period = interval_ms.clamp(100, 1000);
     // 探测：~5s 纯观察（只读 slog 不写 kgsl-control，无副作用）
     let probe = format!(
