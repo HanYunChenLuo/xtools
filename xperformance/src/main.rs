@@ -612,6 +612,10 @@ async fn monitor_process_agent(args: &Args, flags: xperf_core::MetricFlags) -> R
     }
 
     drop(stream); // 杀掉设备端 agent（Drop 里 kill）
+    // QNX 统计链清理兜底：agent 可能被 adbd 信号直杀而来不及跑退出钩子
+    if flags.gpu {
+        agent::qnx_stop_stats(&*platform, args.interval);
+    }
     generate_final_outputs(args, &pid_stats, &thread_time_series, &extra)?;
     println!("Process Restarts: {}", restart_count.to_string().red());
     // 写打点文件

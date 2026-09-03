@@ -191,6 +191,19 @@ pub(super) fn start(interval_ms: u64, pid_names: &Arc<Mutex<HashMap<String, u32>
                 pid_names,
                 parse,
             );
+            // 退出清理：经 telnet 下发 echo>（死写入者）式 gpubusystats 停止全部统计链
+            // （fd3 活连接存在时同样有效，真机实测）。不停链则链泄漏到整机重启，且下一
+            // 会话 fd3 写入撞活链会停走、走 ~8s 看门狗自愈路径；停链后下一会话锁步即起。
+            let teardown = stdin.clone();
+            crate::register_exit_hook(Box::new(move || {
+                if let Ok(mut w) = teardown.lock() {
+                    let _ = w.write_all(
+                        format!("echo gpubusystats {} > /dev/kgsl-control\n", period).as_bytes(),
+                    );
+                }
+                // 给 QNX shell 执行命令的时间（agent 退出后 telnet 随之消亡，命令须先落）
+                std::thread::sleep(Duration::from_millis(200));
+            }));
             spawn_watchdog(period, stdin, sys_count);
         }
         None => emit("{\"t\":\"err\",\"msg\":\"QNX 通道启动失败（telnet 登录或 kgsl 统计开启失败），--gpu 停止\"}"),

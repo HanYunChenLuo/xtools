@@ -175,6 +175,11 @@ fn spawn_sampling(app: tauri::AppHandle, package: String, interval: u64, flags: 
                 }
             }
         }
+        drop(stream);
+        // QNX 统计链清理兜底：agent 可能被 adbd 信号直杀而来不及跑退出钩子
+        if flags.gpu {
+            agent::qnx_stop_stats(&*platform, interval);
+        }
     });
 }
 

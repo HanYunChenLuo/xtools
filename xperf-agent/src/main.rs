@@ -47,6 +47,7 @@ mod thermal;
 use std::collections::HashMap;
 use std::fs;
 use std::io::Write;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -170,11 +171,28 @@ fn json_escape(s: &str) -> String {
 /// 而 stdout 写失败（主机断连）会在 emit 内 exit(0)，agent 不再残留设备。
 static ROUND_EMITTED: AtomicBool = AtomicBool::new(false);
 
+/// 退出钩子：emit 写失败（主机断连）、exit(0) 之前调用（std::process::exit 不跑 Drop，
+/// 清理动作必须在此显式执行）。QNX 通道用它下发 kgsl 统计链停止命令。
+type ExitHook = Mutex<Option<Box<dyn Fn() + Send>>>;
+static EXIT_HOOK: OnceLock<ExitHook> = OnceLock::new();
+
+fn register_exit_hook(f: Box<dyn Fn() + Send>) {
+    let _ = EXIT_HOOK.set(Mutex::new(Some(f)));
+}
+
 fn emit(line: &str) {
     ROUND_EMITTED.store(true, Ordering::Relaxed);
     let mut out = std::io::stdout().lock();
-    // 对端断开（adb 连接关闭）时写失败，直接退出
+    // 对端断开（adb 连接关闭）时写失败，先跑退出钩子再退出
     if writeln!(out, "{}", line).is_err() || out.flush().is_err() {
+        if let Some(h) = EXIT_HOOK.get() {
+            if let Ok(mut g) = h.lock() {
+                if let Some(f) = g.as_ref() {
+                    f();
+                }
+                *g = None; // 并发失败只执行一次
+            }
+        }
         std::process::exit(0);
     }
 }
