@@ -623,7 +623,7 @@ async fn monitor_process_agent(args: &Args, flags: xperf_core::MetricFlags) -> R
                     let ts = DateTime::from_timestamp_millis(m.timestamp_ms as i64)
                         .map(|t| t.with_timezone(&Local))
                         .unwrap_or_default();
-                    format!("{},{}\n", ts.format("%H:%M:%S%.3f"), m.label)
+                    format!("{},{}\n", ts.format("%H:%M:%S%.3f"), cli_utils::csv_escape(&m.label))
                 })
                 .collect();
             std::fs::write(&path, format!("Timestamp,Label\n{}", content)).ok();

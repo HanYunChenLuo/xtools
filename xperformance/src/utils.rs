@@ -289,6 +289,15 @@ pub fn generate_thread_time_series_chart(
 
 // ---------- 边采边落盘（流式 CSV）----------
 
+/// CSV 字段转义：含逗号/引号/换行的字段加双引号并转义内嵌引号
+pub fn csv_escape(s: &str) -> String {
+    if s.contains(',') || s.contains('"') || s.contains('\n') || s.contains('\r') {
+        format!("\"{}\"", s.replace('"', "\"\""))
+    } else {
+        s.to_string()
+    }
+}
+
 /// 样本到达即追加写入对应 CSV：进程崩溃只丢未 flush 的尾部，而不是全部数据。
 /// 文件名与历史退出导出命名一致；退出阶段不再重写 CSV，只生成图表。
 #[derive(Default)]
@@ -369,7 +378,7 @@ impl CsvStream {
     }
 
     pub fn fps_row(&mut self, pkg: &str, pid: u32, t: DateTime<Local>, layer: &str, fps: f32, jank: u32) {
-        let row = format!("{},{:.2},{},{}", t.format(CSV_TS_FMT), fps, jank, layer);
+        let row = format!("{},{:.2},{},{}", t.format(CSV_TS_FMT), fps, jank, csv_escape(layer));
         stream_write(
             &mut self.broken, &mut self.root, pkg, &mut self.fps, pid,
             "fps", format!("{}_fps_data_pid{}.csv", pkg, pid), "Timestamp,FPS,Jank,Layer", &row,
@@ -378,7 +387,7 @@ impl CsvStream {
 
     pub fn thread_row(&mut self, pkg: &str, pid: u32, tid: u32, name: &str, t: DateTime<Local>, cpu: f32) {
         let row = format!("{},{}", t.format(CSV_TS_FMT), cpu);
-        let sanitized = name.replace(' ', "_").replace('/', "-");
+        let sanitized = csv_escape(&name.replace(' ', "_").replace('/', "-"));
         stream_write(
             &mut self.broken, &mut self.root, pkg, &mut self.thread, (pid, tid),
             "thread", format!("thread_{}_{}_{}.csv", sanitized, tid, pid), "Timestamp,CPUUsage", &row,
@@ -405,7 +414,7 @@ impl CsvStream {
     /// 温度长格式：每传感器一行（Timestamp,Status,Sensor,TempC）
     pub fn temp_row(&mut self, pkg: &str, t: DateTime<Local>, status: i32, sensors: &[(String, i32, f32)]) {
         for (name, _, value) in sensors {
-            let row = format!("{},{},{},{:.1}", t.format(CSV_TS_FMT), status, name, value);
+            let row = format!("{},{},{},{:.1}", t.format(CSV_TS_FMT), status, csv_escape(name), value);
             stream_write(
                 &mut self.broken, &mut self.root, pkg, &mut self.misc, "thermal",
                 "thermal", "thermal_data.csv".to_string(), "Timestamp,Status,Sensor,TempC", &row,

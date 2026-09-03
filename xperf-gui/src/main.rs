@@ -278,7 +278,7 @@ fn diag_log(message: String) -> Result<(), String> {
 /// 列出设备上已安装的全部应用包名（含系统应用，共几百个），供前端搜索选择。
 /// 用 `pm list packages`（不带 -3，-3 只列第三方会遗漏系统应用）。
 #[tauri::command]
-fn list_packages() -> Result<Vec<String>, String> {
+async fn list_packages() -> Result<Vec<String>, String> {
     let out = xperf_core::run_adb_command(&["shell", "pm", "list", "packages"])
         .map_err(|e| e.to_string())?;
     let mut pkgs: Vec<String> = out
@@ -328,7 +328,7 @@ fn add_marker(label: String, app: tauri::AppHandle) -> String {
 /// gpu: [[ms, busy%, mhz]...]；io: pid -> [[ms, r, w, dr, dw]...]；net: [[ms, rx, tx]...]
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
-fn export_csv(
+async fn export_csv(
     package: String,
     cpu: std::collections::HashMap<String, Vec<(f64, f64)>>,
     mem: std::collections::HashMap<String, Vec<(f64, f64)>>,
@@ -562,8 +562,8 @@ fn main() {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_export_csv_writes_files() {
+    #[tokio::test]
+    async fn test_export_csv_writes_files() {
         let pkg = format!("test_export_{}", std::process::id());
         let mut cpu = std::collections::HashMap::new();
         cpu.insert("1234".to_string(), vec![(1700000000000.0, 12.5), (1700000001000.0, 30.0)]);
@@ -613,8 +613,8 @@ mod tests {
         std::fs::remove_dir_all(std::path::PathBuf::from("log").join(&pkg)).ok();
     }
 
-    #[test]
-    fn test_export_csv_empty_errors() {
+    #[tokio::test]
+    async fn test_export_csv_empty_errors() {
         let r = export_csv(
             "x".into(),
             Default::default(),
@@ -627,7 +627,7 @@ mod tests {
             Default::default(),
             Default::default(),
             Default::default(),
-        );
+        ).await;
         assert!(r.is_err());
     }
 }
