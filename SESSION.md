@@ -17,7 +17,8 @@
 |--------|------|
 | 6e6f428 | qnx.rs：fd3 长活连接写入 + slog 行去重 + 看门狗自愈；gpu/mod.rs：spawn_stream_parser keepalive 改 Arc<Mutex<ChildStdin>>、parse 改闭包 |
 | d2b8ba0 | review 修复：看门狗单次缺失改 3 连续缺失（实测窗口 ~1001.5ms > 检查周期 1000ms，单次缺失是相位漂移、长会话约每 11 分钟必现，原逻辑误触发自愈）；自愈改先写 stdin 成功才 emit（通道断开后不再产生误导 err） |
-| （本次） | 二轮 review：看门狗决策抽纯函数 watchdog_step + 单测锁定语义（阈值回退防护） |
+| 9310aa6 | 二轮 review：看门狗决策抽纯函数 watchdog_step + 单测锁定语义（阈值回退防护） |
+| 4644e9a | 三轮 review（用户质询"为什么不修"后复验）：agent 心跳——整轮零输出发空行探活（host next_event 本就跳空行，零协议改动），修复主机断连后 agent 残留；原"不修"判断的两个前提均错（SS3 --gpu 常规场景 gpumem 每秒兜底并非静默；心跳也无需新协议类型） |
 
 ### 完成内容
 
