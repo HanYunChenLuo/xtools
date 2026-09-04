@@ -7,6 +7,45 @@
 
 ---
 
+## 2026-09-04（四） — simpleperf 函数热点 --stack N：C 类"CPU 高在哪个函数"落地（CLI + GUI）
+
+**任务线**：WORKSPACE C 类候选项——simpleperf 调用栈采样；同时确立新工作流规则（cargo doc 门槛写入 CLAUDE.md）。
+
+### Commits
+
+| commit | 内容 |
+|--------|------|
+| 9ee99ad | feat：xperf-core/src/simpleperf.rs（录制 + 设备端三视图报告 + 解析渲染，单测 8 个）+ CLI `--stack N`（独立/并行两模式，与 --trace 可同给）+ GUI 函数热点独立 tab + `--stack N` 自动启动 |
+| （docs） | CLAUDE.md（新代码规则 + simpleperf 章节 + 输出文件表）/ WORKSPACE / SESSION 更新 |
+
+### 完成内容
+
+- **先实测后编码**（SS3，simpleperf 1.build.47，adbd root）：`--app <pkg> -g --duration N` 录制正常（svm 空闲 8s ≈ 8500 样本 / 0 丢失 / 3.3MB）；`--app` 对未运行应用输出 `Waiting for process of app …` **无限等待（--duration 拦不住，等待在采样开始前）** → pidof 前置拦截 + 主机侧超时（N+25s）兜底；三种 report 视图输出格式逐一定宽验证
+- **模块设计**（xperf-core/src/simpleperf.rs，与 trace.rs 同构：目录调用方传、报告文本返回）：
+  - record：包名防御性校验（防 shell 注入）→ which simpleperf 存在性 → pidof 拦截 → record（2>&1 合并解析 `Samples recorded/lost`）→ 三视图 report（**pull 前跑——.data 还在设备上**，单视图失败不中断）→ pull + 清理
+  - 三视图：线程 CPU 分布（`--sort comm,pid,tid`）/ 函数热点 self（`--sort symbol,dso`——"CPU 高在哪个函数"的直接回答，热叶子函数如 `_raw_spin_unlock_irqrestore` 5.26%、libgsl memcpy/mutex）/ children（`--children --sort symbol,dso` 热点路径）；均 `--percent-limit 1`
+  - 解析按「首/尾 token 锚定」（线程名/符号名可含空格、dso 恒无空格、children 与 self 视图按"次首 token 是否百分比"区分）；报告落盘前空格压缩（定宽 padding 去除，4.9MB → 566KB）
+- **CLI**：`--stack N` 独立（无指标 flag 时只录调用栈；与 `--trace` 同给时并行录制同窗口、报告 trace → stack 顺序输出；录制失败**非零退出**——脚本化验证门槛，分析失败不算）+ 并行（后台线程 + 采样限时同窗口；--trace/--stack 同给取 max）
+- **GUI**：「函数热点」独立 tab（tabBar 三 tab，两个分析页均隐藏侧栏）+ 侧栏秒数/按钮 + `stack` 事件（stage/message/data_path，与 trace 事件同构）+ `--stack N` 自动启动
+- **验证**（SS3 全场景）：独立 8s（三视图全出、self 视图热点函数命中）/ 并行 `--cpu --stack 6 --interval 500`（agent 采样同窗口限时结束 + stack 报告）/ 未运行包拦截（"应用无运行中的进程，请先启动"，exit=1，无 adb 挂起）/ 正常 exit=0 / GUI `--stack 5`（[stack] 启动→拉回 6458 样本→产物齐全）
+- **验证关卡**：75 测试全绿（simpleperf 8 个）+ 1 ignored、clippy 零警告、`cargo doc` 零 warning（默认 lint 集 + 4 crate missing_docs 归零）
+
+### 关键结论与基线
+
+- **simpleperf `--app` 等待语义**：未运行应用无限等待（`--duration` 不约束等待期）——凡 `--app` 用法必须前置进程存在性检查
+- 设备端应用 so 多 stripped：函数名显示 `libxxx.so[+偏移]`（偏移可用未剥离 so 离线符号化）；系统库（libc/libgsl）与 `[kernel.kallsyms]` 有符号；非 root 设备非 debuggable 应用被 run-as 拒（错误透传）
+- report 定宽文本按列位置切片是脆的（Symbol 列 padding 达数百列宽），token 锚定 + 空格压缩是稳定做法
+- 新规则（已入 CLAUDE.md 工作流约定）：**代码必须过 cargo doc（全量零 warning），所有 pub 项 doc 注释规范完整（含单位/语义/无值字段写明）**——本模块按此标准编写
+- 与 perfetto 深挖的三级下钻关系：采样"什么时候高"→ perfetto"线程/调度/帧为什么高"→ simpleperf"哪个函数"
+
+### 遗留问题
+
+- SS2MAX/SS4 未真机验证 simpleperf（标准 Android 能力，SS2MAX adb root 后预期可用；非 root+非 debuggable 场景会被拒——错误信息透传可辨）
+- 多设备连接 adb 不带 -s 的全局问题（E 节既有候补项，本模块同样不带 -s，与全工具链一致）
+- GUI 前端渲染为人工目验项（后端事件链路已由 [stack] stderr 日志 + 产物验证）；flamegraph（inferno）可视化未做——`.data` 保留可离线生成
+
+---
+
 ## 2026-09-03（三）晚二 ～ 09-04（四） — perfetto 深挖模式：浏览器全自动加载 + 配置对齐 + GUI 主题 + cargo doc 全覆盖
 
 **任务线**：WORKSPACE C 类第二项——perfetto 深挖模式（2026-09-01 已验证可行性，2026-09-03 落地为产品功能；后续按用户反馈迭代：浏览器加载方案两轮演进 → trace 配置对齐团队口径 → GUI 布局与主题 → 多轮 code/doc review + cargo doc 全覆盖）。
