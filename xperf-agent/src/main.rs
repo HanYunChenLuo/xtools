@@ -5,26 +5,28 @@
 //! 行流式写 stdout，主机用 `adb exec-out` 一条长连接持续读取。
 //!
 //! 协议（每行一个 JSON 对象）：
-//!   {"t":"hello","ncores":8,"version":1}
-//!   {"t":"cpu","ts":<wall_ms>,"pid":29697,"cpu":15.4,"th":[[29697,"main",5.1],...]}
-//!   {"t":"mem","ts":<wall_ms>,"pid":29697,"pss":484880,"rss":612000,
-//!    "java":..,"native":..,"code":..,"stack":..,"gfx":..,"other":..,"sys":..}
-//!   （内存分类字段仅 interval≥500ms 的 dumpsys meminfo 路径有值，低间隔 smaps_rollup 路径为 0）
-//!   {"t":"fps","ts":<wall_ms>,"pid":29697,"layer":"SVM Container#0","fps":30.0,"frames":32,"jank":0}
-//!   {"t":"freq","ts":<wall_ms>,"khz":[2592000,...]}              // 每核当前频率，下标对应 hello 的 maxkhz
-//!   {"t":"io","ts":<wall_ms>,"pid":29697,"r":12.3,"w":4.5,"dr":0.0,"dw":1.2}  // KB/s；r/w=rchar/wchar 逻辑读写，dr/dw=read_bytes/write_bytes 磁盘读写
-//!   {"t":"net","ts":<wall_ms>,"rx":123.4,"tx":56.7}              // KB/s 整机口径（聚合物理口，排除回环/隧道；per-app 无数据源）
-//!   {"t":"gpu","ts":<wall_ms>,"busy":37.5,"mhz":585}             // kgsl 或 QNX 路径；QNX 路径多 "util"/"maxmhz" 字段
-//!   {"t":"gpuproc","ts":<wall_ms>,"pid":29697,"busy":14.4}       // QNX 路径：每进程 GPU busy%
-//!   {"t":"gpumem","ts":<wall_ms>,"pid":29697,"bytes":628928512,"global":2639089664}  // 保底路径：dumpsys gpu 每 PID GPU 显存
-//!   {"t":"temp","ts":<wall_ms>,"status":0,"sensors":[["soc0",4,42.5],...]}    // status=Android ThermalStatus（-1=未知）；sensors=[名称,类型,°C]
-//!   {"t":"exit","pid":29697}
-//!   {"t":"noproc"}
-//!   {"t":"err","msg":"..."}
-//!   （空行）                                                    // 心跳：整轮零输出时探活（写失败=主机断连→agent 退出），host 侧 next_event 跳过
+//! ```text
+//! {"t":"hello","ncores":8,"version":1}
+//! {"t":"cpu","ts":<wall_ms>,"pid":29697,"cpu":15.4,"th":[[29697,"main",5.1],...]}
+//! {"t":"mem","ts":<wall_ms>,"pid":29697,"pss":484880,"rss":612000,
+//!  "java":..,"native":..,"code":..,"stack":..,"gfx":..,"other":..,"sys":..}
+//! （内存分类字段仅 interval≥500ms 的 dumpsys meminfo 路径有值，低间隔 smaps_rollup 路径为 0）
+//! {"t":"fps","ts":<wall_ms>,"pid":29697,"layer":"SVM Container#0","fps":30.0,"frames":32,"jank":0}
+//! {"t":"freq","ts":<wall_ms>,"khz":[2592000,...]}              // 每核当前频率，下标对应 hello 的 maxkhz
+//! {"t":"io","ts":<wall_ms>,"pid":29697,"r":12.3,"w":4.5,"dr":0.0,"dw":1.2}  // KB/s；r/w=rchar/wchar 逻辑读写，dr/dw=read_bytes/write_bytes 磁盘读写
+//! {"t":"net","ts":<wall_ms>,"rx":123.4,"tx":56.7}              // KB/s 整机口径（聚合物理口，排除回环/隧道；per-app 无数据源）
+//! {"t":"gpu","ts":<wall_ms>,"busy":37.5,"mhz":585}             // kgsl 或 QNX 路径；QNX 路径多 "util"/"maxmhz" 字段
+//! {"t":"gpuproc","ts":<wall_ms>,"pid":29697,"busy":14.4}       // QNX 路径：每进程 GPU busy%
+//! {"t":"gpumem","ts":<wall_ms>,"pid":29697,"bytes":628928512,"global":2639089664}  // 保底路径：dumpsys gpu 每 PID GPU 显存
+//! {"t":"temp","ts":<wall_ms>,"status":0,"sensors":[["soc0",4,42.5],...]}    // status=Android ThermalStatus（-1=未知）；sensors=[名称,类型,°C]
+//! {"t":"exit","pid":29697}
+//! {"t":"noproc"}
+//! {"t":"err","msg":"..."}
+//! （空行）                                                    // 心跳：整轮零输出时探活（写失败=主机断连→agent 退出），host 侧 next_event 跳过
+//! ```
 //!
-//! 用法：xperf-agent --package `<pkg>` [--pid N]... --interval 50 [--cpu] [--memory] [--fps]
-//!                   [--freq] [--io] [--net] [--gpu] [--thermal]
+//! 用法：`xperf-agent --package <pkg> [--pid N]... --interval 50 [--cpu] [--memory] [--fps]`
+//!                   `[--freq] [--io] [--net] [--gpu] [--thermal]`
 //!
 //! 模块划分：proc（/proc 与 sysfs 读取 + CPU 采样状态）/ mem（内存）/ fps（SurfaceFlinger）/
 //! thermal（温度）/ gpu（五通道）。本文件只保留参数解析、节拍主循环与公共输出工具。
