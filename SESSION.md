@@ -18,6 +18,8 @@
 | 9ee99ad | feat：xperf-core/src/simpleperf.rs（录制 + 设备端三视图报告 + 解析渲染，单测 8 个）+ CLI `--stack N`（独立/并行两模式，与 --trace 可同给）+ GUI 函数热点独立 tab + `--stack N` 自动启动 |
 | bd4d5a9 | review: ①device_report `2>/dev/null` 连真实报错一起吞（失败时错误信息为空）→ `2>&1` 带回报错 + 成功路径过滤 simpleperf W/I 日志行（filter_simpleperf_logs，真机验证报告 0 条日志行）②validate_package 补 `-`（与 CLI/GUI 校验口径一致）③三处 doc"两视图"残留改三视图④前端 trace/stack recording 事件统一禁用按钮（命令行自动启动时按钮此前保持可点）。测试 42+1 全绿 |
 | 41ae32a + c652da8 | feat：simpleperf 浏览器火焰图（open_stack_in_browser：AOSP report_html.py 渲染 `.data` → 单文件 HTML，gitiles blob 逐文件引导脚本集 ~10MB 缓存离线，失败清半截/HTML 新于 data 复用）+ GUI 按钮 + trace/stack 录制进度（core record progress 回调每整秒触发 → GUI emit progress 事件 → 前端 status 绿色进度条 c652da8）。真机全链路验证 |
+| 61535f7 | feat：GUI 录制时长共享下拉（recordSeconds）+ 按钮改名「simpleperf 分析」+ 进度漏报修复（progress 上报移到等待循环头：adb 启动开销推迟首秒 + try_wait=Some 轮次跳过末秒，曾致 10s 只显示 6s；真机 10s 完整 1..10/10s） |
+| 2bd6bca | feat：采集数据统一落 `/tmp/xperf`（CLI utils data_root / GUI gui_data_root，替代 ./log，/tmp 重启自清）+ 缓存/数据清理（core clean_all_caches：~/.cache/xperf + /tmp/xperf，CLI `--clean-cache` 无需 --package、GUI 侧栏按钮 confirm 确认）。验证：清理 40.7MB/29 文件、CLI/GUI 采集均落新根 |
 | （docs） | CLAUDE.md（新代码规则 + simpleperf 章节 + 输出文件表）/ WORKSPACE / SESSION 更新 |
 
 ### 完成内容
