@@ -498,6 +498,12 @@ applyTheme(localStorage.getItem('xperf-theme') || 'dark');
 
 listen('trace', (e) => {
   const { stage, message, trace_path } = e.payload;
+  if (stage === 'progress') {
+    // 进度消息只更新状态栏，不覆盖报告文本
+    document.getElementById('status').textContent = message;
+    _diag('trace: ' + message);
+    return;
+  }
   if (trace_path) {
     currentTracePath = trace_path;
     document.getElementById('openPerfBtn').disabled = false;
@@ -553,10 +559,20 @@ document.getElementById('openPerfBtn').addEventListener('click', async () => {
 });
 
 // ---- simpleperf 函数热点（--stack）：录制 N 秒调用栈 → 线程 CPU 分布 + 函数热点报告，独立 tab 展示 ----
-// stack 事件 stage: recording / recorded / done（message=完整报告）/ error；recorded/done/error 附 data_path
+// stack 事件 stage: recording / progress（每秒进度，只更新 status）/ recorded / done（message=完整报告）/
+// error；recorded/done/error 附 data_path
+let currentStackPath = null;
 listen('stack', (e) => {
   const { stage, message, data_path } = e.payload;
+  if (stage === 'progress') {
+    // 进度消息只更新状态栏，不覆盖报告文本
+    document.getElementById('status').textContent = message;
+    _diag('stack: ' + message);
+    return;
+  }
   if (data_path) {
+    currentStackPath = data_path;
+    document.getElementById('openStackBtn').disabled = false;
     document.getElementById('stackFileLabel').textContent = data_path;
   }
   document.getElementById('stackReport').textContent = message;
@@ -591,6 +607,20 @@ document.getElementById('stackBtn').addEventListener('click', async () => {
   } catch (err) {
     document.getElementById('status').textContent = '函数热点错误: ' + err;
     _diag('stackBtn invoke ERROR: ' + JSON.stringify(err));
+  }
+});
+
+// 打开浏览器火焰图：report_html.py 渲染 .data 为单文件 HTML（首次自动下载 AOSP 脚本 ~10MB，
+// 需 python3）；HTML 新于 .data 时复用不重渲染
+document.getElementById('openStackBtn').addEventListener('click', async () => {
+  if (!currentStackPath) return;
+  try {
+    const msg = await invoke('open_stack_html', { dataPath: currentStackPath });
+    document.getElementById('status').textContent = msg;
+    _diag('openStackBtn: ' + msg);
+  } catch (err) {
+    document.getElementById('status').textContent = '打开火焰图失败: ' + err;
+    _diag('openStackBtn ERROR: ' + JSON.stringify(err));
   }
 });
 

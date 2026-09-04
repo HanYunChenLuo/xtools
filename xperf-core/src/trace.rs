@@ -115,8 +115,16 @@ fn trace_config(seconds: u64) -> String {
 
 /// 录制 N 秒 trace 并拉回 out_dir（如 `log/<pkg>/<会话时间戳>/trace/`，自动创建）。
 /// 阻塞至录制完成（perfetto duration_ms 到点自动退出并写完文件）。
+///
+/// `progress`：录制进度回调（GUI 走事件推进度用）；每到整秒以已录制秒数（1..=N）
+/// 触发一次，录制等待循环内同步调用。`None` = 不上报（CLI 打印会刷屏，默认不传）。
+///
 /// 包名校验与进度展示由调用方负责（目录路径含包名，防遍历）。
-pub fn record(seconds: u64, out_dir: &Path) -> Result<RecordedTrace> {
+pub fn record(
+    seconds: u64,
+    out_dir: &Path,
+    progress: Option<&dyn Fn(u64)>,
+) -> Result<RecordedTrace> {
     std::fs::create_dir_all(out_dir)?;
     let stem = Local::now().format("%Y%m%d_%H%M%S").to_string();
     let local_path = out_dir.join(format!("trace_{}.pftrace", stem));
@@ -136,6 +144,8 @@ pub fn record(seconds: u64, out_dir: &Path) -> Result<RecordedTrace> {
     } // drop → EOF，perfetto 开始录制
       // 手动超时（同 coldstart 模式）：录制时长 + 启动/flush 余量；Ctrl-C 全局中断标志可提前放弃
     let deadline = Instant::now() + Duration::from_secs(seconds + 25);
+    let started = Instant::now();
+    let mut last_reported: u64 = 0;
     loop {
         match child.try_wait()? {
             Some(_) => break,
@@ -151,7 +161,17 @@ pub fn record(seconds: u64, out_dir: &Path) -> Result<RecordedTrace> {
                     dev_path
                 );
             }
-            None => std::thread::sleep(Duration::from_millis(100)),
+            None => {
+                // 进度回调：每到整秒触发（elapsed 1..=N；超时兜底窗口内也可能 >N）
+                if let Some(cb) = progress {
+                    let elapsed = started.elapsed().as_secs();
+                    if elapsed > last_reported {
+                        last_reported = elapsed;
+                        cb(elapsed);
+                    }
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
         }
     }
     let out = child.wait_with_output()?;
