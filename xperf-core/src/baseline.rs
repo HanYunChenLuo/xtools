@@ -24,8 +24,10 @@ pub struct MetricSummary {
 }
 
 impl MetricSummary {
-    /// 由样本值序列计算（空序列返回 `None`——该指标未采集）
+    /// 由样本值序列计算（空序列或全 NaN 返回 `None`——该指标未采集；
+    /// NaN 样本被过滤，计数为有效样本数）
     fn from_values(values: &[f64]) -> Option<Self> {
+        let values: Vec<f64> = values.iter().copied().filter(|v| !v.is_nan()).collect();
         if values.is_empty() {
             return None;
         }
@@ -200,12 +202,17 @@ impl SummaryBuilder {
     }
 }
 
-/// 基线存放根目录：`$XDG_DATA_HOME/xperf/baselines`（缺省 `$HOME/.local/share/…`）
+/// 基线存放根目录：`$XDG_DATA_HOME/xperf/baselines`（缺省 `$HOME/.local/share/…`；
+/// HOME 亦未设时落到当前目录 `./xperf/baselines`）
 pub fn baseline_dir() -> PathBuf {
     let base = std::env::var_os("XDG_DATA_HOME")
         .filter(|v| !v.is_empty())
         .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local").join("share")))
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .filter(|h| !h.is_empty())
+                .map(|h| PathBuf::from(h).join(".local").join("share"))
+        })
         .unwrap_or_else(|| PathBuf::from("."));
     base.join("xperf").join("baselines")
 }
@@ -232,11 +239,23 @@ pub fn save_to(path: &Path, summary: &SessionSummary) -> Result<()> {
     std::fs::write(path, text).with_context(|| format!("基线写入失败: {}", path.display()))
 }
 
-/// 读取基线（JSON 解析失败/文件不存在均报错并带路径上下文）
+
+
+/// 读取基线（JSON 解析失败/文件不存在均报错并带路径上下文）。
+/// 版本字段（version）缺失或非 1 时报错（字段演进后再加迁移，当前只接受 v1）
 pub fn load_from(path: &Path) -> Result<SessionSummary> {
     let text = std::fs::read_to_string(path)
         .with_context(|| format!("基线文件不存在或不可读: {}", path.display()))?;
-    serde_json::from_str(&text).with_context(|| format!("基线 JSON 解析失败: {}", path.display()))
+    let summary: SessionSummary =
+        serde_json::from_str(&text).with_context(|| format!("基线 JSON 解析失败: {}", path.display()))?;
+    if summary.version != 1 {
+        anyhow::bail!(
+            "基线版本不兼容（文件 version={}，当前只支持 1）：{}",
+            summary.version,
+            path.display()
+        );
+    }
+    Ok(summary)
 }
 
 /// 保存为该包的基线（覆盖旧基线），返回文件路径
@@ -293,8 +312,10 @@ impl Row {
             return Verdict::NoCompare;
         };
         let delta = c - b;
+        // 相对容差取绝对值：回归与改善方向（delta 正负）对称判显著
+        // ——曾用带符号百分比致 delta<0（FPS 回归/CPU 改善）恒判持平（review S1）
         let significant = if self.pct_relevant && b > 0.0 {
-            delta.abs() >= self.floor && delta / b * 100.0 >= REL_TOL_PCT
+            delta.abs() >= self.floor && (delta / b * 100.0).abs() >= REL_TOL_PCT
         } else {
             delta.abs() >= self.floor
         };
@@ -401,10 +422,14 @@ pub fn compare(base: &SessionSummary, cur: &SessionSummary) -> String {
 
     lines.push(String::new());
     if n_reg == 0 {
-        lines.push(format!(
-            "总结论: ✅ 无回归（改善 {} 项，持平 {} 项，单侧未采集 {} 项）",
-            n_imp, n_flat, n_nc
-        ));
+        if n_nc == rows.len() {
+            lines.push("总结论: ⊘ 无可对比指标（基线与本次采集的指标完全不重叠）".to_string());
+        } else {
+            lines.push(format!(
+                "总结论: ✅ 无回归（改善 {} 项，持平 {} 项，单侧未采集 {} 项）",
+                n_imp, n_flat, n_nc
+            ));
+        }
     } else {
         let reg_names: Vec<&str> = rows
             .iter()
@@ -604,5 +629,46 @@ mod tests {
         let r = compare(&base_b.finish(), &cur_b.finish());
         assert!(r.contains("进程重启次数"));
         assert!(r.contains("⚠ 回归"));
+    }
+
+    // ---- review S1：负 delta 方向（FPS 回归 / CPU 改善）判定 ----
+
+    #[test]
+    fn test_verdict_negative_delta_fps_regression() {
+        // FPS 60 → 30（-50%，delta=-30 ≥ floor 2 且 |-50%| ≥ 10%）→ 回归
+        // 曾因相对容差用带符号百分比致 delta<0 恒判持平（S1）
+        let mut base_b = SummaryBuilder::new("p", 1000, 60.0);
+        for _ in 0..10 {
+            base_b.push_fps(60.0, 0);
+        }
+        let mut cur_b = SummaryBuilder::new("p", 1000, 60.0);
+        for _ in 0..10 {
+            cur_b.push_fps(30.0, 0);
+        }
+        let r = compare(&base_b.finish(), &cur_b.finish());
+        assert!(r.contains("⚠ 回归"), "FPS 60→30 应判回归，实际:\n{}", r);
+        assert!(r.contains("FPS 均值"));
+    }
+
+    #[test]
+    fn test_verdict_negative_delta_cpu_improvement() {
+        // CPU 50 → 25（-50%，delta=-25 ≥ floor 2 且 |-50%| ≥ 10%，lower_better）→ 改善
+        let base = summary_with_cpu(&[50.0; 10], 10.0);
+        let cur = summary_with_cpu(&[25.0; 10], 10.0);
+        let r = compare(&base, &cur);
+        assert!(r.contains("✅ 改善"), "CPU 50→25 应判改善，实际:\n{}", r);
+    }
+
+    // ---- review G1：全不可比不应误报"无回归" ----
+
+    #[test]
+    fn test_all_no_compare_not_no_regression() {
+        // 基线只有 CPU，本次只有内存 → 全部单侧未采集 → ⊘ 无可对比指标
+        let base = summary_with_cpu(&[10.0; 10], 10.0);
+        let mut cur_b = SummaryBuilder::new("p", 1000, 10.0);
+        cur_b.push_mem(300_000.0);
+        let r = compare(&base, &cur_b.finish());
+        assert!(r.contains("⊘ 无可对比指标"), "全不可比应报无可对比，实际:\n{}", r);
+        assert!(!r.contains("✅ 无回归"), "全不可比不应报无回归");
     }
 }

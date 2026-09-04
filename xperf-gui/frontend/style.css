@@ -61,8 +61,7 @@ body { font-family: -apple-system, "Segoe UI", "Noto Sans CJK SC", "PingFang SC"
 .sidebar-row { display: flex; gap: 4px; margin: 4px 0; align-items: center; }
 .sidebar-row .small { width: auto; padding: 4px 8px; flex-shrink: 0; }
 .sidebar-row .small.flex-fill { flex: 1; }
-.checkboxes { display: flex; flex-wrap: wrap; gap: 8px 12px; margin: 8px 0; }
-.checkboxes label { display: inline-flex; align-items: center; gap: 4px; font-size: 13px; white-space: nowrap; }
+/* checkbox 自绘（webkit2gtk 不暗化原生控件，appearance:none + 自绘兼容暗色主题） */
 .checkboxes input[type=checkbox] {
   /* webkit2gtk 对 color-scheme 原生控件暗色支持不全（实测 checkbox 仍白底），
      appearance:none 自绘：外观不依赖引擎原生渲染，暗/亮主题行为一致 */
@@ -96,9 +95,6 @@ body { font-family: -apple-system, "Segoe UI", "Noto Sans CJK SC", "PingFang SC"
 #stopBtn { background: var(--err); color: var(--on-ok); }
 #stopBtn:disabled, #startBtn:disabled { opacity: 0.4; cursor: not-allowed; }
 #sidebar h3 { margin-top: 16px; color: var(--accent); font-size: 14px; }
-#pidList li { padding: 3px 6px; background: var(--bg-input); margin: 2px 0; border-radius: 3px; }
-#pidList li.new { animation: flash 1s; }
-@keyframes flash { from { background: var(--ok); color: var(--on-ok); } to { background: var(--bg-input); color: var(--text); } }
 
 #main { flex: 1; padding: 12px; background: var(--bg-main); display: flex; flex-direction: column; gap: 12px; overflow-y: auto; }
 #tabBar { display: flex; gap: 6px; flex-shrink: 0; align-items: center; }
@@ -145,6 +141,4 @@ body { font-family: -apple-system, "Segoe UI", "Noto Sans CJK SC", "PingFang SC"
 .trace-file-label { font-size: 12px; color: var(--text-mute); word-break: break-all; }
 .trace-report-box { flex: 1; min-height: 0; background: var(--bg-card); border-radius: 6px; padding: 10px 14px; overflow: auto; }
 .trace-report-box pre { white-space: pre-wrap; font-size: 12px; line-height: 1.5; margin: 0; color: var(--text); }
-/* 侧栏行内输入（打点标签）：行内 flex，宽度收缩 */
-.inline-input { flex: 1; width: auto; padding: 4px; background: var(--bg-input); color: var(--text); border: 1px solid var(--border); border-radius: 3px; font-size: 12px; }
 

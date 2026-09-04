@@ -978,15 +978,16 @@ async fn compare_baseline(
 /// 放在命令里而非 setup：setup 阶段 webview 未就绪直接 `set_size` 会导致
 /// webkit2gtk 渲染空白（真机实测）；conf 里的固定尺寸作为检测失败兜底。
 #[tauri::command]
-fn resize_default(app: tauri::AppHandle) -> Result<(), String> {
+async fn resize_default(app: tauri::AppHandle) -> Result<(), String> {
     let win = app.get_webview_window("main").ok_or("无主窗口")?;
     let monitor = win.current_monitor().ok().flatten().ok_or("无显示器信息")?;
     let scale = monitor.scale_factor();
     let sw = monitor.size().width as f64 / scale;
     let sh = monitor.size().height as f64 / scale;
-    let w = (sw * 0.72).clamp(1080.0, 1600.0).min(sw - 80.0);
-    let h = (sh * 0.88).clamp(880.0, 1280.0).min(sh - 120.0);
-    win.set_size(tauri::LogicalSize::new(w.max(800.0), h.max(600.0)))
+    // 宽高各自取「比例值」与「屏幕减边距」的较小者，再 clamp 到内容需求下限
+    let w = (sw * 0.72).min(sw - 80.0).max(960.0);
+    let h = (sh * 0.88).min(sh - 120.0).max(600.0);
+    win.set_size(tauri::LogicalSize::new(w, h))
         .map_err(|e| e.to_string())
 }
 

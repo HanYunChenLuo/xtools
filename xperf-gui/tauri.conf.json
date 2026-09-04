@@ -13,8 +13,8 @@
         "title": "XPerformance Monitor",
         "width": 1400,
         "height": 1000,
-        "minWidth": 1080,
-        "minHeight": 720
+        "minWidth": 960,
+        "minHeight": 600
       }
     ],
     "security": {
