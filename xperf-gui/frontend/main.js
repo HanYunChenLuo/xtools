@@ -640,6 +640,20 @@ document.getElementById('openStackBtn').addEventListener('click', async () => {
   }
 });
 
+// 清理缓存与采集数据：~/.cache/xperf（UI 镜像/脚本集，首次使用重新下载）+ /tmp/xperf
+// （全部采集数据）。采样/录制进行中会丢当前会话产物——先确认
+document.getElementById('cleanBtn').addEventListener('click', async () => {
+  if (!confirm('将清理：\n- ~/.cache/xperf（UI 镜像/脚本集，首次使用会重新下载）\n- /tmp/xperf（全部采集数据：CSV/图表/trace/调用栈）\n\n正在采样/录制时当前会话产物会丢失，确认清理？')) return;
+  try {
+    const msg = await invoke('clean_cache');
+    setStatus(msg);
+    _diag('cleanBtn: ' + msg);
+  } catch (err) {
+    setStatus('清理失败: ' + err);
+    _diag('cleanBtn ERROR: ' + JSON.stringify(err));
+  }
+});
+
 document.getElementById('startBtn').addEventListener('click', async () => {
   _diag('startBtn CLICKED');
   const package = document.getElementById('package').value;
