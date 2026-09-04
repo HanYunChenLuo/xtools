@@ -74,14 +74,12 @@
       <button id="compareBaselineBtn" class="small flex-fill" title="当前会话与已存基线逐指标对比（回归/改善/持平）">对比基线</button>
     </div>
     <button id="cleanBtn" class="small clean-btn">清理缓存与数据</button>
-    <h3>PIDs</h3>
-    <ul id="pidList"></ul>
   </div>
   <div id="main">
     <div id="tabBar">
       <button id="tabPerfBtn" class="tab active">性能指标</button>
       <button id="tabTraceBtn" class="tab">Perfetto 分析</button>
-      <button id="tabStackBtn" class="tab">函数热点</button>
+      <button id="tabStackBtn" class="tab">Simpleperf 分析</button>
       <div id="status">未开始</div>
       <button id="themeBtn" title="切换暗色/亮色主题">☾ 亮色</button>
     </div>
@@ -112,6 +110,10 @@
       <div id="baselinePanel" class="panel hidden">
         <h3>基线对比</h3>
         <pre id="baselineReport"></pre>
+      </div>
+      <div id="pidPanel" class="panel">
+        <h3>PIDs</h3>
+        <ul id="pidList"></ul>
       </div>
     </div>
     </div>
