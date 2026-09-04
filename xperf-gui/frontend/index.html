@@ -52,6 +52,10 @@
       <input id="traceSeconds" type="number" min="1" max="600" value="10" title="录制秒数（1-600）" class="inline-input" style="width:52px;flex:none" />
       <button id="traceBtn" class="small" style="width:auto;padding:4px 8px;flex-shrink:0">Perfetto 分析</button>
     </div>
+    <div style="display:flex;gap:4px;margin:4px 0">
+      <input id="stackSeconds" type="number" min="1" max="600" value="10" title="录制秒数（1-600）" class="inline-input" style="width:52px;flex:none" />
+      <button id="stackBtn" class="small" style="width:auto;padding:4px 8px;flex-shrink:0">函数热点</button>
+    </div>
     <button id="exportBtn" class="small">导出 CSV</button>
     <h3>PIDs</h3>
     <ul id="pidList"></ul>
@@ -60,6 +64,7 @@
     <div id="tabBar">
       <button id="tabPerfBtn" class="tab active">性能指标</button>
       <button id="tabTraceBtn" class="tab">Perfetto 分析</button>
+      <button id="tabStackBtn" class="tab">函数热点</button>
       <div id="status">未开始</div>
       <button id="themeBtn" title="切换暗色/亮色主题">☾ 亮色</button>
     </div>
@@ -95,6 +100,14 @@
       </div>
       <div class="trace-report-box">
         <pre id="traceReport"></pre>
+      </div>
+    </div>
+    <div id="stackContent" class="hidden" style="flex:1;min-height:0;display:flex;flex-direction:column;gap:8px">
+      <div class="trace-toolbar">
+        <span id="stackFileLabel" class="trace-file-label"></span>
+      </div>
+      <div class="trace-report-box">
+        <pre id="stackReport"></pre>
       </div>
     </div>
   </div>

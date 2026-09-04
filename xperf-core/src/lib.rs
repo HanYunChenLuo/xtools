@@ -18,6 +18,8 @@ pub mod marker;
 pub mod memory;
 /// 平台抽象：adb product 字段自动检测 + 各平台差异特性。
 pub mod platform;
+/// simpleperf 调用栈采样：函数级 CPU 热点（录制 + 设备端两视图报告解析）。
+pub mod simpleperf;
 /// perfetto 深挖：录制、trace_processor SQL 归因、本地镜像 UI 自动加载。
 pub mod trace;
 /// 主机侧通用工具（adb 命令封装、中断标志、控制字符清洗）。

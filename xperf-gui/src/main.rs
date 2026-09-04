@@ -1,6 +1,7 @@
 //! xperf-gui：xtools 的 Tauri 桌面 GUI——与 CLI 共用 xperf-core 的采样/深挖能力，
-//! 前端呈现折线图/实时数值/Top 线程/峰值/Perfetto 分析报告（独立 tab），支持暗/亮主题。
-//! 支持命令行自动启动：`--package <pkg> [--interval N] [--cpu …] [--trace N]`。
+//! 前端呈现折线图/实时数值/Top 线程/峰值/Perfetto 分析报告与 simpleperf 函数热点报告
+//! （各自独立 tab），支持暗/亮主题。
+//! 支持命令行自动启动：`--package <pkg> [--interval N] [--cpu …] [--trace N] [--stack N]`。
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use std::sync::{Arc, Mutex};
@@ -225,6 +226,8 @@ struct AppState {
     running: Arc<Mutex<bool>>,
     /// 深挖录制进行中（与采样互不干扰，可并行）
     trace_running: Arc<Mutex<bool>>,
+    /// 函数热点录制进行中（与采样/深挖互不干扰，可并行）
+    stack_running: Arc<Mutex<bool>>,
 }
 
 /// 包名校验：防路径遍历（包名会拼入日志目录路径）
@@ -347,6 +350,81 @@ async fn start_trace(
     }
     let seconds = seconds.clamp(1, 600);
     spawn_trace(app, package, seconds, state.trace_running.clone());
+    Ok(())
+}
+
+/// 后台函数热点线程（start_stack 命令与 --stack 自动启动共用）：
+/// 录制 → 设备端两视图报告 → 拉回 → 渲染热点报告，全程 emit("stack") 推进度。
+/// stage: recording / recorded（已拉回，渲染报告中）/ done（message=完整报告文本）/ error；
+/// recorded/done/error 附 data_path（`.data` 文件路径，展示于报告页）。
+/// 与采样/trace 会话互不干扰（可并行；GUI 采样不限时，窗口对照靠报告与图表的时间戳）。
+fn spawn_stack(app: tauri::AppHandle, package: String, seconds: u64, running: Arc<Mutex<bool>>) {
+    eprintln!("[stack] 启动: package={} seconds={}", package, seconds);
+    std::thread::spawn(move || {
+        let emit_stage = |stage: &str, message: String, data_path: Option<String>| {
+            let _ = app.emit(
+                "stack",
+                serde_json::json!({ "stage": stage, "message": message, "data_path": data_path }),
+            );
+        };
+        let dir = std::path::PathBuf::from("log")
+            .join(&package)
+            .join(Local::now().format("%Y%m%d_%H%M%S").to_string())
+            .join("stack");
+        emit_stage("recording", format!("录制 {}s 调用栈…（窗口内操作被测应用）", seconds), None);
+        let rec = match xperf_core::simpleperf::record(seconds, &package, &dir) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("[stack] 录制失败: {}", e);
+                emit_stage("error", format!("录制失败: {}", e), None);
+                *running.lock().unwrap() = false;
+                return;
+            }
+        };
+        let data_path = rec.local_path.display().to_string();
+        eprintln!(
+            "[stack] 已拉回: {}（{:.1} MB，{} 样本）",
+            data_path,
+            rec.bytes as f64 / 1e6,
+            rec.samples
+        );
+        emit_stage(
+            "recorded",
+            format!("已拉回 {}（{:.1} MB，{} 样本），渲染热点报告中…", data_path, rec.bytes as f64 / 1e6, rec.samples),
+            Some(data_path.clone()),
+        );
+        match xperf_core::simpleperf::analyze_and_report(&rec, &package) {
+            Ok(report) => emit_stage("done", report, Some(data_path)),
+            Err(e) => {
+                eprintln!("[stack] 报告生成失败: {}", e);
+                emit_stage("error", format!("{}", e), Some(data_path));
+            }
+        }
+        *running.lock().unwrap() = false;
+    });
+}
+
+/// 函数热点模式：simpleperf 录制 N 秒调用栈并生成热点报告（详见 xperf-core/src/simpleperf.rs）
+#[tauri::command]
+async fn start_stack(
+    package: String,
+    seconds: u64,
+    state: State<'_, AppState>,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    {
+        let mut t = state.stack_running.lock().map_err(|e| e.to_string())?;
+        if *t {
+            return Err("函数热点录制进行中，请等待完成".into());
+        }
+        *t = true;
+    }
+    if let Err(e) = validate_package(&package) {
+        *state.stack_running.lock().map_err(|e| e.to_string())? = false;
+        return Err(e);
+    }
+    let seconds = seconds.clamp(1, 600);
+    spawn_stack(app, package, seconds, state.stack_running.clone());
     Ok(())
 }
 
@@ -589,7 +667,7 @@ async fn export_csv(
 }
 
 fn main() {
-    // 支持命令行自动启动：xperf-gui --package <pkg> [--interval 1000] [--cpu] [--memory] [--fps] [--freq] [--io] [--net] [--gpu] [--thermal] [--trace N]
+    // 支持命令行自动启动：xperf-gui --package <pkg> [--interval 1000] [--cpu] [--memory] [--fps] [--freq] [--io] [--net] [--gpu] [--thermal] [--trace N] [--stack N]
     // （便于脚本化/验证；不传参数则手动在前端操作）
     let args: Vec<String> = std::env::args().collect();
     let get_opt = |name: &str| -> Option<String> {
@@ -601,6 +679,7 @@ fn main() {
     let auto_package = get_opt("--package");
     let auto_interval: u64 = get_opt("--interval").and_then(|v| v.parse().ok()).unwrap_or(1000).max(50);
     let auto_trace: Option<u64> = get_opt("--trace").and_then(|v| v.parse().ok());
+    let auto_stack: Option<u64> = get_opt("--stack").and_then(|v| v.parse().ok());
     let auto_flags = MetricFlags {
         cpu: has_flag("--cpu"),
         memory: has_flag("--memory"),
@@ -616,6 +695,7 @@ fn main() {
         .manage(AppState {
             running: Arc::new(Mutex::new(false)),
             trace_running: Arc::new(Mutex::new(false)),
+            stack_running: Arc::new(Mutex::new(false)),
         })
         .setup(move |app| {
             if let Some(package) = auto_package.clone() {
@@ -646,7 +726,18 @@ fn main() {
                     if !*t {
                         *t = true;
                         drop(t);
-                        spawn_trace(app.handle().clone(), package, n, state.trace_running.clone());
+                        spawn_trace(app.handle().clone(), package.clone(), n, state.trace_running.clone());
+                    }
+                }
+                // 函数热点自动启动（--stack N，可与采样/深挖并行）
+                if let Some(n) = auto_stack {
+                    let n = n.clamp(1, 600);
+                    let state = app.state::<AppState>();
+                    let mut t = state.stack_running.lock().unwrap();
+                    if !*t {
+                        *t = true;
+                        drop(t);
+                        spawn_stack(app.handle().clone(), package, n, state.stack_running.clone());
                     }
                 }
             }
@@ -656,6 +747,7 @@ fn main() {
             start_sampling,
             stop_sampling,
             start_trace,
+            start_stack,
             open_perfetto_ui,
             diag_log,
             list_packages,

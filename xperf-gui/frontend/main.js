@@ -464,18 +464,22 @@ document.getElementById('markerBtn').addEventListener('click', async () => {
 // trace 事件 stage: recording / recorded / done（message=完整报告）/ error；recorded/done/error 附 trace_path
 let currentTracePath = null;
 function switchTab(which) {
+  // which: 'perf' / 'trace' / 'stack'（两个分析页均隐藏侧栏，报告占满全宽）
   const perf = which === 'perf';
   document.getElementById('perfContent').classList.toggle('hidden', !perf);
-  document.getElementById('traceContent').classList.toggle('hidden', perf);
+  document.getElementById('traceContent').classList.toggle('hidden', which !== 'trace');
+  document.getElementById('stackContent').classList.toggle('hidden', which !== 'stack');
   document.getElementById('tabPerfBtn').classList.toggle('active', perf);
-  document.getElementById('tabTraceBtn').classList.toggle('active', !perf);
-  // Perfetto 分析页隐藏左侧采样控制栏（报告占满全宽）；性能指标页恢复
+  document.getElementById('tabTraceBtn').classList.toggle('active', which === 'trace');
+  document.getElementById('tabStackBtn').classList.toggle('active', which === 'stack');
+  // 分析页隐藏左侧采样控制栏（报告占满全宽）；性能指标页恢复
   document.getElementById('sidebar').classList.toggle('hidden', !perf);
   // 图表容器显隐变化后尺寸需刷新
   if (perf) setTimeout(() => { for (const c of allCharts) c.resize(); }, 50);
 }
 document.getElementById('tabPerfBtn').addEventListener('click', () => switchTab('perf'));
 document.getElementById('tabTraceBtn').addEventListener('click', () => switchTab('trace'));
+document.getElementById('tabStackBtn').addEventListener('click', () => switchTab('stack'));
 
 // ---- 主题切换（暗/亮，localStorage 持久化） ----
 function applyTheme(theme) {
@@ -542,6 +546,45 @@ document.getElementById('openPerfBtn').addEventListener('click', async () => {
   } catch (err) {
     document.getElementById('status').textContent = '打开 Perfetto UI 失败: ' + err;
     _diag('openPerfBtn ERROR: ' + JSON.stringify(err));
+  }
+});
+
+// ---- simpleperf 函数热点（--stack）：录制 N 秒调用栈 → 线程 CPU 分布 + 函数热点报告，独立 tab 展示 ----
+// stack 事件 stage: recording / recorded / done（message=完整报告）/ error；recorded/done/error 附 data_path
+listen('stack', (e) => {
+  const { stage, message, data_path } = e.payload;
+  if (data_path) {
+    document.getElementById('stackFileLabel').textContent = data_path;
+  }
+  document.getElementById('stackReport').textContent = message;
+  if (stage === 'done') {
+    document.getElementById('stackBtn').disabled = false;
+    document.getElementById('status').textContent = '函数热点分析完成';
+    switchTab('stack');
+  } else if (stage === 'error') {
+    document.getElementById('stackBtn').disabled = false;
+    document.getElementById('status').textContent = '函数热点分析失败';
+    switchTab('stack');
+  }
+  _diag('stack: ' + stage);
+});
+
+document.getElementById('stackBtn').addEventListener('click', async () => {
+  const package = document.getElementById('package').value.trim();
+  if (!package) {
+    document.getElementById('status').textContent = '请先填写包名';
+    return;
+  }
+  const seconds = parseInt(document.getElementById('stackSeconds').value, 10) || 10;
+  try {
+    await invoke('start_stack', { package, seconds });
+    document.getElementById('stackBtn').disabled = true;
+    // 录制期间留在指标页观察实时曲线（采样与录制并行），完成/失败时自动切到函数热点页
+    document.getElementById('status').textContent = '函数热点录制中: ' + package;
+    _diag('stackBtn: ' + package + ' ' + seconds + 's');
+  } catch (err) {
+    document.getElementById('status').textContent = '函数热点错误: ' + err;
+    _diag('stackBtn invoke ERROR: ' + JSON.stringify(err));
   }
 });
 

@@ -1,6 +1,7 @@
 //! xperformance：xtools 的 CLI 工具——对指定 Android 包名做 CPU/内存/FPS/频率/温度/GPU/
 //! IO/网络采样（设备端 agent 采集，流式 CSV + 退出图表），附带验证能力：阈值告警、
-//! 冷启动测量、时间轴打点、perfetto 深挖（--trace N 录制 + trace_processor SQL 归因）。
+//! 冷启动测量、时间轴打点、perfetto 深挖（--trace N 录制 + trace_processor SQL 归因）、
+//! simpleperf 函数热点（--stack N 调用栈采样，定位 CPU 热点函数）。
 #![deny(warnings)]
 use anyhow::{Context, Result};
 use chrono::{DateTime, Local};
@@ -20,6 +21,7 @@ use utils::validate_package_name;
 
 use xperf_core::ThreadCpuInfo;
 use xperf_core::trace;
+use xperf_core::simpleperf;
 
 #[derive(Parser, Debug)]
 #[command(version, about = "XPerformance Monitor - Android process CPU/memory monitor", long_about = None)]
@@ -80,6 +82,11 @@ struct Args {
     /// （包线程 CPU/抢占延迟/系统 CPU top/每核 busy/频率/帧时间线）；可与采样指标并行（同窗口对照）或单独使用
     #[arg(long, value_name = "SECONDS", value_parser = clap::value_parser!(u64).range(1..=600))]
     trace: Option<u64>,
+
+    /// 函数热点模式：simpleperf 录制 N 秒调用栈（cpu-cycles + dwarf），生成线程 CPU 分布与
+    /// 函数热点排名（children/self），回答"CPU 高在哪个函数"；可与采样指标并行（同窗口对照）或单独使用
+    #[arg(long, value_name = "SECONDS", value_parser = clap::value_parser!(u64).range(1..=600))]
+    stack: Option<u64>,
 }
 
 fn check_adb() -> Result<()> {
@@ -112,17 +119,67 @@ async fn monitor_process(args: &Args) -> Result<(), Box<dyn std::error::Error>> 
 
     let flags = metric_flags(args);
     if !flags.any() {
-        if let Some(n) = args.trace {
-            // 纯深挖模式：不采样，只录 trace + 分析。
-            // 注册 Ctrl-C handler：默认行为直接杀进程，设备端残留文件无从提示
-            ctrlc::set_handler(|| {
-                xperf_core::utils::set_interrupt_flag();
-                println!("\n程序正在退出...");
-            })
-            .ok();
+        if args.trace.is_none() && args.stack.is_none() {
+            println!("No monitoring options selected. Use --cpu/--memory/--fps/--freq/--thermal/--gpu/--io/--net");
+            return Ok(());
+        }
+        // 纯深挖模式：不采样，只录 trace/调用栈 + 分析。
+        // 注册 Ctrl-C handler：默认行为直接杀进程，设备端残留文件无从提示
+        ctrlc::set_handler(|| {
+            xperf_core::utils::set_interrupt_flag();
+            println!("\n程序正在退出...");
+        })
+        .ok();
+        // --trace 与 --stack 可同时给：并行录制同窗口对照，报告按 trace → stack 顺序输出
+        let trace_handle = args.trace.map(|n| {
             println!("perfetto 深挖：录制 {}s…", n);
-            let dir = cli_utils::create_timestamp_subdir(&args.package)?.join("trace");
-            let rec = trace::record(n, &dir)?;
+            let pkg = args.package.clone();
+            std::thread::spawn(move || {
+                let dir = cli_utils::create_timestamp_subdir(&pkg)?.join("trace");
+                trace::record(n, &dir)
+            })
+        });
+        let stack_handle = args.stack.map(|n| {
+            println!("simpleperf 函数热点：录制 {}s…", n);
+            let pkg = args.package.clone();
+            std::thread::spawn(move || {
+                let dir = cli_utils::create_timestamp_subdir(&pkg)?.join("stack");
+                simpleperf::record(n, &pkg, &dir)
+            })
+        });
+        let mut failed: Vec<&str> = Vec::new();
+        if !print_trace_result(trace_handle, args) {
+            failed.push("perfetto");
+        }
+        if !print_stack_result(stack_handle, args) {
+            failed.push("simpleperf");
+        }
+        // 录制失败 = 无数据产出，非零退出（分析失败不算：数据已拉回可手动分析）
+        if !failed.is_empty() {
+            return Err(format!("{} 录制失败（详见上方输出）", failed.join(" / ")).into());
+        }
+        return Ok(());
+    }
+    // 统一走设备端 agent 采样（无 adb 轮询路径）；--trace/--stack 时采样限时与录制同窗口
+    // （两者同给取较长者，采样窗口覆盖两段录制）
+    let stop_after = [args.trace, args.stack]
+        .into_iter()
+        .flatten()
+        .max()
+        .map(std::time::Duration::from_secs);
+    monitor_process_agent(args, flags, stop_after).await
+}
+
+/// trace 录制线程收尾：join → 拉回提示 → SQL 分析报告。
+/// 返回录制是否成功（数据已拉回；分析失败不算——数据仍在可手动分析）。
+/// 未开启（handle 为 None）视为成功。
+fn print_trace_result(
+    handle: Option<std::thread::JoinHandle<Result<xperf_core::trace::RecordedTrace>>>,
+    args: &Args,
+) -> bool {
+    let Some(h) = handle else { return true };
+    match h.join() {
+        Ok(Ok(rec)) => {
             println!(
                 "{}",
                 format!(
@@ -136,14 +193,54 @@ async fn monitor_process(args: &Args) -> Result<(), Box<dyn std::error::Error>> 
                 Ok(text) => println!("{}", text),
                 Err(e) => println!("{}", e.to_string().yellow()),
             }
-            return Ok(());
+            true
         }
-        println!("No monitoring options selected. Use --cpu/--memory/--fps/--freq/--thermal/--gpu/--io/--net");
-        return Ok(());
+        Ok(Err(e)) => {
+            println!("{}", format!("perfetto 录制失败: {}", e).yellow());
+            false
+        }
+        Err(_) => {
+            println!("{}", "perfetto 录制线程异常退出".yellow());
+            false
+        }
     }
+}
 
-    // 统一走设备端 agent 采样（无 adb 轮询路径）；--trace 时采样限时与录制同窗口
-    monitor_process_agent(args, flags, args.trace.map(std::time::Duration::from_secs)).await
+/// 调用栈录制线程收尾：join → 拉回提示 → 函数热点报告。
+/// 返回录制是否成功（数据已拉回；报告失败不算——原始报告文件/`.data` 仍在）。
+/// 未开启（handle 为 None）视为成功。
+fn print_stack_result(
+    handle: Option<std::thread::JoinHandle<Result<xperf_core::simpleperf::RecordedStack>>>,
+    args: &Args,
+) -> bool {
+    let Some(h) = handle else { return true };
+    match h.join() {
+        Ok(Ok(rec)) => {
+            println!(
+                "{}",
+                format!(
+                    "simpleperf 调用栈已拉回: {}（{:.1} MB，{} 样本）",
+                    rec.local_path.display(),
+                    rec.bytes as f64 / 1e6,
+                    rec.samples
+                )
+                .green()
+            );
+            match simpleperf::analyze_and_report(&rec, &args.package) {
+                Ok(text) => println!("{}", text),
+                Err(e) => println!("{}", e.to_string().yellow()),
+            }
+            true
+        }
+        Ok(Err(e)) => {
+            println!("{}", format!("simpleperf 录制失败: {}", e).yellow());
+            false
+        }
+        Err(_) => {
+            println!("{}", "simpleperf 录制线程异常退出".yellow());
+            false
+        }
+    }
 }
 
 /// 冷启动测量（独立于采样，先执行再开始监控）
@@ -215,6 +312,15 @@ async fn monitor_process_agent(
         std::thread::spawn(move || {
             let dir = cli_utils::create_timestamp_subdir(&pkg)?.join("trace");
             trace::record(n, &dir)
+        })
+    });
+    // simpleperf 函数热点（--stack N）：后台线程录制，与采样/trace 同窗口
+    let stack_handle = args.stack.map(|n| {
+        println!("simpleperf 函数热点：后台录制 {}s 调用栈", n);
+        let pkg = args.package.clone();
+        std::thread::spawn(move || {
+            let dir = cli_utils::create_timestamp_subdir(&pkg)?.join("stack");
+            simpleperf::record(n, &pkg, &dir)
         })
     });
     let deadline = stop_after.map(|d| Instant::now() + d);
@@ -697,28 +803,10 @@ async fn monitor_process_agent(
         let stats = alert_stats.lock().unwrap();
         println!("{}", alerts::generate_report(&thresholds, &stats));
     }
-    // perfetto 深挖：录制与采样同窗口应已完成，join 后做 SQL 分析（录制失败不影响采样产出）
-    if let Some(h) = trace_handle {
-        match h.join() {
-            Ok(Ok(rec)) => {
-                println!(
-                    "{}",
-                    format!(
-                        "perfetto trace 已拉回: {}（{:.1} MB）",
-                        rec.local_path.display(),
-                        rec.bytes as f64 / 1e6
-                    )
-                    .green()
-                );
-                match trace::analyze_and_report(&rec, &args.package) {
-                    Ok(text) => println!("{}", text),
-                    Err(e) => println!("{}", e.to_string().yellow()),
-                }
-            }
-            Ok(Err(e)) => println!("{}", format!("perfetto 录制失败: {}", e).yellow()),
-            Err(_) => println!("{}", "perfetto 录制线程异常退出".yellow()),
-        }
-    }
+    // perfetto 深挖 + simpleperf 函数热点：录制与采样同窗口应已完成，join 后做分析
+    // （录制失败不影响采样产出；报告按 trace → stack 顺序输出）
+    print_trace_result(trace_handle, args);
+    print_stack_result(stack_handle, args);
     Ok(())
 }
 
