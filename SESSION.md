@@ -16,6 +16,7 @@
 | commit | 内容 |
 |--------|------|
 | 9ee99ad | feat：xperf-core/src/simpleperf.rs（录制 + 设备端三视图报告 + 解析渲染，单测 8 个）+ CLI `--stack N`（独立/并行两模式，与 --trace 可同给）+ GUI 函数热点独立 tab + `--stack N` 自动启动 |
+| bd4d5a9 | review: ①device_report `2>/dev/null` 连真实报错一起吞（失败时错误信息为空）→ `2>&1` 带回报错 + 成功路径过滤 simpleperf W/I 日志行（filter_simpleperf_logs，真机验证报告 0 条日志行）②validate_package 补 `-`（与 CLI/GUI 校验口径一致）③三处 doc"两视图"残留改三视图④前端 trace/stack recording 事件统一禁用按钮（命令行自动启动时按钮此前保持可点）。测试 42+1 全绿 |
 | （docs） | CLAUDE.md（新代码规则 + simpleperf 章节 + 输出文件表）/ WORKSPACE / SESSION 更新 |
 
 ### 完成内容
