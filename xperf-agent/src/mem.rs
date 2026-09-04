@@ -1,11 +1,11 @@
-//! 内存采样：低间隔走 /proc/<pid>/smaps_rollup（Pss/Rss，~1ms），
+//! 内存采样：低间隔走 `/proc/<pid>/smaps_rollup`（Pss/Rss，~1ms），
 //! interval ≥500ms 用本地 dumpsys meminfo（App Summary 全分类明细）。
 //! 低间隔下 dumpsys meminfo 太重（~100ms），退化到 smaps_rollup（只有 Pss/Rss）。
 
 use crate::{dumpsys, emit};
 use std::fs;
 
-/// 读 /proc/<pid>/smaps_rollup：返回 (Pss KB, Rss KB)
+/// 读 `/proc/<pid>/smaps_rollup`：返回 (Pss KB, Rss KB)
 fn read_smaps_rollup(pid: u32) -> Option<(u64, u64)> {
     let content = fs::read_to_string(format!("/proc/{}/smaps_rollup", pid)).ok()?;
     parse_smaps_rollup(&content)

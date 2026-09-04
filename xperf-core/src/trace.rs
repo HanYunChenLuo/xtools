@@ -11,7 +11,7 @@
 //!
 //! 链路：`adb shell perfetto -c - --txt -o /data/misc/perfetto-traces/…`（stdin 喂配置，
 //! write_into_file 流式落盘，长录制内存有界）→ adb pull → `trace_processor -q <sql>` 输出
-//! CSV → 解析。trace 文件始终保留，可拖入 https://ui.perfetto.dev 交互分析。
+//! CSV → 解析。trace 文件始终保留，可拖入 [ui.perfetto.dev](https://ui.perfetto.dev) 交互分析。
 //!
 //! SQL 执行约定：全部查询写在一个文件里单次执行（trace 只加载一次），marker 查询分段；
 //! 某条查询出错会中止整个文件的后续语句，故按「表必然存在 → 可能缺失」排序——帧时间线

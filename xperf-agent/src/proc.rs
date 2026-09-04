@@ -27,7 +27,7 @@ pub(crate) fn read_total_jiffies() -> Option<(u64, u32)> {
     Some((total?, ncores.max(1)))
 }
 
-/// 读 /proc/<pid>/stat 或 task/<tid>/stat 的 utime+stime jiffies
+/// 读 `/proc/<pid>/stat` 或 `task/<tid>/stat` 的 utime+stime jiffies
 pub(crate) fn read_stat_jiffies(path: &str) -> Option<u64> {
     let content = fs::read_to_string(path).ok()?;
     parse_stat_jiffies(&content)
@@ -65,7 +65,7 @@ pub(crate) fn read_u64_file(path: &str) -> Option<u64> {
     fs::read_to_string(path).ok()?.trim().parse().ok()
 }
 
-/// 读 cpu<N> 的某个 cpufreq 节点（KHz）；核离线/节点缺失返回 None
+/// 读 `cpu<N>` 的某个 cpufreq 节点（KHz）；核离线/节点缺失返回 None
 pub(crate) fn read_cpufreq(core: u32, node: &str) -> Option<u64> {
     read_u64_file(&format!("/sys/devices/system/cpu/cpu{}/cpufreq/{}", core, node))
 }
@@ -75,7 +75,7 @@ pub(crate) fn read_cpu_freqs(ncores: u32) -> Vec<u64> {
     (0..ncores).map(|i| read_cpufreq(i, "scaling_cur_freq").unwrap_or(0)).collect()
 }
 
-/// 读 /proc/<pid>/io：(rchar, wchar, read_bytes, write_bytes)，单位字节。
+/// 读 `/proc/<pid>/io`：(rchar, wchar, read_bytes, write_bytes)，单位字节。
 /// rchar/wchar 是逻辑读写（含 page cache），read_bytes/write_bytes 是真实磁盘 IO。
 pub(crate) fn read_pid_io(pid: u32) -> Option<(u64, u64, u64, u64)> {
     let content = fs::read_to_string(format!("/proc/{}/io", pid)).ok()?;
@@ -100,7 +100,7 @@ fn parse_pid_io(content: &str) -> Option<(u64, u64, u64, u64)> {
 
 /// 读 /proc/net/dev 聚合物理口收发字节数：(rx_bytes, tx_bytes)。
 /// 排除回环与隧道/虚拟口（lo/sit/tun/gre/dummy/vti/ip6*），只统计真实网络活动。
-/// 注意是整机口径：Android 应用共享 netns，/proc/<pid>/net/dev 与整机内容一致，
+/// 注意是整机口径：Android 应用共享 netns，`/proc/<pid>/net/dev` 与整机内容一致，
 /// per-app 流量需 qtaguid/eBPF（此车机均不可用）。
 pub(crate) fn read_net_dev() -> Option<(u64, u64)> {
     let content = fs::read_to_string("/proc/net/dev").ok()?;

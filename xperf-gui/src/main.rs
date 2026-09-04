@@ -1,6 +1,6 @@
 //! xperf-gui：xtools 的 Tauri 桌面 GUI——与 CLI 共用 xperf-core 的采样/深挖能力，
 //! 前端呈现折线图/实时数值/Top 线程/峰值/Perfetto 分析报告（独立 tab），支持暗/亮主题。
-//! 支持命令行自动启动：--package <pkg> [--interval N] [--cpu …] [--trace N]。
+//! 支持命令行自动启动：--package `<pkg>` `[--interval N]` [--cpu …] [--trace N]。
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use std::sync::{Arc, Mutex};
@@ -430,7 +430,7 @@ fn add_marker(label: String, app: tauri::AppHandle) -> String {
 }
 
 /// 导出前端持有的完整会话历史为 CSV（GUI 不流式落盘，数据在前端内存中）。
-/// 写到 log/<pkg>/<导出时刻>/ 下的各指标子目录，返回目录路径。
+/// 写到 `log/<pkg>/<导出时刻>/` 下的各指标子目录，返回目录路径。
 /// cpu/mem: pid -> [[ms, value]...]；fps: 图层短名 -> [[ms, fps, jank]...]
 /// freq: 核名 -> [[ms, MHz]...]；temp: 传感器 -> [[ms, °C, status]...]；
 /// gpu: [[ms, busy%, mhz]...]；io: pid -> [[ms, r, w, dr, dw]...]；net: [[ms, rx, tx]...]

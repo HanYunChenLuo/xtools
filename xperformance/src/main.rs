@@ -56,7 +56,7 @@ struct Args {
     #[arg(long)]
     gpu: bool,
 
-    /// Monitor per-process IO rate (KB/s, /proc/<pid>/io)
+    /// Monitor per-process IO rate (KB/s, `/proc/<pid>/io`)
     #[arg(long)]
     io: bool,
 

@@ -1,7 +1,9 @@
 //! SS4 ligfxprofilerd logcat 通道。
 //! SS4/8797 平台 GPU 统计由 ligfxprofilerd 服务输出到 logcat，每帧一行系统行 + N 行进程行：
-//!   [GPU0] Frame N: Frequency: 1000 Hz, ..., Busy=33.75%, ..., Utilization=33.75%
-//!   [GPU0]   GVM_com.lixiang.eid-8925: Busy=15.38%, ..., Utilization=15.38%
+//! ```text
+//! [GPU0] Frame N: Frequency: 1000 Hz, ..., Busy=33.75%, ..., Utilization=33.75%
+//! [GPU0]   GVM_com.lixiang.eid-8925: Busy=15.38%, ..., Utilization=15.38%
+//! ```
 //! 业务侧只需关注 Utilization 字段。
 
 use super::{spawn_stream_parser, GpuEvent};
@@ -35,8 +37,8 @@ fn spawn() -> Option<(std::process::Child, std::io::BufReader<std::process::Chil
 }
 
 /// 解析 logcat 行（归一为 GpuEvent）。
-/// "[GPU0] Frame N: Frequency: 1000 Hz, ..., Busy=33.75%, ..., Utilization=33.75%" → Sys
-/// "[GPU0]   GVM_com.lixiang.eid-8925: Busy=15.38%, ..., Utilization=15.38%" → Proc
+/// `"[GPU0] Frame N: Frequency: 1000 Hz, ..., Busy=33.75%, ..., Utilization=33.75%"` → Sys
+/// `"[GPU0]   GVM_com.lixiang.eid-8925: Busy=15.38%, ..., Utilization=15.38%"` → Proc
 fn parse_line(line: &str) -> Option<GpuEvent> {
     if !line.contains("ligfxprofilerd") {
         return None;
