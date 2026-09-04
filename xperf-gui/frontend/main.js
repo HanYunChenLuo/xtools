@@ -910,6 +910,46 @@ document.getElementById('deviceSelect').addEventListener('change', async (e) => 
   }
 });
 
+// ---- 设备热插拔：后端每 3s 轮询 diff，事件驱动更新下拉与提示 ----
+// 目标设备被移除不清后端 serial（断连重连逻辑仍指向它，插回即恢复采样）；
+// 下拉移除该设备但保留一个占位提示，插回后事件重建
+listen('devices-changed', (e) => {
+  const { devices, selected, added, removed } = e.payload;
+  const sel = document.getElementById('deviceSelect');
+  const current = sel.value;
+  sel.innerHTML = '';
+  for (const d of devices) {
+    const opt = document.createElement('option');
+    opt.value = d.serial;
+    opt.textContent = d.serial + (d.model ? '（' + d.model + '）' : '');
+    sel.appendChild(opt);
+  }
+  const stillHere = devices.some(d => d.serial === current);
+  if (stillHere) {
+    sel.value = current;
+  } else if (selected && !devices.some(d => d.serial === selected)) {
+    // 目标设备被移除：占位展示（后端 serial 保留，插回恢复）
+    const opt = document.createElement('option');
+    opt.value = selected;
+    opt.textContent = selected + '（已断开）';
+    sel.appendChild(opt);
+    sel.value = selected;
+    setStatus('目标设备已断开: ' + selected + '（采样等待重连，插回自动恢复）');
+  } else if (devices.length > 0) {
+    // 原选中项不在列表（如从未选择）且目标仍有效 → 对齐 selected
+    sel.value = selected && devices.some(d => d.serial === selected) ? selected : devices[0].serial;
+  }
+  if (removed.length > 0) {
+    _diag('devices removed: ' + removed.join(','));
+  }
+  if (added.length > 0) {
+    _diag('devices added: ' + added.join(','));
+    if (stillHere || !selected) {
+      setStatus('设备接入: ' + added.join(', ') + '（可在设备下拉切换）');
+    }
+  }
+});
+
 // ---- 采样启动失败（设备未选定多台同连/agent 构建部署启动失败）→ 前端可见 ----
 listen('sampling-error', (e) => {
   setStatus('错误: ' + e.payload.message);

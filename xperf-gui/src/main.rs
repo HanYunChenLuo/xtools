@@ -600,6 +600,48 @@ fn select_device(serial: String) -> Result<(), String> {
     Ok(())
 }
 
+/// 设备热插拔监视线程：每 3s 轮询 `adb devices -l`，与上次快照 diff，有变化时
+/// emit `devices-changed` 事件：`{devices: [{serial, model}], selected, added, removed}`。
+/// 首轮只建立快照不通知（首屏下拉由前端 loadDevices 填充，避免重复提示）。
+/// adb 暂不可用（如 server 重启中）跳过本轮；目标设备被移除不清全局 serial
+/// （断连重连逻辑仍指向它，设备插回即恢复）。线程随进程存活。
+fn spawn_device_monitor(app: tauri::AppHandle) {
+    std::thread::spawn(move || {
+        let mut last: Vec<xperf_core::AdbDevice> = Vec::new();
+        let mut first_round = true;
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(3));
+            let devices = match xperf_core::list_adb_devices() {
+                Ok(d) => d,
+                Err(_) => continue, // adb 暂不可用，下轮重试
+            };
+            let (added, removed) = xperf_core::diff_devices(&last, &devices);
+            if first_round || (added.is_empty() && removed.is_empty()) {
+                last = devices;
+                first_round = false;
+                continue;
+            }
+            eprintln!(
+                "[devices] 热插拔: 接入 [{}]，移除 [{}]",
+                added.join(","),
+                removed.join(",")
+            );
+            let _ = app.emit(
+                "devices-changed",
+                serde_json::json!({
+                    "devices": devices.iter().map(|d| serde_json::json!({
+                        "serial": d.serial, "model": d.model,
+                    })).collect::<Vec<_>>(),
+                    "selected": xperf_core::target_serial(),
+                    "added": added,
+                    "removed": removed,
+                }),
+            );
+            last = devices;
+        }
+    });
+}
+
 /// 启动参数回查（`--package` 等命令行自动启动时前端回填输入框用）：
 /// 返回 `{package, interval, flags}`（运行中才有值；`--interval` 与指标
 /// flag 来自启动线程的同一来源，保证与实际采样一致）。前端据此把 UI 状态
@@ -1009,6 +1051,8 @@ fn main() {
             startup_extra: Mutex::new(None),
         })
         .setup(move |app| {
+            // 设备热插拔监视线程（devices-changed 事件 → 前端下拉动态更新）
+            spawn_device_monitor(app.handle().clone());
             // auto_start：设备前置解析通过（--device 或单台自动）才自动启动采样；
             // 多台未指定时为 false（eprintln 已提示），前端保持空闲态等用户选定
             if auto_start {
