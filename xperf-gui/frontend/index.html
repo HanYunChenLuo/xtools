@@ -47,10 +47,6 @@
     </label>
     <button id="startBtn">开始监控</button>
     <button id="stopBtn" disabled>停止</button>
-    <div class="sidebar-row">
-      <input id="markerLabel" type="text" placeholder="打点标签" class="inline-input" />
-      <button id="markerBtn" class="small">打点</button>
-    </div>
     <h3>深挖录制</h3>
     <label>录制时长:
       <select id="recordSeconds" title="录制时长（秒）：Perfetto / simpleperf 分析共用">
@@ -105,15 +101,11 @@
       </div>
       <div id="peakPanel" class="panel">
         <h3>峰值</h3>
-        <table id="peakTable"><tr><th>PID</th><th>峰值 CPU%</th><th>时间</th><th>峰值 PSS(KB)</th><th>时间</th></tr></table>
+        <table id="peakTable"><tr><th>PID</th><th>峰值 CPU%</th><th>时间</th><th>峰值 PSS(MB)</th><th>时间</th></tr></table>
       </div>
       <div id="baselinePanel" class="panel hidden">
         <h3>基线对比</h3>
         <pre id="baselineReport"></pre>
-      </div>
-      <div id="pidPanel" class="panel">
-        <h3>PIDs</h3>
-        <ul id="pidList"></ul>
       </div>
     </div>
     </div>

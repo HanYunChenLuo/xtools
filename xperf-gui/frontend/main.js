@@ -169,28 +169,6 @@ class LineChart {
       ctx.fillRect(legendX, 11, 10, 10);
       legendX -= 10;
     });
-    // 打点竖线（全局 markers 数组）
-    if (window.markers && window.markers.length > 0) {
-      const plotH = H - B - T;
-      for (const m of window.markers) {
-        const mt = m.timestamp;
-        if (mt < tMin || mt > tMax) continue;
-        const x = L + plotW * (mt - tMin) / span;
-        ctx.strokeStyle = C.err;
-        ctx.lineWidth = 1.5;
-        ctx.setLineDash([4, 4]);
-        ctx.beginPath();
-        ctx.moveTo(x, T);
-        ctx.lineTo(x, T + plotH);
-        ctx.stroke();
-        ctx.setLineDash([]);
-        // 标签（右对齐，避免越界）
-        ctx.fillStyle = C.err;
-        ctx.font = '11px system-ui, sans-serif';
-        const tw = ctx.measureText(m.label).width;
-        ctx.fillText(m.label, Math.min(x + 4, W - R - tw), T - 4);
-      }
-    }
   }
   drawAxes(l, t, r, b) {
     const { ctx } = this;
@@ -203,7 +181,7 @@ class LineChart {
 }
 
 const cpuChart = new LineChart('cpuChart', 'Process CPU (%)', '%', 100);
-const memChart = new LineChart('memChart', 'Memory Total PSS (KB)', 'KB');
+const memChart = new LineChart('memChart', 'Memory Total PSS (MB)', 'MB');
 const fpsChart = new LineChart('fpsChart', 'FPS', 'fps'); // 自适应纵轴（30/60/120 档各异）
 const freqChart = new LineChart('freqChart', 'CPU Frequency (MHz)', 'MHz'); // 每核一条线
 const tempChart = new LineChart('tempChart', 'Temperature (°C)', '°C'); // 每传感器一条线；thermal status 写入标题
@@ -229,7 +207,6 @@ const gpuHist = [];  // [{t, busy, mhz}]
 const gpumemHist = {}; // pid -> [{t, mb, gmb}]（--gpu 保底路径）
 const gpuprocHist = {}; // pid -> [{t, busy}]（--gpu QNX 路径每进程 busy%）
 let maxkhz = [];     // AgentHello 带的每核最大频率（KHz）
-window.markers = []; // 打点事件（{label, timestamp}），LineChart.draw() 画竖线
 
 // ---- 实时数值面板：各指标最新值，500ms 节流渲染 ----
 const liveData = {}; // key -> { label, value, unit, color（语义名，映射 CSS 变量） }
@@ -250,9 +227,9 @@ function renderPeaks() {
   const rows = Object.entries(peaks).map(([pid, p]) =>
     `<tr><td>${pid}</td>` +
     `<td>${p.cpu ? p.cpu.v.toFixed(1) : '-'}</td><td>${p.cpu ? fmtTime(p.cpu.t) : '-'}</td>` +
-    `<td>${p.mem ? p.mem.v : '-'}</td><td>${p.mem ? fmtTime(p.mem.t) : '-'}</td></tr>`);
+    `<td>${p.mem ? p.mem.v.toFixed(1) : '-'}</td><td>${p.mem ? fmtTime(p.mem.t) : '-'}</td></tr>`);
   document.getElementById('peakTable').innerHTML =
-    '<tr><th>PID</th><th>峰值 CPU%</th><th>时间</th><th>峰值 PSS(KB)</th><th>时间</th></tr>' + rows.join('');
+    '<tr><th>PID</th><th>峰值 CPU%</th><th>时间</th><th>峰值 PSS(MB)</th><th>时间</th></tr>' + rows.join('');
 }
 
 function trackPeak(pid, kind, v, t) {
@@ -294,15 +271,13 @@ window.addEventListener('error', (e) => {
   document.title = 'XPerformance | ERROR: ' + (e.message || 'unknown');
 });
 
+// PID 变化时刷新状态栏：PIDs 融入「监控中」文案（如「监控中: pkg（PID 4428）」），
+// 不单独占面板；多 PID 逗号分隔，进程重启换 PID 自动跟随。停止后不再刷新。
 function renderPidList() {
-  const ul = document.getElementById('pidList');
-  ul.innerHTML = '';
-  for (const pid of Object.keys(pidData)) {
-    const li = document.createElement('li');
-    li.textContent = 'PID ' + pid + (pidData[pid].stopped ? ' (已停止)' : '');
-    if (pidData[pid].new) { li.classList.add('new'); pidData[pid].new = false; }
-    ul.appendChild(li);
-  }
+  if (!samplingRunning) return;
+  const pkg = document.getElementById('package').value || '';
+  const pids = Object.keys(pidData);
+  setStatus(pids.length ? `监控中: ${pkg}（PID ${pids.join(', ')}）` : `监控中: ${pkg}`);
 }
 
 listen('sample', (e) => {
@@ -336,8 +311,9 @@ listen('sample', (e) => {
     const { pid, timestamp, total_pss, details } = ev.MemoryUpdate;
     if (!pidData[pid]) { pidData[pid] = { cpu: [], mem: [], new: true }; renderPidList(); }
     const t = new Date(timestamp).getTime();
-    memChart.push('PID ' + pid, t, total_pss);
-    trackPeak(pid, 'mem', total_pss, t);
+    // 单位统一：内存展示/图表/峰值/导出全 MB（协议与基线 JSON 存储仍 KB）
+    memChart.push('PID ' + pid, t, total_pss / 1024);
+    trackPeak(pid, 'mem', total_pss / 1024, t);
     setLive('mem', '内存 PSS (pid ' + pid + ')', (total_pss / 1024).toFixed(1), ' MB', 'ok');
     if (details) {
       setLive('mem_native', '  └ Native', (details.native_heap / 1024).toFixed(1), ' MB', 'dim');
@@ -459,23 +435,6 @@ function autoCheck(id) {
   if (!box.checked) { box.checked = true; toggleCharts(); }
 }
 _diag('listen(sample) registered');
-
-// ---- 打点：marker 事件（后端 add_marker 发射）→ 加入全局数组并重绘所有图表 ----
-listen('marker', (e) => {
-  const { label, timestamp } = e.payload;
-  window.markers.push({ label, timestamp });
-  for (const c of allCharts) c.draw();
-  _diag('marker: ' + label);
-});
-
-// ---- 打点按钮：输入标签 → 调后端 add_marker → 追加 markers + 重绘 ----
-document.getElementById('markerBtn').addEventListener('click', async () => {
-  const input = document.getElementById('markerLabel');
-  const label = input.value.trim() || '打点';
-  input.value = '';
-  await invoke('add_marker', { label });
-  _diag('markerBtn: ' + label);
-});
 
 // ---- perfetto 分析（--trace）：录制 N 秒 → trace_processor SQL 归因，独立 tab 展示 ----
 // trace 事件 stage: recording / recorded / done（message=完整报告）/ error；recorded/done/error 附 trace_path
@@ -691,7 +650,6 @@ document.getElementById('startBtn').addEventListener('click', async () => {
   for (const k of Object.keys(gpumemHist)) delete gpumemHist[k];
   for (const k of Object.keys(gpuprocHist)) delete gpuprocHist[k];
   for (const k of Object.keys(liveData)) delete liveData[k];
-  window.markers = [];
   gpuHist.length = 0;
   renderPeaks();
   renderPidList();
