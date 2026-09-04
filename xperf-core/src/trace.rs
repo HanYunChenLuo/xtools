@@ -7,7 +7,7 @@
 //! - 抢占/调度延迟（thread_state Runnable：唤醒→上核，谁被抢、被抢多久）
 //! - 同窗口系统级 CPU top（谁在抢核）、每核 busy/上下文切换次数（排除 idle）
 //! - CPU 频率区间（平台无 cpufreq ftrace 事件时如实标注，如 SS3 GVM 频率归 hypervisor）
-//! - 帧时间线全局统计（此平台 frametimeline 无进程/图层归属，与 agent 图层 FPS 互补）
+//! - 帧时间线全局统计（与 agent 图层 FPS 互补；按图层归属深入分析用浏览器 Perfetto UI）
 //!
 //! 链路：`adb shell perfetto -c - --txt -o /data/misc/perfetto-traces/…`（stdin 喂配置，
 //! write_into_file 流式落盘，长录制内存有界）→ adb pull → `trace_processor -q <sql>` 输出
@@ -664,7 +664,7 @@ impl Analysis {
             }
         }
 
-        s.push_str("\n── 帧时间线（全局；此平台无进程/图层归属）──\n");
+        s.push_str("\n── 帧时间线（全局统计）──\n");
         match &self.frame {
             Some(f) if f.frames > 0 => {
                 s.push_str(&format!(
@@ -728,6 +728,9 @@ pub fn analyze_and_report(rec: &RecordedTrace, package: &str) -> Result<String> 
 /// 镜像缓存目录（~/.cache/xperf/perfetto_ui）
 const UI_CACHE_SUBDIR: &str = ".cache/xperf/perfetto_ui";
 
+/// 镜像过程进程内互斥：并发调用（如连点按钮）会交错写同一批缓存文件（curl -o 交错损坏）
+static MIRROR_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// 单例本地服务器状态：端口 + trace 注册表（文件名 → 本地路径）。
 /// 服务器线程只起一次、随进程存活；每次分析把 trace 注册进表，URL 直接指向它。
 static UI_SERVER: OnceLock<(u16, &'static std::sync::Mutex<HashMap<String, PathBuf>>)> =
@@ -786,6 +789,8 @@ fn find_chrome() -> Option<PathBuf> {
 /// UI 是纯静态 SPA：index.html 内嵌 loader 动态加载 `/v58.3-xxx/` 资源，静态爬虫
 /// 抓不全，运行时发现才可靠。
 fn ensure_perfetto_ui_mirror() -> Result<PathBuf> {
+    // 进程内互斥：首次镜像 ~2min，期间并发调用必须等待而非交错写缓存
+    let _guard = MIRROR_LOCK.lock().expect("镜像锁失败");
     let dir = std::env::var_os("HOME")
         .map(PathBuf::from)
         .unwrap_or_default()
@@ -975,8 +980,9 @@ fn ui_server(mirror: &Path) -> Result<(u16, &'static std::sync::Mutex<HashMap<St
 
 /// 自动在浏览器打开 Perfetto UI 并加载 trace：
 /// 本地镜像 UI（首次联网镜像，之后离线可用）+ 单例本地服务器同源 serve trace +
-/// `#!/viewer?url=/相对路径` 深链——同源 fetch 属 CSP 'self'、http 页面无 mixed content、
-/// loopback→loopback 不跨地址空间无 LNA，全自动加载零交互（实测 Chrome 152 验证通过）。
+/// `#!/viewer?url=绝对URL` 深链（url 参数必须绝对 URL，见下方行内注释）——同源 fetch
+/// 属 CSP 'self'、http 页面无 mixed content、loopback→loopback 不跨地址空间无 LNA，
+/// 全自动加载零交互（实测 Chrome 152 验证通过）。
 /// 服务器随进程存活（浏览器内刷新不受影响）。
 pub fn open_trace_in_local_ui(trace: &Path) -> Result<String> {
     let mirror = ensure_perfetto_ui_mirror()?;
@@ -1007,9 +1013,10 @@ pub fn open_trace_in_local_ui(trace: &Path) -> Result<String> {
 // ==================== 浏览器打开（ui.perfetto.dev 拖拽，自动加载的回退方案） ====================
 
 /// 打开 ui.perfetto.dev 主页 + 系统文件管理器（定位并高亮 trace 文件），用户把文件拖入
-/// 浏览器窗口即完成加载。
+/// 浏览器窗口即完成加载。作为本地镜像自动加载（open_trace_in_local_ui）的回退方案。
 ///
-/// 为什么不走本地 HTTP + `?url=` 深链（实测 Chrome 152 被双重拦截，2026-09-03）：
+/// 为什么不能「ui.perfetto.dev 页面 + 本地 HTTP + ?url= 深链」（实测 Chrome 152 双重
+/// 拦截，2026-09-03）：
 /// ① ui.perfetto.dev 自带 CSP `connect-src 'self' ws://127.0.0.1:8037 http://localhost:8080
 ///   https: blob: data: http://127.0.0.1:9001 ws://127.0.0.1:9001 ws://127.0.0.1:9167`
 ///   ——随机端口/127.0.0.1 任意端口全被 CSP block（fetch 抛 TypeError，连请求都不发）；
