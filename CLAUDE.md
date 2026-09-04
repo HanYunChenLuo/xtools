@@ -30,7 +30,10 @@ cargo test -p xrm tests::test_dangerous_operation_detection
 # Check for errors without building
 cargo check --workspace
 
-# 文档覆盖检查（pub 项漏 doc 即警告；xperf-core 已 #![warn(missing_docs)] 常开）
+# 文档构建与覆盖检查（两条都要跑：cargo doc 有默认 lint 集——裸尖括号 HTML/
+# 裸 URL/未解析链接等 missing_docs 单 lint 查不出来；xperf-core 已
+# #![warn(missing_docs)] 常开）
+cargo doc 2>&1 | grep -cE "^(warning|error)"   # 应为 0
 cargo rustdoc -p xperf-core -- -W missing_docs
 cargo rustdoc -p xperformance --bins -- -W missing_docs
 cargo rustdoc -p xperf-gui --bins -- -W missing_docs

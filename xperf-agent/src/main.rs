@@ -23,7 +23,7 @@
 //!   {"t":"err","msg":"..."}
 //!   （空行）                                                    // 心跳：整轮零输出时探活（写失败=主机断连→agent 退出），host 侧 next_event 跳过
 //!
-//! 用法：xperf-agent --package <pkg> [--pid N]... --interval 50 [--cpu] [--memory] [--fps]
+//! 用法：xperf-agent --package `<pkg>` [--pid N]... --interval 50 [--cpu] [--memory] [--fps]
 //!                   [--freq] [--io] [--net] [--gpu] [--thermal]
 //!
 //! 模块划分：proc（/proc 与 sysfs 读取 + CPU 采样状态）/ mem（内存）/ fps（SurfaceFlinger）/
@@ -33,7 +33,7 @@
 //! - CPU 口径相同（jiffies 差值 ×核数，单核基准），但窗口是相邻两轮之间
 //!   （agent 常驻保有上一轮状态，无需主机侧 phase1/phase2 结构）
 //! - 内存：interval ≥ 500ms 用本地 dumpsys meminfo（全分类明细，同轮询模式）；
-//!   低间隔改读 /proc/<pid>/smaps_rollup（Pss/Rss，~1ms）
+//!   低间隔改读 `/proc/<pid>/smaps_rollup`（Pss/Rss，~1ms）
 //! - FPS：设备端本地 dumpsys SurfaceFlinger（无 adb 中转，图层名无需引号转义）；
 //!   限频至 ≥500ms 周期（每 fps_every_n_rounds 轮一次），与 CPU/内存节拍解耦——
 //!   低间隔下每轮跑 dumpsys SurfaceFlinger 会拖垮节拍（实测 50ms 间隔约半数轮次 overrun）
@@ -214,7 +214,7 @@ fn fill_pid_names(map: &Mutex<HashMap<String, u32>>, pids: &[u32]) {
     }
 }
 
-/// FPS 兜底匹配需要的包名：--package 直接用；--pid 模式从 /proc/<pid>/cmdline 反查（一次性缓存）
+/// FPS 兜底匹配需要的包名：--package 直接用；--pid 模式从 `/proc/<pid>/cmdline` 反查（一次性缓存）
 fn package_of(args: &Args, pkg_cache: &mut HashMap<u32, String>, pid: u32) -> String {
     match &args.package {
         Some(p) => p.clone(),

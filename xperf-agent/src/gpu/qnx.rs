@@ -50,9 +50,9 @@ pub(super) fn available() -> bool {
 }
 
 /// QNX kgsl slog 样本（slog2info 流的两类行）：
-/// 进程行: "For process[PID:1758842997] = 'xiang.car.x.svm' the GPU busy = 14.40% with CtxtID = 244 priority = 1"
+/// 进程行: `"For process[PID:1758842997] = 'xiang.car.x.svm' the GPU busy = 14.40% with CtxtID = 244 priority = 1"`
 ///   （PID 是 QNX 侧编号，无意义；按进程名匹配 Android comm）
-/// 系统行: "frame 435653: freq = 506.975174MHz/635Mhz, elapsed time = 5001.13ms, busy time = 840.57ms, busy = 16.81%, utilization = 13.42%"
+/// 系统行: `"frame 435653: freq = 506.975174MHz/635Mhz, elapsed time = 5001.13ms, busy time = 840.57ms, busy = 16.81%, utilization = 13.42%"`
 fn parse_line(line: &str) -> Option<GpuEvent> {
     if let Some(pos) = line.find("For process[PID:") {
         // 进程名在 = '...' 内；busy 在 "the GPU busy = " 后

@@ -127,7 +127,7 @@ fn spawn_stream_parser(
     });
 }
 
-/// 事件落线：gpu（busy[,util][,mhz][,maxmhz]，按通道字段有无按需输出）/ gpuproc（按名归因）
+/// 事件落线：gpu（busy `[,util][,mhz][,maxmhz]`，按通道字段有无按需输出）/ gpuproc（按名归因）
 fn emit_event(ev: GpuEvent, pid_names: &Mutex<HashMap<String, u32>>) {
     match ev {
         GpuEvent::Sys { mhz, maxmhz, util, busy } => {

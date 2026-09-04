@@ -89,7 +89,7 @@ fn parse_owned_buffer_layers(dump: &str, pid: u32) -> Vec<String> {
     layers
 }
 
-/// --list 解析：保留包名匹配的行，去 "<hex> " 别名前缀，去重。
+/// --list 解析：保留包名匹配的行，去 `<hex> ` 别名前缀，去重。
 fn parse_list_layers(list: &str, package: &str) -> Vec<String> {
     let mut layers = Vec::new();
     for line in list.lines() {
