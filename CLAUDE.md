@@ -7,6 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **待办（backlog）**：`WORKSPACE.md` —— 跨会话的工作项与优先级，完成即勾选并注明 commit。
 - **会话历史**：`SESSION.md` —— 每个会话结束前追加一条总结（最新在最上）：日期/任务/commit 列表/关键结论与基线/遗留问题。新会话开始先读它获取近期上下文。
 - 一个会话聚焦一个任务线，多会话通过这两个文件同步。
+- **代码规则（强制）**：写代码必须同时考虑 `cargo doc`——新增/修改的所有 pub 项（crate/mod/struct/enum/fn/字段/变体）都要有规范完整的 doc 注释（含单位/语义/无值字段要写明），路径/参数/日志样例包反引号或 code block；交付前必须跑完整 `cargo doc` 并做到**零 warning 零 error**（默认 lint 集 + missing_docs，命令见 Commands 节）。
 
 ## Commands
 
@@ -150,6 +151,16 @@ CLI 退出图表用通用 helper `generate_multi_line_chart`（xperformance/util
 
 ---
 
+### simpleperf 函数热点模式（`--stack N`，xperf-core/src/simpleperf.rs，CLI 与 GUI 共用）
+
+「录制-分析」三级下钻的函数层：采样回答"什么时候高"，perfetto 回答"线程/调度/帧层面为什么高"，simpleperf 回答"**CPU 高在哪个函数**"。CLI 侧独立（`--stack N` 无指标 flag 时只录调用栈）或与采样并行（`--cpu --stack 10`：后台线程录制 + 采样限时同窗口）；`--trace` 与 `--stack` 可同给（并行录制同窗口对照，报告按 trace → stack 顺序输出，采样限时取两者 max）；独立模式录制失败**非零退出**（脚本化验证门槛；分析失败不算——数据已拉回可手动处理）。GUI 侧「函数热点」独立 tab（与 Perfetto 分析并列，均隐藏侧栏）+ 侧栏秒数/按钮 + `stack` 事件推进度（`{stage: recording|recorded|done|error, message, data_path}`，与 trace 事件同构）+ `--stack N` 命令行自动启动。
+
+- **录制链路**：`adb shell simpleperf record --app <pkg> -g --duration N -o /data/local/tmp/xperf_stack_<ts>.data`（cpu-cycles 默认 4000Hz + dwarf 调用栈；`--app` 覆盖该应用全部进程并容忍进程重启，root 下非 debuggable 也可采）。**坑：`--app` 对未运行应用输出 `Waiting for process of app …` 无限等待，`--duration` 拦不住**（等待发生在采样开始前）→ 录制前 `pidof` 前置拦截 + 主机侧超时兜底（N+25s，Ctrl-C 中断标志可提前放弃，同 trace 模式）
+- **三视图报告**（设备端 `simpleperf report`，须在 pull 前跑——`.data` 还在设备上；单个视图失败不中断，错误嵌入报告文本）：线程 CPU 分布（`--sort comm,pid,tid`）/ 函数热点 self（`--sort symbol,dso`，**"CPU 高在哪个函数"的直接回答**）/ 函数热点 children（`--children --sort symbol,dso`，调用链累计热点路径）；均 `--percent-limit 1` 去噪
+- **解析**：report 为 header 定宽对齐文本（Symbol 列按最长符号名 padding，可达数百列宽），行解析按「首/尾 token 锚定」而非列位置切片（线程名/符号名可含空格，dso 恒无空格）；报告文件落盘前空格压缩（实测 4.9MB → 566KB）
+- **产物**：`log/<pkg>/<ts>/stack/{stack_<ts>.data, simpleperf_report.txt}`；`.data` 可 `adb push` 回设备换参数复跑 report（如 `--full-callgraph`）
+- **实测基线（SS3，simpleperf 1.build.47）**：svm 空闲态 8s ≈ 8500 样本 / 0 丢失 / 3.3MB（样本率随 CPU 活动浮动）；设备端应用 so 多为 stripped（函数名显示 `libxxx.so[+偏移]`，偏移可用未剥离 so 离线符号化），系统库与 `[kernel.kallsyms]` 有符号；非 root 设备上非 debuggable 应用被 run-as 路径拒绝（错误由 simpleperf 透传）
+
 ### 平台抽象（xperf-core/src/platform/）
 
 Platform trait + `adb devices -l` product 字段自动检测（HU_SS3/HU_SS2MAXF/HU_SS2PRO/HU_SS4 → 对应平台，否则 Android）。host 检测后经 spawn_agent 传 `--platform`/`--qnx-host` 给 agent。
@@ -164,6 +175,7 @@ Platform trait + `adb devices -l` product 字段自动检测（HU_SS3/HU_SS2MAXF
 
 - `--threshold cpu>80,mem>500,fps<30,gpu>90`：实时告警（静止界面 fps=0 不触发低值规则）+ 退出验证报告（触发次数/极值/总结论）
 - `--cold-start .MainActivity`：am start -W 解析（30s 超时，status!=ok 报错）
+- `--stack N`：simpleperf 函数热点（详见下节）
 - 打点：CLI Unix socket `/tmp/xperf-marker.sock`（`echo 标签 | nc -U ...`，每连接线程+10s 读超时）或 GUI 按钮 → 图表竖线 + markers.csv
 
 ### perfetto 深挖模式（`--trace N`，xperf-core/src/trace.rs，CLI 与 GUI 共用）
@@ -223,6 +235,7 @@ Platform trait + `adb devices -l` product 字段自动检测（HU_SS3/HU_SS2MAXF
 | 线程时序图 | `--thread --cpu`，退出时有数据 | `log/<pkg>/<ts>/thread/` |
 | B 类图表（freq 每核/temp 每传感器/io 每 PID/net/gpu） | 退出时对应序列 > 1 点 | `log/<pkg>/<ts>/{freq,thermal,io,net,gpu}/` |
 | perfetto 深挖（--trace N） | 录制完成即拉回；分析随即落盘 | `log/<pkg>/<ts>/trace/{*.pftrace, trace_analysis.txt, trace_queries.sql}` |
+| simpleperf 函数热点（--stack N） | 录制完成即在设备端生成三视图并拉回 | `log/<pkg>/<ts>/stack/{*.data, simpleperf_report.txt}` |
 
 - 内存中的时序序列只服务退出图表：超过 2×30k 点时每 2 取 1 原地抽稀（`CHART_SERIES_CAP`，保完整时间范围、分辨率随运行时长自适应降级）；CSV 始终全量。
 - `CpuTimeSeriesData.top_threads` 已无读者，CLI agent 路径不再写入（线程明细走 thread_time_series + 流式 CSV）。

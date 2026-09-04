@@ -2,7 +2,7 @@
 
 > 本文件记录跨会话的待办事项（backlog）。每次会话的历史总结见 `SESSION.md`。
 > 完成一项就把状态改为 ✅ 并注明完成的 commit；新增想法随时追加。
-> 最后更新：2026-09-04（perfetto 深挖模式收尾：浏览器全自动加载/配置对齐/GUI 主题/doc 全覆盖，见 SESSION 当日条目）
+> 最后更新：2026-09-04（simpleperf 函数热点 --stack N：CLI/GUI 三视图报告，见 SESSION 当日条目）
 
 ## 当前状态速览
 
@@ -10,11 +10,11 @@
 - 指标覆盖（9 项全实现）：CPU（单核口径）、内存、FPS、CPU 频率、温度/热降频、GPU、IO、网络、GPU 显存
 - **平台抽象**：`xperf-core/src/platform/` trait + adb devices -l 自动检测（SS2MAX/SS2PRO/SS3/SS4/Android）；agent 加 `--platform`/`--qnx-host` 参数
 - **GPU 五通道**（detect_gpu_path_ex 按平台选路）：kgsl sysfs（Android/SS2）/ QNX telnet（SS3，真 busy%/util%/频率+每进程）/ topgpu（SS2MAX）/ ligfxprofilerd logcat（SS4）/ dumpsys gpu 显存保底；全部补采 dumpsys gpu 显存
-- **C 类验证能力**：阈值告警（--threshold，静止界面不误报）+ 退出验证报告 + 冷启动（--cold-start）+ 时间轴打点（Unix socket / GUI 按钮 + 图表竖线 + markers.csv）
+- **C 类验证能力**：阈值告警（--threshold，静止界面不误报）+ 退出验证报告 + 冷启动（--cold-start）+ 时间轴打点（Unix socket / GUI 按钮 + 图表竖线 + markers.csv）+ **simpleperf 函数热点**（--stack N：调用栈录制 + 线程/self/children 三视图报告，CLI 独立/并行两模式 + GUI 独立 tab）
 - 落盘：CLI 流式 CSV（csv_escape 转义）+ 退出图表；GUI 完整历史 + CSV 导出
-- GUI：9 张折线图 + 实时数值面板 + Top 线程 + 峰值 + 间隔档位下拉 + 实际周期标注 + 勾选即时生效（自动重启会话）+ 打点竖线 + Perfetto 分析（秒数+按钮 → 独立 tab 报告 + 浏览器自动加载 trace——本地镜像 UI 同源深链，失败回退拖拽）+ **暗/亮双主题**（CSS 变量 + color-scheme；checkbox 自绘兼容 webkit2gtk；localStorage 持久化）
+- GUI：9 张折线图 + 实时数值面板 + Top 线程 + 峰值 + 间隔档位下拉 + 实际周期标注 + 勾选即时生效（自动重启会话）+ 打点竖线 + Perfetto 分析（独立 tab 报告 + 浏览器自动加载）+ **函数热点**（独立 tab）+ 暗/亮双主题（CSS 变量 + color-scheme；checkbox 自绘兼容 webkit2gtk；localStorage 持久化）
 - agent 部署：自动尝试 adb root（IO 等需 root）；src 树内任一 .rs mtime 变化自动重建
-- 测试：**69 全绿**（agent 24 个：解析 + watchdog_step 决策；trace 8 个：config/SQL/解析/报告/netlog 提取/UI 服务器路由），clippy 零警告，**cargo doc 零 warning**（4 crate missing_docs 归零；xperf-core `#![warn(missing_docs)]` 常开）
+- 测试：**75 全绿**（agent 24 个：解析 + watchdog_step 决策；core 41+1 ignored：协议/trace/simpleperf——simpleperf 8 个：解析 + 渲染 + 空格压缩），clippy 零警告，**cargo doc 零 warning**（4 crate missing_docs 归零；xperf-core `#![warn(missing_docs)]` 常开）
 - 设备：SS3 6eb792dfb0f（adbd root，QNX GPU 通道**已真机回归**，见 D-2）；SS2MAX d1f39648c1f（adb root 可用，IO/kgsl/44 温度传感器已验证；gpubusy 计数器停走属数据源限制）
 
 ---
@@ -33,7 +33,7 @@
 - [x] ~~时间轴事件标记~~（0f7ad9d：CLI Unix socket + GUI 按钮 + 图表竖线）
 - [x] ~~冷启动时间~~（a56a6f5：am start -W）
 - [x] ~~perfetto `--trace N` 深挖模式~~（ca01aa6 + 后续迭代）：录制（stdin 喂 text proto + write_into_file 流式落盘）→ pull → trace_processor SQL 归因（包线程 CPU/抢占延迟/系统 top/每核 busy/频率/帧时间线）；配置对齐团队 general_debug.pbtxt（cc76721，10s≈46MB）；浏览器一键全自动加载（3ee4ea2 本地镜像 UI + 同源深链，失败回退拖拽）；GUI 独立 tab（dabb1e2 + 暗/亮主题）。真机 SS3 端到端验证。详见 CLAUDE.md「perfetto 深挖模式」
-- [ ] simpleperf 调用栈采样（回答"CPU 高在哪个函数"）——**下轮候选**
+- [x] ~~simpleperf 调用栈采样~~（9ee99ad）：`--stack N` 录制 N 秒调用栈（--app 全进程覆盖 + dwarf），设备端三视图报告（线程 CPU 分布 / 函数热点 self / children 调用链）+ `.data` 拉回可复析；CLI 独立/并行两模式（与 --trace 可同给，独立模式录制失败非零退出）；GUI 函数热点独立 tab + `--stack N` 自动启动。真机 SS3 端到端验证（独立/并行/未运行拦截/退出码/GUI）。详见 CLAUDE.md「simpleperf 函数热点模式」
 - [ ] 基线对比（两次运行 diff）
 
 ## D. 结构改进（下轮候补）
