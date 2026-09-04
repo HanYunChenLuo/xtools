@@ -749,6 +749,7 @@ fn main() {
     };
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .manage(AppState {
             running: Arc::new(Mutex::new(false)),
             trace_running: Arc::new(Mutex::new(false)),

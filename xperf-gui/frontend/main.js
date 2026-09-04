@@ -641,9 +641,14 @@ document.getElementById('openStackBtn').addEventListener('click', async () => {
 });
 
 // 清理缓存与采集数据：~/.cache/xperf（UI 镜像/脚本集，首次使用重新下载）+ /tmp/xperf
-// （全部采集数据）。采样/录制进行中会丢当前会话产物——先确认
+// （全部采集数据）。采样/录制进行中会丢当前会话产物——原生对话框确认
+// （confirm() 在 webkit2gtk 下标题为 "Javascript-taurixxx"，不专业）
 document.getElementById('cleanBtn').addEventListener('click', async () => {
-  if (!confirm('将清理：\n- ~/.cache/xperf（UI 镜像/脚本集，首次使用会重新下载）\n- /tmp/xperf（全部采集数据：CSV/图表/trace/调用栈）\n\n正在采样/录制时当前会话产物会丢失，确认清理？')) return;
+  const ok = await window.__TAURI__.dialog.confirm(
+    '将清理：\n- ~/.cache/xperf（UI 镜像/脚本集，首次使用会重新下载）\n- /tmp/xperf（全部采集数据：CSV/图表/trace/调用栈）\n\n正在采样/录制时当前会话产物会丢失，确认清理？',
+    { title: 'XPerformance - 清理缓存与数据', kind: 'warning' }
+  );
+  if (!ok) return;
   try {
     const msg = await invoke('clean_cache');
     setStatus(msg);
