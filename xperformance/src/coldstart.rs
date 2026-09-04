@@ -13,7 +13,6 @@
 //! WaitTime = am start 命令等待总时间（含 IPC）。
 
 use anyhow::Result;
-use std::process::Command;
 
 #[derive(Debug)]
 pub struct ColdStartResult {
@@ -28,7 +27,7 @@ pub struct ColdStartResult {
 /// 超时：macOS 无 `timeout` 命令，用 spawn+wait_timeout 手动实现
 pub fn measure(package: &str, activity: &str) -> Result<ColdStartResult> {
     let component = format!("{}/{}", package, activity);
-    let mut child = Command::new("adb")
+    let mut child = xperf_core::adb()
         .args(["shell", "am", "start", "-W", &component])
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())

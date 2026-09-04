@@ -696,6 +696,9 @@ document.getElementById('startBtn').addEventListener('click', async () => {
   renderPeaks();
   renderPidList();
   for (const c of allCharts) c.series = {};
+  // 新会话：旧基线对比报告不再适用，隐藏清空
+  document.getElementById('baselinePanel').classList.add('hidden');
+  document.getElementById('baselineReport').textContent = '';
   try {
     _diag('startBtn invoking start_sampling: pkg=' + package + ' interval=' + interval);
     await invoke('start_sampling', { package, interval, cpu, memory, fps, freq, thermal, gpu, io, net });
@@ -815,9 +818,8 @@ document.getElementById('timeWindow').addEventListener('change', (e) => {
   for (const c of allCharts) { c.windowMode = mode; c.draw(); }
 });
 
-// ---- 导出 CSV：把前端持有的完整会话历史发给后端写盘 ----
-document.getElementById('exportBtn').addEventListener('click', async () => {
-  const pkg = document.getElementById('package').value || 'unknown';
+// ---- 会话数据收集（导出 CSV / 基线保存与对比共用：前端持有的完整会话历史）----
+function collectSessionData() {
   const cpu = {}, mem = {}, fps = {}, freq = {}, temp = {}, io = {}, gpumem = {}, gpuproc = {};
   for (const [k, pts] of Object.entries(cpuChart.series)) cpu[k.replace('PID ', '')] = pts.map(p => [p.t, p.v]);
   for (const [k, pts] of Object.entries(memChart.series)) mem[k.replace('PID ', '')] = pts.map(p => [p.t, p.v]);
@@ -829,12 +831,91 @@ document.getElementById('exportBtn').addEventListener('click', async () => {
   for (const [pid, pts] of Object.entries(gpuprocHist)) gpuproc[pid] = pts.map(p => [p.t, p.busy]);
   const gpu = gpuHist.map(p => [p.t, p.busy, p.util, p.mhz]);
   const net = (netChart.series['RX'] || []).map((p, i) => [p.t, p.v, (netChart.series['TX'] || [])[i]?.v ?? 0]);
+  return { cpu, mem, fps, freq, temp, gpu, io, net, gpumem, gpuproc };
+}
+
+// ---- 导出 CSV：发给后端写盘 ----
+document.getElementById('exportBtn').addEventListener('click', async () => {
+  const pkg = document.getElementById('package').value || 'unknown';
+  const d = collectSessionData();
   try {
-    const dir = await invoke('export_csv', { package: pkg, cpu, mem, fps, freq, temp, gpu, io, net, gpumem, gpuproc });
+    const dir = await invoke('export_csv', { package: pkg, cpu: d.cpu, mem: d.mem, fps: d.fps, freq: d.freq, temp: d.temp, gpu: d.gpu, io: d.io, net: d.net, gpumem: d.gpumem, gpuproc: d.gpuproc });
     setStatus('已导出: ' + dir);
   } catch (e) {
     setStatus('导出失败: ' + e);
   }
+});
+
+// ---- 基线：保存 / 对比（与 CLI --save-baseline / --compare-baseline 同一基线文件，两侧互通）----
+document.getElementById('saveBaselineBtn').addEventListener('click', async () => {
+  const pkg = document.getElementById('package').value || 'unknown';
+  const d = collectSessionData();
+  const intervalMs = parseInt(document.getElementById('interval').value, 10) || 1000;
+  try {
+    const path = await invoke('save_baseline', { package: pkg, intervalMs, cpu: d.cpu, mem: d.mem, fps: d.fps, gpu: d.gpu, io: d.io, net: d.net });
+    setStatus('基线已保存（覆盖旧基线）: ' + path);
+  } catch (e) {
+    setStatus('基线保存失败: ' + e);
+  }
+});
+document.getElementById('compareBaselineBtn').addEventListener('click', async () => {
+  const pkg = document.getElementById('package').value || 'unknown';
+  const d = collectSessionData();
+  const intervalMs = parseInt(document.getElementById('interval').value, 10) || 1000;
+  try {
+    const report = await invoke('compare_baseline', { package: pkg, intervalMs, cpu: d.cpu, mem: d.mem, fps: d.fps, gpu: d.gpu, io: d.io, net: d.net });
+    document.getElementById('baselineReport').textContent = report;
+    document.getElementById('baselinePanel').classList.remove('hidden');
+    setStatus('基线对比完成');
+  } catch (e) {
+    setStatus('基线对比失败: ' + e);
+  }
+});
+
+// ---- 设备选择（多台同连时所有 adb 命令带 -s 路由到选中设备）----
+// 已有选择（--device 自动启动/切换后的 selected）不覆盖；无选择时默认第一台
+// （多台时用户自行切换，切换即重选并刷新包列表）
+async function loadDevices() {
+  try {
+    const r = await invoke('list_devices');
+    const sel = document.getElementById('deviceSelect');
+    sel.innerHTML = '';
+    for (const d of r.devices) {
+      const opt = document.createElement('option');
+      opt.value = d.serial;
+      opt.textContent = d.serial + (d.model ? '（' + d.model + '）' : '');
+      sel.appendChild(opt);
+    }
+    const target = r.selected && r.devices.some(d => d.serial === r.selected)
+      ? r.selected
+      : (r.devices[0]?.serial || '');
+    if (target) {
+      sel.value = target;
+      if (target !== r.selected) await invoke('select_device', { serial: target });
+      _diag('device selected: ' + target);
+    }
+    return true;
+  } catch (e) {
+    _diag('list_devices ERROR: ' + JSON.stringify(e));
+    return false;
+  }
+}
+document.getElementById('deviceSelect').addEventListener('change', async (e) => {
+  try {
+    await invoke('select_device', { serial: e.target.value });
+    _diag('device switched: ' + e.target.value);
+    loadPackages();
+  } catch (err) {
+    setStatus('设备选择失败: ' + err);
+  }
+});
+
+// ---- 采样启动失败（设备未选定多台同连/agent 构建部署启动失败）→ 前端可见 ----
+listen('sampling-error', (e) => {
+  setStatus('错误: ' + e.payload.message);
+  document.getElementById('startBtn').disabled = false;
+  document.getElementById('stopBtn').disabled = true;
+  samplingRunning = false;
 });
 
 // ---- 包名列表（可搜索下拉）----
@@ -854,7 +935,9 @@ async function loadPackages() {
   }
 }
 document.getElementById('refreshPkgs').addEventListener('click', loadPackages);
-loadPackages();
+// 启动顺序：先选设备（list_devices 带出已生效的 --device 选择/默认第一台），
+// 再加载包列表（list_packages 依赖目标设备已选定——多台同连不带 -s 会失败）
+loadDevices().then(() => loadPackages());
 
 // ---- 初始化同步按钮状态（自动启动时开始按钮应禁用）----
 // --package 自动启动与手动「开始监控」走同一流程：回填包名/间隔/勾选、

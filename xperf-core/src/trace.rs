@@ -131,7 +131,7 @@ pub fn record(
     let dev_path = format!("/data/misc/perfetto-traces/xperf_{}.pftrace", stem);
 
     let wall_start = Local::now();
-    let mut child = Command::new("adb")
+    let mut child = crate::utils::adb()
         .args(["shell", "perfetto", "-c", "-", "--txt", "-o", &dev_path])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -199,7 +199,7 @@ pub fn record(
             String::from_utf8_lossy(&out.stderr).trim()
         );
     }
-    let pull = Command::new("adb")
+    let pull = crate::utils::adb()
         .arg("pull")
         .arg(&dev_path)
         .arg(&local_path)
@@ -213,7 +213,7 @@ pub fn record(
         );
     }
     // 清理设备端文件（失败不致命：文件名含时间戳，不影响下次录制）
-    let _ = Command::new("adb").args(["shell", "rm", "-f", &dev_path]).output();
+    let _ = crate::utils::adb().args(["shell", "rm", "-f", &dev_path]).output();
     let bytes = std::fs::metadata(&local_path)?.len();
     if bytes == 0 {
         bail!("trace 文件为空（perfetto 未写出数据）");
