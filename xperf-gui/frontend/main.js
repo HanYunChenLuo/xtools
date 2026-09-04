@@ -7,6 +7,20 @@ const { listen } = window.__TAURI__.event;
 const { invoke } = window.__TAURI__.core;
 _diag('__TAURI__ ok');
 
+// ---------- 状态栏三态：普通文本 / 录制进度（绿色填充按百分比铺开） ----------
+function setStatus(text) {
+  const el = document.getElementById('status');
+  el.classList.remove('progress');
+  el.style.setProperty('--progress', '0%');
+  el.textContent = text;
+}
+function setStatusProgress(text, pct) {
+  const el = document.getElementById('status');
+  el.classList.add('progress');
+  el.style.setProperty('--progress', Math.max(0, Math.min(100, pct)) + '%');
+  el.textContent = text;
+}
+
 // ---------- 轻量 Canvas 折线图（替代 ECharts，无外部依赖） ----------
 // 主题色从 CSS 变量动态读取（data-theme 切换后 draw/redraw 自动跟随）
 function uiColors() {
@@ -348,7 +362,7 @@ listen('sample', (e) => {
     setLive('fps_jank', '  └ Jank', jank_count, '', 'dim');
     try { fpsChart.draw(); } catch (err) { _diag('fpsChart.draw ERROR: ' + err.message); }
   } else if (ev.NoProcess) {
-    document.getElementById('status').textContent = '无进程: ' + ev.NoProcess.error;
+    setStatus('无进程: ' + ev.NoProcess.error);
   } else if (ev.AgentHello) {
     maxkhz = ev.AgentHello.maxkhz || [];
   } else if (ev.FreqUpdate) {
@@ -499,8 +513,9 @@ applyTheme(localStorage.getItem('xperf-theme') || 'dark');
 listen('trace', (e) => {
   const { stage, message, trace_path } = e.payload;
   if (stage === 'progress') {
-    // 进度消息只更新状态栏，不覆盖报告文本
-    document.getElementById('status').textContent = message;
+    // 进度态：绿色填充按已录制秒数比例铺开（message 如 "perfetto 录制中 3/8s"）
+    const m = message.match(/(\d+)\/(\d+)s/);
+    if (m) setStatusProgress(message, (parseInt(m[1], 10) / parseInt(m[2], 10)) * 100);
     _diag('trace: ' + message);
     return;
   }
@@ -515,11 +530,11 @@ listen('trace', (e) => {
     document.getElementById('traceBtn').disabled = true;
   } else if (stage === 'done') {
     document.getElementById('traceBtn').disabled = false;
-    document.getElementById('status').textContent = 'Perfetto 分析完成';
+    setStatus('Perfetto 分析完成');
     switchTab('trace');
   } else if (stage === 'error') {
     document.getElementById('traceBtn').disabled = false;
-    document.getElementById('status').textContent = 'Perfetto 分析失败';
+    setStatus('Perfetto 分析失败');
     switchTab('trace');
   }
   _diag('trace: ' + stage);
@@ -528,7 +543,7 @@ listen('trace', (e) => {
 document.getElementById('traceBtn').addEventListener('click', async () => {
   const package = document.getElementById('package').value.trim();
   if (!package) {
-    document.getElementById('status').textContent = '请先填写包名';
+    setStatus('请先填写包名');
     return;
   }
   const seconds = parseInt(document.getElementById('traceSeconds').value, 10) || 10;
@@ -536,10 +551,10 @@ document.getElementById('traceBtn').addEventListener('click', async () => {
     await invoke('start_trace', { package, seconds });
     document.getElementById('traceBtn').disabled = true;
     // 录制期间留在指标页观察实时曲线（采样与录制并行），完成/失败时自动切到分析页
-    document.getElementById('status').textContent = 'Perfetto 分析录制中: ' + package;
+    setStatus('Perfetto 分析录制中: ' + package);
     _diag('traceBtn: ' + package + ' ' + seconds + 's');
   } catch (err) {
-    document.getElementById('status').textContent = 'Perfetto 分析错误: ' + err;
+    setStatus('Perfetto 分析错误: ' + err);
     _diag('traceBtn invoke ERROR: ' + JSON.stringify(err));
   }
 });
@@ -550,10 +565,10 @@ document.getElementById('openPerfBtn').addEventListener('click', async () => {
   if (!currentTracePath) return;
   try {
     const msg = await invoke('open_perfetto_ui', { tracePath: currentTracePath });
-    document.getElementById('status').textContent = msg;
+    setStatus(msg);
     _diag('openPerfBtn: ' + msg);
   } catch (err) {
-    document.getElementById('status').textContent = '打开 Perfetto UI 失败: ' + err;
+    setStatus('打开 Perfetto UI 失败: ' + err);
     _diag('openPerfBtn ERROR: ' + JSON.stringify(err));
   }
 });
@@ -565,8 +580,9 @@ let currentStackPath = null;
 listen('stack', (e) => {
   const { stage, message, data_path } = e.payload;
   if (stage === 'progress') {
-    // 进度消息只更新状态栏，不覆盖报告文本
-    document.getElementById('status').textContent = message;
+    // 进度态：绿色填充按已录制秒数比例铺开（message 如 "调用栈录制中 3/8s"）
+    const m = message.match(/(\d+)\/(\d+)s/);
+    if (m) setStatusProgress(message, (parseInt(m[1], 10) / parseInt(m[2], 10)) * 100);
     _diag('stack: ' + message);
     return;
   }
@@ -581,11 +597,11 @@ listen('stack', (e) => {
     document.getElementById('stackBtn').disabled = true;
   } else if (stage === 'done') {
     document.getElementById('stackBtn').disabled = false;
-    document.getElementById('status').textContent = '函数热点分析完成';
+    setStatus('函数热点分析完成');
     switchTab('stack');
   } else if (stage === 'error') {
     document.getElementById('stackBtn').disabled = false;
-    document.getElementById('status').textContent = '函数热点分析失败';
+    setStatus('函数热点分析失败');
     switchTab('stack');
   }
   _diag('stack: ' + stage);
@@ -594,7 +610,7 @@ listen('stack', (e) => {
 document.getElementById('stackBtn').addEventListener('click', async () => {
   const package = document.getElementById('package').value.trim();
   if (!package) {
-    document.getElementById('status').textContent = '请先填写包名';
+    setStatus('请先填写包名');
     return;
   }
   const seconds = parseInt(document.getElementById('stackSeconds').value, 10) || 10;
@@ -602,10 +618,10 @@ document.getElementById('stackBtn').addEventListener('click', async () => {
     await invoke('start_stack', { package, seconds });
     document.getElementById('stackBtn').disabled = true;
     // 录制期间留在指标页观察实时曲线（采样与录制并行），完成/失败时自动切到函数热点页
-    document.getElementById('status').textContent = '函数热点录制中: ' + package;
+    setStatus('函数热点录制中: ' + package);
     _diag('stackBtn: ' + package + ' ' + seconds + 's');
   } catch (err) {
-    document.getElementById('status').textContent = '函数热点错误: ' + err;
+    setStatus('函数热点错误: ' + err);
     _diag('stackBtn invoke ERROR: ' + JSON.stringify(err));
   }
 });
@@ -616,10 +632,10 @@ document.getElementById('openStackBtn').addEventListener('click', async () => {
   if (!currentStackPath) return;
   try {
     const msg = await invoke('open_stack_html', { dataPath: currentStackPath });
-    document.getElementById('status').textContent = msg;
+    setStatus(msg);
     _diag('openStackBtn: ' + msg);
   } catch (err) {
-    document.getElementById('status').textContent = '打开火焰图失败: ' + err;
+    setStatus('打开火焰图失败: ' + err);
     _diag('openStackBtn ERROR: ' + JSON.stringify(err));
   }
 });
@@ -657,9 +673,9 @@ document.getElementById('startBtn').addEventListener('click', async () => {
     samplingRunning = true;
     document.getElementById('startBtn').disabled = true;
     document.getElementById('stopBtn').disabled = false;
-    document.getElementById('status').textContent = '监控中: ' + package;
+    setStatus('监控中: ' + package);
   } catch (e) {
-    document.getElementById('status').textContent = '错误: ' + e;
+    setStatus('错误: ' + e);
     _diag('startBtn invoke ERROR: ' + JSON.stringify(e));
   }
 });
@@ -671,7 +687,7 @@ document.getElementById('stopBtn').addEventListener('click', async () => {
   _diag('stop_sampling returned');
   document.getElementById('startBtn').disabled = false;
   document.getElementById('stopBtn').disabled = true;
-  document.getElementById('status').textContent = '已停止';
+  setStatus('已停止');
 });
 _diag('UI handlers bound');
 
@@ -709,7 +725,7 @@ async function restartSampling() {
   const f = currentFlags();
   _diag('restart sampling with flags: ' + JSON.stringify(f));
   await invoke('start_sampling', f);
-  document.getElementById('status').textContent = '监控中: ' + f.package;
+  setStatus('监控中: ' + f.package);
 }
 function onMetricToggle() {
   toggleCharts();
@@ -779,9 +795,9 @@ document.getElementById('exportBtn').addEventListener('click', async () => {
   const net = (netChart.series['RX'] || []).map((p, i) => [p.t, p.v, (netChart.series['TX'] || [])[i]?.v ?? 0]);
   try {
     const dir = await invoke('export_csv', { package: pkg, cpu, mem, fps, freq, temp, gpu, io, net, gpumem, gpuproc });
-    document.getElementById('status').textContent = '已导出: ' + dir;
+    setStatus('已导出: ' + dir);
   } catch (e) {
-    document.getElementById('status').textContent = '导出失败: ' + e;
+    setStatus('导出失败: ' + e);
   }
 });
 
@@ -810,6 +826,6 @@ invoke('is_running').then((running) => {
     samplingRunning = true;
     document.getElementById('startBtn').disabled = true;
     document.getElementById('stopBtn').disabled = false;
-    document.getElementById('status').textContent = '监控中';
+    setStatus('监控中');
   }
 }).catch(() => {});
