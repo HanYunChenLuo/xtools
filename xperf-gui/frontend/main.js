@@ -875,6 +875,10 @@ document.getElementById('compareBaselineBtn').addEventListener('click', async ()
 // ---- 设备选择（多台同连时所有 adb 命令带 -s 路由到选中设备）----
 // 已有选择（--device 自动启动/切换后的 selected）不覆盖；无选择时默认第一台
 // （多台时用户自行切换，切换即重选并刷新包列表）
+function deviceLabel(d) {
+  const extra = [d.model, d.version ? 'Android ' + d.version : ''].filter(Boolean).join('，');
+  return extra ? d.serial + '（' + extra + '）' : d.serial;
+}
 async function loadDevices() {
   try {
     const r = await invoke('list_devices');
@@ -883,7 +887,7 @@ async function loadDevices() {
     for (const d of r.devices) {
       const opt = document.createElement('option');
       opt.value = d.serial;
-      opt.textContent = d.serial + (d.model ? '（' + d.model + '）' : '');
+      opt.textContent = deviceLabel(d);
       sel.appendChild(opt);
     }
     const target = r.selected && r.devices.some(d => d.serial === r.selected)
@@ -921,7 +925,7 @@ listen('devices-changed', (e) => {
   for (const d of devices) {
     const opt = document.createElement('option');
     opt.value = d.serial;
-    opt.textContent = d.serial + (d.model ? '（' + d.model + '）' : '');
+    opt.textContent = deviceLabel(d);
     sel.appendChild(opt);
   }
   const stillHere = devices.some(d => d.serial === current);
