@@ -1241,6 +1241,9 @@ mod tests {
         assert!(extract_ui_assets("{\"events\":[]}").is_empty());
     }
 
+    /// 注意：本测试会占用 UI_SERVER 单例（serve 临时假 mirror），与 ignored 的
+    /// test_real_ui_serve 不能在同一进程混跑（--include-ignored 时 real 会复用
+    /// 本测试的假 mirror 服务器）——二者分开跑（默认/ --ignored）无此问题。
     #[test]
     fn test_ui_server_routes() {
         use std::io::{Read as _, Write as _};

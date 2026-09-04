@@ -29,6 +29,11 @@ cargo test -p xrm tests::test_dangerous_operation_detection
 
 # Check for errors without building
 cargo check --workspace
+
+# 文档覆盖检查（pub 项漏 doc 即警告；xperf-core 已 #![warn(missing_docs)] 常开）
+cargo rustdoc -p xperf-core -- -W missing_docs
+cargo rustdoc -p xperformance --bins -- -W missing_docs
+cargo rustdoc -p xperf-gui --bins -- -W missing_docs
 ```
 
 Release binaries are written to `target/release/`。
