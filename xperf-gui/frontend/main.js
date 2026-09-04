@@ -504,7 +504,10 @@ listen('trace', (e) => {
     document.getElementById('traceFileLabel').textContent = trace_path;
   }
   document.getElementById('traceReport').textContent = message;
-  if (stage === 'done') {
+  if (stage === 'recording') {
+    // 命令行自动启动（--trace）时无 click handler 禁用，收到 recording 事件统一禁用
+    document.getElementById('traceBtn').disabled = true;
+  } else if (stage === 'done') {
     document.getElementById('traceBtn').disabled = false;
     document.getElementById('status').textContent = 'Perfetto 分析完成';
     switchTab('trace');
@@ -557,7 +560,10 @@ listen('stack', (e) => {
     document.getElementById('stackFileLabel').textContent = data_path;
   }
   document.getElementById('stackReport').textContent = message;
-  if (stage === 'done') {
+  if (stage === 'recording') {
+    // 命令行自动启动（--stack）时无 click handler 禁用，收到 recording 事件统一禁用
+    document.getElementById('stackBtn').disabled = true;
+  } else if (stage === 'done') {
     document.getElementById('stackBtn').disabled = false;
     document.getElementById('status').textContent = '函数热点分析完成';
     switchTab('stack');

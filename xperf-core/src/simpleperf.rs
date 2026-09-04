@@ -36,7 +36,7 @@ use std::time::{Duration, Instant};
 pub struct RecordedStack {
     /// 拉回到主机的 simpleperf 数据文件路径（`perf.data` 格式，可推回设备复跑 report）
     pub local_path: PathBuf,
-    /// 设备端生成的原始两视图报告路径（线程分布 + 函数热点，完整未截断）
+    /// 设备端生成的原始三视图报告路径（线程分布/self/children 函数热点，完整未截断）
     pub report_path: PathBuf,
     /// 录制发起时刻（墙钟，含 adb 启动开销）
     pub wall_start: DateTime<Local>,
@@ -50,15 +50,15 @@ pub struct RecordedStack {
     pub samples_lost: u64,
 }
 
-/// 校验包名字符集（`[A-Za-z0-9._]`）。包名会拼进 `adb shell` 命令行，调用方虽已校验，
-/// 此处防御性再拦一次（防 shell 注入）。
+/// 校验包名字符集（`[A-Za-z0-9._-]`，与 CLI `validate_package_name` / GUI 校验一致）。
+/// 包名会拼进 `adb shell` 命令行，调用方虽已校验，此处防御性再拦一次（防 shell 注入）。
 fn validate_package(package: &str) -> Result<()> {
     let ok = !package.is_empty()
         && package
             .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_');
+            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-');
     if !ok {
-        bail!("包名不合法（仅允许字母/数字/./_）: {}", package);
+        bail!("包名不合法（仅允许字母/数字/./_/-）: {}", package);
     }
     Ok(())
 }
@@ -103,12 +103,12 @@ fn app_has_process(package: &str) -> Result<bool> {
     Ok(!String::from_utf8_lossy(&out.stdout).trim().is_empty())
 }
 
-/// 录制 N 秒调用栈并生成两视图报告，拉回 out_dir（如 `log/<pkg>/<会话时间戳>/stack/`，
+/// 录制 N 秒调用栈并生成三视图报告，拉回 out_dir（如 `log/<pkg>/<会话时间戳>/stack/`，
 /// 自动创建）。阻塞至录制完成（simpleperf `--duration` 到点自动退出）。
 ///
 /// 流程：包名校验（防 shell 注入）→ simpleperf 存在性检查 → `pidof` 前置拦截 →
 /// `simpleperf record --app <pkg> -g --duration N`（主机侧超时与 Ctrl-C 兜底）→
-/// 设备端两视图 report（须在 pull 前跑，`.data` 还在设备上）→ adb pull → 清理设备端。
+/// 设备端三视图 report（须在 pull 前跑，`.data` 还在设备上）→ adb pull → 清理设备端。
 ///
 /// 包名校验与进度展示由调用方负责（目录路径含包名，防遍历）。
 pub fn record(seconds: u64, package: &str, out_dir: &Path) -> Result<RecordedStack> {
@@ -246,25 +246,39 @@ pub fn record(seconds: u64, package: &str, out_dir: &Path) -> Result<RecordedSta
     })
 }
 
-/// 设备端跑一次 simpleperf report（`2>/dev/null` 挤掉符号表缺失警告）。
-/// 输出经空格压缩：simpleperf 按最长符号名做列对齐（Symbol 列可达数百列宽），
-/// 原样落盘会让报告文件膨胀到数倍于 `.data`（实测 4.9MB vs 2.7MB），压缩后语义不变
-/// （符号名内出现连续空格的概率≈0，单空格保留）。失败返回 Err，不中断整体流程。
+/// 设备端跑一次 simpleperf report。
+/// stderr 合并进 stdout（设备端 `2>&1`）：真实报错必须带回——若走 `2>/dev/null` 会连
+/// 报错一起吞掉，失败时错误信息为空。成功路径再过滤 simpleperf 自身日志行（W/I 级别，
+/// 如 dso 符号表缺失警告）不污染视图。输出经空格压缩：simpleperf 按最长符号名做列
+/// 对齐（Symbol 列可达数百列宽），原样落盘会让报告文件膨胀到数倍于 `.data`
+/// （实测 4.9MB vs 2.7MB），压缩后语义不变（符号名内出现连续空格的概率≈0，单空格保留）。
+/// 失败返回 Err，不中断整体流程（另两个视图仍可生成，`.data` 仍会被 pull 回）。
 fn device_report(dev_path: &str, extra_args: &[&str]) -> Result<String> {
     let mut cmd = Command::new("adb");
     cmd.args(["shell", "simpleperf", "report", "-i", dev_path]);
     for a in extra_args {
         cmd.arg(a);
     }
-    cmd.arg("2>/dev/null");
+    cmd.arg("2>&1");
     let out = cmd.output().context("执行 adb shell simpleperf report 失败")?;
+    let merged = String::from_utf8_lossy(&out.stdout).into_owned();
     if !out.status.success() {
-        bail!(
-            "simpleperf report 失败: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        );
+        bail!("simpleperf report 失败: {}", merged.trim());
     }
-    Ok(squeeze_spaces(&String::from_utf8_lossy(&out.stdout)))
+    Ok(squeeze_spaces(&filter_simpleperf_logs(&merged)))
+}
+
+/// 过滤 simpleperf 自身日志行（`simpleperf W/I …` 前缀，如符号表缺失警告），只留报告表体
+fn filter_simpleperf_logs(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for line in text.lines() {
+        if line.starts_with("simpleperf ") {
+            continue;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
 }
 
 /// 连续 2+ 空格压缩为 1 个（列对齐 padding 去除，保留语义空格）
@@ -416,7 +430,7 @@ fn parse_self_view(text: &str) -> Vec<SymbolOverhead> {
     rows
 }
 
-/// 按分隔行切出报告文件中的两视图文本（找不到对应段落返回空串）。
+/// 按分隔行切出报告文件中的三视图文本（找不到对应段落返回空串）。
 /// 分隔行形如 `================ <段名>（…） ================`，段正文为分隔行之后、
 /// 下一分隔行之前的所有行。
 fn section<'a>(report: &'a str, marker: &str) -> &'a str {
@@ -557,10 +571,32 @@ mod tests {
     fn test_validate_package() {
         assert!(validate_package("com.lixiang.car.x.svm").is_ok());
         assert!(validate_package("com.example_app").is_ok());
+        // '-' 与 CLI/GUI 校验口径一致（Android 允许的自定义段）
+        assert!(validate_package("com.example-app").is_ok());
         assert!(validate_package("").is_err());
         assert!(validate_package("a b").is_err());
         assert!(validate_package("a;rm").is_err());
         assert!(validate_package("a$(id)").is_err());
+    }
+
+    #[test]
+    fn test_filter_simpleperf_logs() {
+        let out = concat!(
+            "simpleperf W dso.cpp:432] /vendor/lib64/libgsl.so doesn't contain symbol table\n",
+            "Cmdline: /system/bin/simpleperf record --app pkg\n",
+            "Overhead  Symbol  Shared Object\n",
+            "5.26%  memcpy  /lib/libc.so\n",
+            "simpleperf I cmd_record.cpp:764] Samples recorded: 8773.\n"
+        );
+        let filtered = filter_simpleperf_logs(out);
+        assert!(!filtered.contains("dso.cpp"));
+        assert!(!filtered.contains("cmd_record"));
+        assert!(filtered.contains("Cmdline"));
+        assert!(filtered.contains("5.26%  memcpy"));
+        // 每行补 \n（lines() 吃掉行尾换行，拼接时恢复）
+        assert!(filtered.ends_with('\n'));
+        // 全日志输入 → 全部过滤为空串
+        assert_eq!(filter_simpleperf_logs("simpleperf W x\n"), "");
     }
 
     #[test]
