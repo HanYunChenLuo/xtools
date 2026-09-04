@@ -15,7 +15,7 @@
 - 落盘：数据根 `/tmp/xperf`（CLI 流式 CSV + 退出图表；GUI 完整历史 + CSV 导出，共用同根）；清理走 CLI `--clean-cache` / GUI 按钮（~/.cache/xperf + /tmp/xperf，2bd6bca）
 - GUI：9 张折线图 + 实时数值面板 + Top 线程 + 峰值 + 间隔档位下拉 + 实际周期标注 + 勾选即时生效（自动重启会话）+ 打点竖线 + Perfetto 分析（独立 tab 报告 + 浏览器自动加载 + 每秒录制进度）+ **函数热点**（独立 tab + 每秒录制进度 + 浏览器火焰图：report_html.py 渲染 `.data` 为单文件 HTML 后打开，脚本集自动引导缓存）+ 暗/亮双主题（CSS 变量 + color-scheme；checkbox 自绘兼容 webkit2gtk；localStorage 持久化）
 - agent 部署：自动尝试 adb root（IO 等需 root）；src 树内任一 .rs mtime 变化自动重建
-- 测试：**99 全绿**（agent 24 个：解析 + watchdog_step 决策；core 59+2 ignored：协议/trace/simpleperf/baseline/设备 diff——baseline 11 个 + platform 多设备过滤 1 + utils 设备解析/diff 3；xperformance 8：alerts/coldstart；GUI 4：export_csv×2 + 基线命令级/汇总 2），clippy 零警告，**cargo doc 零 warning**（4 crate missing_docs 归零；xperf-core `#![warn(missing_docs)]` 常开）
+- 测试：**100 全绿**（agent 24 个：解析 + watchdog_step 决策；core 62+2 ignored：协议/trace/simpleperf/baseline/设备 diff——baseline 14 个 + platform 多设备过滤 1 + utils 设备解析/diff 3；xperformance 8：alerts/coldstart；GUI 4：export_csv×2 + 基线命令级/汇总 2），clippy 零警告，**cargo doc 零 warning**（4 crate missing_docs 归零；xperf-core `#![warn(missing_docs)]` 常开）
 - 设备：SS3 6eb792dfb0f（adbd root，QNX GPU 通道已真机回归，见 D-2；多设备 `-s` 真机回归 46bd161）；Redmi 手机 1280da60（标准 Android 平台，`-s` 路由验证通过）；SS2MAX d1f39648c1f（adb root 可用，IO/kgsl/44 温度传感器已验证；gpubusy 计数器停走属数据源限制）
 - **测试对象（555ffab 起统一）**：`example/apk/filament-gltf-viewer-v1.76.0-android.apk`（git-lfs 管理，包名 `com.google.android.filament.gltf`，入口 `.MainActivity`）——真机测试一律用它，不再用 svm（车机应用场景不可控且与业务耦合）。已装 SS3 + SS2MAX。SS3 冒烟基线：CPU 均值 ~40%/峰 56%（JobSystem/AdrenoOsLib 渲染线程可见）、PSS ~650MB/峰 736MB、GPU busy ~25%（QNX 进程归因 11.7%）；静止场景 Filament 按需渲染不重绘 → FPS 如实为 0
 

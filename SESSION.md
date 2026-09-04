@@ -15,6 +15,7 @@
 
 | commit | 内容 |
 |--------|------|
+| 084895b | review：S1（严重）基线判定方向 bug——Row::verdict 相对容差用带符号百分比致 delta<0（FPS 回归/CPU 改善）恒判持平，改 .abs() 对称判显著 +3 测试锁定；G1 全不可比误报无回归→⊘ 无可对比指标；G3 load_from 恢复+版本校验；G4 MetricSummary NaN 过滤；G2 loadDevices 不静默切设备；G3 devices-changed 兜底调 select_device；G4 renderPidList 过滤已退出 PID；G6 resize_default 小屏溢出+conf min 降低；G7 CLI 空基线跳过；M2 CSS 死规则清理；M3 resize_default 改 async。100 测试全绿 |
 | 78f93a9 | feat：性能数据单位对齐——内存全链路统一 MB（CLI 打印/CSV/图表纵轴 + GUI 图表/峰值面板/导出 CSV；协议与基线 JSON 存储仍 KB）；GUI 删除打点功能（用户不需要：控件 + marker 事件 + 竖线绘制 + add_marker 命令全链路；CLI socket 打点保留）；PIDs 融入状态栏「监控中: pkg（PID xxx）」不单独占面板 |
 | 8d01922 | ui：PIDs 列表迁主区指标页面板行（与实时数值/Top 线程/峰值并列，限高滚动）+「函数热点」tab 改名「Simpleperf 分析」（与侧栏按钮/Perfetto 命名对齐，状态文案同步） |
 | 9cfa9a5 | feat：①Android 版本检测——AdbDevice.android_version（ro.build.version.release 逐台 getprop），CLI 打印/多台报错/GUI 下拉均展示；实测 SS3=Android 12（帧走 BLAST 层）、SS2MAX=Android 11（帧走 SurfaceView - 层）。②**SS3 FPS 恒 0 修复**——sf_discover_layers 从「ownerPID 非空跳过兜底」改为 ownerPID ∪ 包名并集：Android 12+ BLAST 合成层（app 直提 buffer）承载真实帧流而 ownerPID 只匹配到静止 Activity View 层；SS3 60fps 恢复、SS2MAX 回归无变化。③**webview 间歇空白修复**——进程内 set WEBKIT_DISABLE_DMABUF_RENDERER=1（webkit2gtk DMABUF 路径在 GPU 重负载占用时间歇空白，同代码两次启动一好一坏实测复现；此前归因 setup set_size 时序系误判，文档已修正） |
@@ -36,7 +37,7 @@
 - **默认窗口尺寸（7cb4b4b，用户反馈"默认大小得调整，不要有内容无法显示"）**：resize_default 命令按屏幕比例 clamp；侧栏勾选两列 + PIDs 限高。验证法：xdotool 定位窗口 + import 截图 + 视觉转写核对侧栏全量内容（清理按钮/PIDs 区可见）
 - **UI 布局调整（8d01922 + 78f93a9，用户连续反馈）**：PIDs 先迁主区面板行后进一步融入状态栏「监控中: pkg（PID xxx）」（用户：不用单独一栏）；「函数热点」tab 改名「Simpleperf 分析」；GUI 打点功能整体删除（用户：不需要——控件/marker 事件/竖线绘制/add_marker 命令全链路清掉，CLI socket 打点保留）
 - **单位对齐（78f93a9，用户要求"同类数据单位统一"）**：内存统一 MB（CLI 打印/CSV/图表 + GUI 面板/图表/峰值/导出 CSV），协议与基线 JSON 存储仍 KB（字段名自带单位）；GUI 基线汇总把前端 MB 转回 KB 存（与 CLI 口径一致，已存基线兼容）。其余指标核对无混用（GPU 显存 MB/IO·网络 KB/s/频率 MHz/温度 °C）。**注意 memory CSV 数值从 KB 变 MB**（表头标注），旧会话 CSV 消费看表头。GUI 验证方法：截图受窗口遮挡/工作区不稳定 → 临时 _diag DOM 断言（读 memChart.title/unit + peakTable 表头）验后删——diag_log 落 `/tmp/xperf_gui_diag.log` 非 stderr
-- **验证门槛**：99 测试全绿（agent 24 + core 59+2 ignored + xperformance 8 + GUI 4 + xrm 2；本会话新增 21：baseline 11 + platform 过滤 1 + utils 设备 3 + GUI 基线 4 + 既有回归），clippy 零警告，cargo doc 零 warning（默认 lint 集 + 3 crate missing_docs）
+- **验证门槛**：100 测试全绿（agent 24 + core 62+2 ignored + xperformance 8 + GUI 4 + xrm 2；review 后 +3：S1 负 delta 方向×2 + G1 全不可比），clippy 零警告，cargo doc 零 warning（默认 lint 集 + 3 crate missing_docs）
 
 ### 关键结论与基线
 
