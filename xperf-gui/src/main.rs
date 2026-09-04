@@ -1,6 +1,6 @@
 //! xperf-gui：xtools 的 Tauri 桌面 GUI——与 CLI 共用 xperf-core 的采样/深挖能力，
 //! 前端呈现折线图/实时数值/Top 线程/峰值/Perfetto 分析报告（独立 tab），支持暗/亮主题。
-//! 支持命令行自动启动：--package `<pkg>` `[--interval N]` [--cpu …] [--trace N]。
+//! 支持命令行自动启动：`--package <pkg> [--interval N] [--cpu …] [--trace N]`。
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use std::sync::{Arc, Mutex};
