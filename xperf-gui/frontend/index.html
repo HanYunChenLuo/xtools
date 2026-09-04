@@ -9,6 +9,9 @@
 <body>
   <div id="sidebar">
     <h2>XPerformance</h2>
+    <label>设备:
+      <select id="deviceSelect" title="目标设备（多台同连时在此选择；单台自动选中）"></select>
+    </label>
     <label>Package:
       <input id="package" type="text" list="pkgList" placeholder="输入或选择包名" autocomplete="off" />
       <datalist id="pkgList"></datalist>
@@ -66,6 +69,10 @@
     </div>
     <h3>数据管理</h3>
     <button id="exportBtn" class="small">导出 CSV</button>
+    <div class="sidebar-row">
+      <button id="saveBaselineBtn" class="small flex-fill" title="把当前会话统计存为该包的基线（覆盖旧基线）">保存基线</button>
+      <button id="compareBaselineBtn" class="small flex-fill" title="当前会话与已存基线逐指标对比（回归/改善/持平）">对比基线</button>
+    </div>
     <button id="cleanBtn" class="small clean-btn">清理缓存与数据</button>
     <h3>PIDs</h3>
     <ul id="pidList"></ul>
@@ -101,6 +108,10 @@
       <div id="peakPanel" class="panel">
         <h3>峰值</h3>
         <table id="peakTable"><tr><th>PID</th><th>峰值 CPU%</th><th>时间</th><th>峰值 PSS(KB)</th><th>时间</th></tr></table>
+      </div>
+      <div id="baselinePanel" class="panel hidden">
+        <h3>基线对比</h3>
+        <pre id="baselineReport"></pre>
       </div>
     </div>
     </div>

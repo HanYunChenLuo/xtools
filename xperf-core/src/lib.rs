@@ -8,6 +8,8 @@
 
 /// 设备端 agent 的传输层：部署/启动/事件流/断连重连与 NDJSON 协议解析。
 pub mod agent;
+/// 基线对比：会话汇总统计的保存/读取与两次运行 diff 报告（性能回归验证）。
+pub mod baseline;
 /// CPU 采样协议类型（线程级 CPU 信息）。
 pub mod cpu;
 /// FPS 采样协议类型（时序数据结构）。
@@ -31,7 +33,10 @@ pub use fps::FpsTimeSeriesData;
 pub use marker::{send_marker, start_marker_listener, Marker};
 pub use memory::{MemoryDetails, MemoryTimeSeriesData};
 pub use platform::{detect_platform, detect_platform_live, from_id, Platform, PlatformId};
-pub use utils::{run_adb_command, ProcOutput};
+pub use utils::{
+    adb, list_adb_devices, parse_adb_devices, pick_device, run_adb_command, set_target_serial,
+    target_serial, AdbDevice, ProcOutput,
+};
 
 use chrono::{DateTime, Local};
 use serde::Serialize;

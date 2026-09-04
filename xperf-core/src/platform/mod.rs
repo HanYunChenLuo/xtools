@@ -99,10 +99,29 @@ pub fn detect_platform(adb_devices_output: &str) -> Box<dyn Platform> {
     }
 }
 
-/// 通过 adb devices -l 实时检测平台
+/// 通过 adb devices -l 实时检测平台。
+///
+/// 已选择目标设备（`utils::set_target_serial`）时只取该设备行检测——多台设备
+/// 同连（如车机 + 手机）时，平台属性（QNX GPU 通道等）必须取自目标设备。
 pub fn detect_platform_live() -> Box<dyn Platform> {
     let output = crate::run_adb_command(&["devices", "-l"]).map(|o| o.stdout).unwrap_or_default();
-    detect_platform(&output)
+    detect_platform(&filter_device_line(&output, crate::utils::target_serial().as_deref()))
+}
+
+/// 从 `adb devices -l` 输出中只保留目标 serial 的行（补回表头——
+/// [`detect_platform`] 按 `skip(1)` 跳过表头解析）。`None` = 原样返回。
+fn filter_device_line(output: &str, serial: Option<&str>) -> String {
+    match serial {
+        Some(s) => format!(
+            "List of devices attached\n{}",
+            output
+                .lines()
+                .filter(|l| l.split_whitespace().next() == Some(s))
+                .collect::<Vec<_>>()
+                .join("\n")
+        ),
+        None => output.to_string(),
+    }
 }
 
 /// 按平台标识构造实现（from_id(PlatformId::Ss3) → Ss3 实例）
@@ -142,5 +161,29 @@ mod tests {
     fn test_detect_android_fallback() {
         let out = "List of devices attached\n12345  device product:SomePhone model:Pixel device:foo transport_id:1\n";
         assert_eq!(detect_platform(out).id(), PlatformId::Android);
+    }
+
+    // ---- 多设备同连：目标设备行过滤 ----
+
+    #[test]
+    fn test_filter_device_line_picks_target() {
+        let out = "List of devices attached\n\
+            1280da60  device usb:1-2 product:dada model:24129PN74C transport_id:10\n\
+            6eb792dfb0f  device usb:1-13 product:HU_SS3 model:HU_SS3 transport_id:9\n";
+        // 过滤后仍须带表头（detect_platform 按 skip(1) 跳过表头）——
+        // 曾因表头被滤掉、SS3 行被当表头跳过而误判 Android
+        let filtered = filter_device_line(out, Some("6eb792dfb0f"));
+        assert!(filtered.starts_with("List of devices attached"));
+        assert_eq!(detect_platform(&filtered).id(), PlatformId::Ss3);
+        // 另一台（手机）→ Android
+        let filtered = filter_device_line(out, Some("1280da60"));
+        assert_eq!(detect_platform(&filtered).id(), PlatformId::Android);
+        // 未选择设备 → 原样（多车机时 detect_platform 取首个并警告）
+        assert_eq!(filter_device_line(out, None), out);
+        // 目标不在线 → 只有表头 → Android fallback（如实）
+        assert_eq!(
+            detect_platform(&filter_device_line(out, Some("xxx"))).id(),
+            PlatformId::Android
+        );
     }
 }

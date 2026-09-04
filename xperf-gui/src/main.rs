@@ -130,12 +130,33 @@ fn spawn_sampling(app: tauri::AppHandle, package: String, interval: u64, flags: 
         *state.startup_extra.lock().unwrap() = Some((interval, flags));
     }
     std::thread::spawn(move || {
+        // 设备选择兜底（spawn 前一次）：未选择时单台自动选中；
+        // 多台同连未选择 → 报错给前端（须先在侧栏下拉选定），不进入采样
+        if xperf_core::target_serial().is_none() {
+            let r = xperf_core::list_adb_devices()
+                .map_err(|e| e.to_string())
+                .and_then(|devices| {
+                    xperf_core::pick_device(None, &devices)
+                        .map(|d| d.serial)
+                        .map_err(|e| e.to_string())
+                });
+            match r {
+                Ok(serial) => xperf_core::set_target_serial(Some(serial)),
+                Err(e) => {
+                    let _ = app.emit("sampling-error", serde_json::json!({ "message": e }));
+                    let mut running = running.lock().unwrap();
+                    *running = false;
+                    return;
+                }
+            }
+        }
         let platform = xperf_core::detect_platform_live();
         eprintln!("[sampling] 平台: {} ({})", platform.name(), platform.description());
         let bin = match agent::ensure_agent_built() {
             Ok(b) => b,
             Err(e) => {
                 eprintln!("[sampling] agent 构建失败: {}", e);
+                let _ = app.emit("sampling-error", serde_json::json!({ "message": format!("agent 构建失败: {}", e) }));
                 let mut running = running.lock().unwrap();
                 *running = false;
                 return;
@@ -143,6 +164,7 @@ fn spawn_sampling(app: tauri::AppHandle, package: String, interval: u64, flags: 
         };
         if let Err(e) = agent::deploy_agent(&bin) {
             eprintln!("[sampling] agent 部署失败: {}", e);
+            let _ = app.emit("sampling-error", serde_json::json!({ "message": format!("agent 部署失败: {}", e) }));
             let mut running = running.lock().unwrap();
             *running = false;
             return;
@@ -151,6 +173,7 @@ fn spawn_sampling(app: tauri::AppHandle, package: String, interval: u64, flags: 
             Ok(s) => s,
             Err(e) => {
                 eprintln!("[sampling] agent 启动失败: {}", e);
+                let _ = app.emit("sampling-error", serde_json::json!({ "message": format!("agent 启动失败: {}", e) }));
                 let mut running = running.lock().unwrap();
                 *running = false;
                 return;
@@ -550,10 +573,38 @@ fn is_running(state: State<'_, AppState>) -> Result<bool, String> {
     Ok(*state.running.lock().map_err(|e| e.to_string())?)
 }
 
+/// 在线设备清单与当前选择（侧栏设备下拉用）：
+/// `{devices: [{serial, model}], selected}`（`selected` = 已生效的 `-s` 目标，
+/// `--device` 自动启动或下拉切换后非空；前端据此初始化选中项，不覆盖已有选择）
+#[tauri::command]
+fn list_devices() -> Result<serde_json::Value, String> {
+    let devices = xperf_core::list_adb_devices().map_err(|e| e.to_string())?;
+    Ok(serde_json::json!({
+        "devices": devices
+            .into_iter()
+            .map(|d| serde_json::json!({ "serial": d.serial, "model": d.model }))
+            .collect::<Vec<_>>(),
+        "selected": xperf_core::target_serial(),
+    }))
+}
+
+/// 选择目标设备（侧栏下拉切换时调用）：写入全局 serial，后续所有 adb 调用带 `-s`。
+/// serial 须在当前在线列表中（防止拼入无效 serial 后所有命令报错）。
+#[tauri::command]
+fn select_device(serial: String) -> Result<(), String> {
+    let devices = xperf_core::list_adb_devices().map_err(|e| e.to_string())?;
+    if !devices.iter().any(|d| d.serial == serial) {
+        return Err(format!("设备 {} 不在线", serial));
+    }
+    xperf_core::set_target_serial(Some(serial));
+    Ok(())
+}
+
 /// 启动参数回查（`--package` 等命令行自动启动时前端回填输入框用）：
 /// 返回 `{package, interval, flags}`（运行中才有值；`--interval` 与指标
 /// flag 来自启动线程的同一来源，保证与实际采样一致）。前端据此把 UI 状态
-/// （包名/间隔/勾选/idleHint/按钮）同步成与手动「开始监控」一致的效果。
+/// （包名/间隔/勾选/idleHint/按钮）同步成与手动「开始监控」一致的效果；
+/// 设备选中项经 `list_devices` 的 `selected` 字段回填。
 #[tauri::command]
 fn startup_args(
     state: State<'_, AppState>,
@@ -761,6 +812,137 @@ async fn export_csv(
     Ok(dir.to_string_lossy().into_owned())
 }
 
+/// 前端持有的会话序列 → 基线汇总（`export_csv` 同源数据结构，多 PID 合并，
+/// 口径见 `xperf_core::baseline::SessionSummary` 文档）。
+/// 时长取全序列首/末样本的全局跨度；无任何数据时报错（与 export_csv 空数据行为一致）。
+#[allow(clippy::too_many_arguments)] // tauri 命令参数须扁平（export_csv 同源），此处为其共用实现
+fn build_summary_from_series(
+    package: &str,
+    interval_ms: u64,
+    cpu: &std::collections::HashMap<String, Vec<(f64, f64)>>,
+    mem: &std::collections::HashMap<String, Vec<(f64, f64)>>,
+    fps: &std::collections::HashMap<String, Vec<(f64, f64, u32)>>,
+    gpu: &GpuExportPoints,
+    io: &std::collections::HashMap<String, IoExportPoints>,
+    net: &[(f64, f64, f64)],
+) -> Result<xperf_core::baseline::SessionSummary, String> {
+    validate_package(package)?;
+    // 会话时长（秒）：全序列首/末样本的全局跨度
+    let mut first = f64::MAX;
+    let mut last = f64::MIN;
+    let mut note = |t0: f64, tn: f64| {
+        first = first.min(t0);
+        last = last.max(tn);
+    };
+    for pts in cpu.values().chain(mem.values()) {
+        if let (Some((t0, _)), Some((tn, _))) = (pts.first(), pts.last()) {
+            note(*t0, *tn);
+        }
+    }
+    for pts in fps.values() {
+        if let (Some((t0, _, _)), Some((tn, _, _))) = (pts.first(), pts.last()) {
+            note(*t0, *tn);
+        }
+    }
+    if let (Some(t0), Some(tn)) = (gpu.first(), gpu.last()) {
+        note(t0.0, tn.0);
+    }
+    for pts in io.values() {
+        if let (Some((t0, _, _, _, _)), Some((tn, _, _, _, _))) = (pts.first(), pts.last()) {
+            note(*t0, *tn);
+        }
+    }
+    if let (Some(t0), Some(tn)) = (net.first(), net.last()) {
+        note(t0.0, tn.0);
+    }
+
+    let total_points: usize = cpu.values().map(|p| p.len()).sum::<usize>()
+        + mem.values().map(|p| p.len()).sum::<usize>()
+        + fps.values().map(|p| p.len()).sum::<usize>()
+        + gpu.len()
+        + io.values().map(|p| p.len()).sum::<usize>()
+        + net.len();
+    if total_points == 0 {
+        return Err("暂无采样数据（先开始监控）".into());
+    }
+    let duration_s = if first <= last { (last - first) / 1000.0 } else { 0.0 };
+
+    // PID 列表：CPU/内存序列的键取并集排序
+    let mut pids: Vec<String> = cpu.keys().chain(mem.keys()).cloned().collect();
+    pids.sort();
+    pids.dedup();
+
+    let mut b = xperf_core::baseline::SummaryBuilder::new(package, interval_ms, duration_s);
+    b.pids(pids);
+    for pts in cpu.values() {
+        for (_, v) in pts {
+            b.push_cpu(*v);
+        }
+    }
+    for pts in mem.values() {
+        for (_, v) in pts {
+            b.push_mem(*v);
+        }
+    }
+    for pts in fps.values() {
+        for (_, v, jank) in pts {
+            b.push_fps(*v, *jank);
+        }
+    }
+    for (_, busy, _, _) in gpu {
+        b.push_gpu(*busy);
+    }
+    for pts in io.values() {
+        for (_, r, w, _, _) in pts {
+            b.push_io(*r, *w);
+        }
+    }
+    for (_, rx, tx) in net {
+        b.push_net(*rx, *tx);
+    }
+    Ok(b.finish())
+}
+
+/// 保存基线：把前端当前会话序列的汇总统计存为该包的基线
+/// （`~/.local/share/xperf/baselines/<pkg>.json`，覆盖旧基线；与 CLI `--save-baseline` 互通）。
+/// 返回基线文件路径。
+#[tauri::command]
+#[allow(clippy::too_many_arguments)] // tauri 命令参数须扁平，与 export_csv 同源结构
+async fn save_baseline(
+    package: String,
+    interval_ms: u64,
+    cpu: std::collections::HashMap<String, Vec<(f64, f64)>>,
+    mem: std::collections::HashMap<String, Vec<(f64, f64)>>,
+    fps: std::collections::HashMap<String, Vec<(f64, f64, u32)>>,
+    gpu: GpuExportPoints,
+    io: std::collections::HashMap<String, IoExportPoints>,
+    net: Vec<(f64, f64, f64)>,
+) -> Result<String, String> {
+    let summary = build_summary_from_series(&package, interval_ms, &cpu, &mem, &fps, &gpu, &io, &net)?;
+    let path = xperf_core::baseline::save(&package, &summary).map_err(|e| e.to_string())?;
+    Ok(path.to_string_lossy().into_owned())
+}
+
+/// 对比基线：当前会话汇总与已保存基线逐指标 diff，返回报告文本
+/// （基线可来自本按钮保存或 CLI `--save-baseline`，两侧互通）。
+#[tauri::command]
+#[allow(clippy::too_many_arguments)] // tauri 命令参数须扁平，与 export_csv 同源结构
+async fn compare_baseline(
+    package: String,
+    interval_ms: u64,
+    cpu: std::collections::HashMap<String, Vec<(f64, f64)>>,
+    mem: std::collections::HashMap<String, Vec<(f64, f64)>>,
+    fps: std::collections::HashMap<String, Vec<(f64, f64, u32)>>,
+    gpu: GpuExportPoints,
+    io: std::collections::HashMap<String, IoExportPoints>,
+    net: Vec<(f64, f64, f64)>,
+) -> Result<String, String> {
+    let cur = build_summary_from_series(&package, interval_ms, &cpu, &mem, &fps, &gpu, &io, &net)?;
+    let base = xperf_core::baseline::load(&package)
+        .map_err(|e| format!("未找到基线（先点「保存基线」或 CLI --save-baseline 保存一次）: {}", e))?;
+    Ok(xperf_core::baseline::compare(&base, &cur))
+}
+
 fn main() {
     // 支持命令行自动启动：xperf-gui --package <pkg> [--interval 1000] [--cpu] [--memory] [--fps] [--freq] [--io] [--net] [--gpu] [--thermal] [--trace N] [--stack N]
     // （便于脚本化/验证；不传参数则手动在前端操作）
@@ -775,6 +957,37 @@ fn main() {
     let auto_interval: u64 = get_opt("--interval").and_then(|v| v.parse().ok()).unwrap_or(1000).max(50);
     let auto_trace: Option<u64> = get_opt("--trace").and_then(|v| v.parse().ok());
     let auto_stack: Option<u64> = get_opt("--stack").and_then(|v| v.parse().ok());
+    // --device <serial>：命令行自动启动指定目标设备（多台同连时必须给）；
+    // 显式指定但无效时直接跳过自动启动（不静默回落到自动选台——用户指定了设备）
+    let mut auto_start = true;
+    if let Some(serial) = get_opt("--device") {
+        match xperf_core::pick_device(Some(&serial), &xperf_core::list_adb_devices().unwrap_or_default()) {
+            Ok(d) => xperf_core::set_target_serial(Some(d.serial)),
+            Err(e) => {
+                eprintln!("[startup] --device 无效，跳过自动启动: {}", e);
+                auto_start = false;
+            }
+        }
+    }
+    // 未给 --device 时的设备前置解析（避免与前端设备下拉的自动选择竞态）：
+    // 单台自动；多台/无设备则放弃自动启动（确定性跳过，脚本化多设备场景须显式
+    // --device；交互场景在侧栏选定后手动开始）
+    if auto_start && auto_package.is_some() && xperf_core::target_serial().is_none() {
+        match xperf_core::list_adb_devices()
+            .ok()
+            .and_then(|ds| xperf_core::pick_device(None, &ds).ok())
+        {
+            Some(d) => {
+                xperf_core::set_target_serial(Some(d.serial));
+            }
+            None => {
+                eprintln!(
+                    "[startup] --package 自动启动跳过：多台/无在线设备且未指定 --device（须 GUI 下拉选定后手动开始，或启动参数加 --device）"
+                );
+                auto_start = false;
+            }
+        }
+    }
     let auto_flags = MetricFlags {
         cpu: has_flag("--cpu"),
         memory: has_flag("--memory"),
@@ -796,11 +1009,14 @@ fn main() {
             startup_extra: Mutex::new(None),
         })
         .setup(move |app| {
-            if let Some(package) = auto_package.clone() {
-                let state = app.state::<AppState>();
-                let mut running = state.running.lock().unwrap();
-                if !*running {
-                    *running = true;
+            // auto_start：设备前置解析通过（--device 或单台自动）才自动启动采样；
+            // 多台未指定时为 false（eprintln 已提示），前端保持空闲态等用户选定
+            if auto_start {
+                if let Some(package) = auto_package.clone() {
+                    let state = app.state::<AppState>();
+                    let mut running = state.running.lock().unwrap();
+                    if !*running {
+                        *running = true;
                     drop(running);
                     // 一个指标都没传时默认 CPU+Memory（保持旧行为）
                     let flags = if auto_flags.any() {
@@ -838,6 +1054,7 @@ fn main() {
                         spawn_stack(app.handle().clone(), package, n, state.stack_running.clone());
                     }
                 }
+                }
             }
             Ok(())
         })
@@ -854,7 +1071,11 @@ fn main() {
             startup_args,
             is_running,
             add_marker,
-            export_csv
+            export_csv,
+            save_baseline,
+            compare_baseline,
+            list_devices,
+            select_device
         ])
         .on_window_event(|window, event| {
             // 关窗时停止采样：置 running=false，采样线程在下一轮循环检测到后退出，
@@ -948,6 +1169,74 @@ mod tests {
             Default::default(),
         ).await;
         assert!(r.is_err());
+    }
+
+    #[test]
+    fn test_build_summary_from_series() {
+        let pkg = format!("test_baseline_{}", std::process::id());
+        let mut cpu = std::collections::HashMap::new();
+        cpu.insert("100".to_string(), vec![(1000.0, 10.0), (2000.0, 20.0)]);
+        cpu.insert("200".to_string(), vec![(1000.0, 5.0)]);
+        let mut fps = std::collections::HashMap::new();
+        fps.insert("SVM Container_0".to_string(), vec![(1000.0, 58.0, 1u32), (2000.0, 60.0, 0u32)]);
+        let gpu = vec![(1000.0, 12.0, 0.0, 585u32)];
+        let s = build_summary_from_series(&pkg, 1000, &cpu, &Default::default(), &fps, &gpu, &Default::default(), &[]).unwrap();
+        // CPU 样本合并（2+1）、pids 并集排序
+        assert_eq!(s.cpu.as_ref().unwrap().count, 3);
+        assert!((s.cpu.as_ref().unwrap().avg - 11.666).abs() < 0.01);
+        assert_eq!(s.pids, vec!["100".to_string(), "200".to_string()]);
+        // 时长 = 首/末样本跨度 1000ms
+        assert!((s.duration_s - 1.0).abs() < 1e-9);
+        assert_eq!(s.jank_total, Some(1));
+        assert_eq!(s.gpu_busy.as_ref().unwrap().max, 12.0);
+        assert_eq!(s.restarts, None); // GUI 路径未统计
+
+        // 保存/读取/对比 roundtrip（临时路径，不动用户基线目录）
+        let dir = std::env::temp_dir().join(format!("xperf_gui_baseline_{}", std::process::id()));
+        let path = dir.join("baseline.json");
+        xperf_core::baseline::save_to(&path, &s).unwrap();
+        let base = xperf_core::baseline::load_from(&path).unwrap();
+        let report = xperf_core::baseline::compare(&base, &s);
+        assert!(report.contains("基线对比报告"));
+        assert!(report.contains("✅ 无回归"));
+        std::fs::remove_dir_all(&dir).ok();
+
+        // 空数据报错（与 export_csv 行为一致）
+        let r = build_summary_from_series(&pkg, 1000, &Default::default(), &Default::default(), &Default::default(), &Default::default(), &Default::default(), &[]);
+        assert!(r.is_err());
+    }
+
+    // ---- save_baseline / compare_baseline 命令端到端（写真实基线目录后清理）----
+
+    #[tokio::test]
+    async fn test_save_and_compare_baseline_commands() {
+        let pkg = format!("test_baseline_cmd_{}", std::process::id());
+        let mut cpu = std::collections::HashMap::new();
+        cpu.insert("100".to_string(), vec![(1000.0, 12.0), (2000.0, 14.0)]);
+        let cleanup = || {
+            let _ = std::fs::remove_file(
+                xperf_core::baseline::baseline_dir().join(format!("{}.json", pkg)),
+            );
+        };
+        cleanup();
+        // 保存：返回基线路径（用户数据目录）
+        let path = save_baseline(pkg.clone(), 1000, cpu.clone(), Default::default(), Default::default(), Default::default(), Default::default(), Default::default()).await.unwrap();
+        assert!(path.contains(&pkg));
+        assert!(std::path::Path::new(&path).exists());
+        // 对比：同数据 → 无回归
+        let report = compare_baseline(pkg.clone(), 1000, cpu, Default::default(), Default::default(), Default::default(), Default::default(), Default::default()).await.unwrap();
+        assert!(report.contains("基线对比报告"));
+        assert!(report.contains("✅ 无回归"));
+        // 空数据 → 报错（暂无采样数据——build_summary 前置校验先于基线读取）
+        let r = compare_baseline(pkg.clone(), 1000, Default::default(), Default::default(), Default::default(), Default::default(), Default::default(), Default::default()).await;
+        assert!(r.unwrap_err().contains("暂无采样数据"));
+        cleanup();
+        // 清理后无基线 → 对比报"未找到基线"（须带数据，否则前置校验先报错）
+        let mut cpu2 = std::collections::HashMap::new();
+        cpu2.insert("100".to_string(), vec![(1000.0, 12.0)]);
+        let r = compare_baseline(pkg, 1000, cpu2, Default::default(), Default::default(), Default::default(), Default::default(), Default::default()).await;
+        let e = r.unwrap_err();
+        assert!(e.contains("未找到基线"));
     }
 }
 

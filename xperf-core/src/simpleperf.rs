@@ -96,7 +96,7 @@ fn parse_sample_stats(output: &str) -> (u64, u64) {
 /// 应用是否有运行中的进程（主进程名 = 包名）。simpleperf `--app` 对未启动应用会
 /// 无限等待（实测 `--duration` 拦不住），录制前必须前置检查。
 fn app_has_process(package: &str) -> Result<bool> {
-    let out = Command::new("adb")
+    let out = crate::utils::adb()
         .args(["shell", "pidof", package])
         .output()
         .context("执行 adb shell pidof 失败")?;
@@ -128,7 +128,7 @@ pub fn record(
     let dev_path = format!("/data/local/tmp/xperf_stack_{}.data", stem);
 
     // 设备端 simpleperf 存在性检查（错误信息直接可读，避免 record 报 "not found"）
-    let probe = Command::new("adb")
+    let probe = crate::utils::adb()
         .args(["shell", "which", "simpleperf"])
         .output()
         .context("执行 adb shell which 失败")?;
@@ -142,7 +142,7 @@ pub fn record(
 
     let wall_start = Local::now();
     // stderr 合并进 stdout（设备端 2>&1）：simpleperf 的样本统计与报错都走日志行
-    let mut child = Command::new("adb")
+    let mut child = crate::utils::adb()
         .args([
             "shell", "simpleperf", "record", "--app", package, "-g",
             "--duration", &seconds.to_string(), "-o", &dev_path, "2>&1",
@@ -238,7 +238,7 @@ pub fn record(
     std::fs::write(&report_path, &report_text).context("写入 simpleperf_report.txt 失败")?;
 
     // pull + 清理（清理失败不致命：文件名含时间戳，不影响下次录制）
-    let pull = Command::new("adb")
+    let pull = crate::utils::adb()
         .arg("pull")
         .arg(&dev_path)
         .arg(&local_path)
@@ -251,7 +251,7 @@ pub fn record(
             dev_path
         );
     }
-    let _ = Command::new("adb").args(["shell", "rm", "-f", &dev_path]).output();
+    let _ = crate::utils::adb().args(["shell", "rm", "-f", &dev_path]).output();
     let bytes = std::fs::metadata(&local_path)?.len();
 
     Ok(RecordedStack {
@@ -273,7 +273,7 @@ pub fn record(
 /// （实测 4.9MB vs 2.7MB），压缩后语义不变（符号名内出现连续空格的概率≈0，单空格保留）。
 /// 失败返回 Err，不中断整体流程（另两个视图仍可生成，`.data` 仍会被 pull 回）。
 fn device_report(dev_path: &str, extra_args: &[&str]) -> Result<String> {
-    let mut cmd = Command::new("adb");
+    let mut cmd = crate::utils::adb();
     cmd.args(["shell", "simpleperf", "report", "-i", dev_path]);
     for a in extra_args {
         cmd.arg(a);

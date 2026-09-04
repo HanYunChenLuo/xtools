@@ -3,12 +3,11 @@
 //! 冷启动测量、时间轴打点、perfetto 深挖（--trace N 录制 + trace_processor SQL 归因）、
 //! simpleperf 函数热点（--stack N 调用栈采样，定位 CPU 热点函数）。
 #![deny(warnings)]
-use anyhow::{Context, Result};
+use anyhow::Result;
 use chrono::{DateTime, Local};
 use clap::Parser;
 use colored::*;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::time::Instant;
@@ -29,6 +28,11 @@ struct Args {
     /// Package name to monitor
     #[arg(short, long, required_unless_present = "clean_cache")]
     package: Option<String>,
+
+    /// 目标设备 serial（多台设备同连时必须指定，如 `adb devices` 列出的 6eb792dfb0f；
+    /// 单台连接自动选择）
+    #[arg(short = 'd', long, value_name = "SERIAL")]
+    device: Option<String>,
 
     /// Monitor CPU usage
     #[arg(long)]
@@ -88,42 +92,48 @@ struct Args {
     #[arg(long, value_name = "SECONDS", value_parser = clap::value_parser!(u64).range(1..=600))]
     stack: Option<u64>,
 
+    /// 基线对比-保存：会话结束后把本次汇总统计（CPU/内存/FPS/Jank/GPU/IO/网络，多 PID 合并）
+    /// 存为该包的基线（`~/.local/share/xperf/baselines/<pkg>.json`，覆盖旧基线）
+    #[arg(long, conflicts_with = "compare_baseline")]
+    save_baseline: bool,
+
+    /// 基线对比-对比：会话结束后与已保存基线逐指标 diff（回归/改善/持平判定报告，
+    /// 落盘 `<ts>/baseline_report.txt`）；需先用 --save-baseline 存一次基线
+    #[arg(long)]
+    compare_baseline: bool,
+
     /// 清理缓存与采集数据后退出（~/.cache/xperf 的 UI 镜像/脚本集 + /tmp/xperf 的全部采集产物；
     /// 清后首次深挖/火焰图会重新引导下载脚本）
     #[arg(long)]
     clean_cache: bool,
 }
 
-fn check_adb() -> Result<()> {
-    let output = Command::new("adb")
-        .arg("devices")
-        .output()
-        .context("Failed to execute adb command")?;
-    if !output.status.success() {
-        anyhow::bail!("ADB command failed: {}", String::from_utf8_lossy(&output.stderr));
-    }
-    let devices = String::from_utf8_lossy(&output.stdout);
-    let connected: Vec<&str> = devices
-        .lines()
-        .skip(1)
-        .filter(|line| !line.trim().is_empty())
-        .collect();
-    if connected.is_empty() {
-        anyhow::bail!("No ADB devices connected. Please connect a device and enable USB debugging.");
-    }
-    println!("Connected devices: {}", connected.len());
+/// 设备选择：`--device` 指定 > 单台自动；多台未指定报错并列出清单。
+/// 选中后写入全局（utils::set_target_serial），后续所有 adb 调用自动带 `-s`。
+fn select_device(device: Option<&str>) -> Result<()> {
+    let devices = xperf_core::list_adb_devices()?;
+    let picked = xperf_core::pick_device(device, &devices)?;
+    xperf_core::set_target_serial(Some(picked.serial.clone()));
+    println!("目标设备: {}（model: {}，在线 {} 台）", picked.serial, picked.model, devices.len());
     Ok(())
 }
 
-async fn monitor_process(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
+async fn monitor_process(args: &Args, cold_start_ms: Option<u64>) -> Result<(), Box<dyn std::error::Error>> {
     println!("{}", "XPerformance Monitor".green().bold());
     println!("Monitoring package: {}", args.package.as_deref().unwrap_or("").cyan());
     println!("Sampling interval: {} ms", args.interval);
-
-    check_adb()?;
+    if args.save_baseline {
+        println!("{}", "基线模式: 会话结束后保存基线".cyan());
+    }
+    if args.compare_baseline {
+        println!("{}", "基线模式: 会话结束后与已存基线对比".cyan());
+    }
 
     let flags = metric_flags(args);
     if !flags.any() {
+        if args.save_baseline || args.compare_baseline {
+            println!("{}", "基线对比需要采样会话（至少一个 --cpu/--memory/… 指标），本次跳过".yellow());
+        }
         if args.trace.is_none() && args.stack.is_none() {
             println!("No monitoring options selected. Use --cpu/--memory/--fps/--freq/--thermal/--gpu/--io/--net");
             return Ok(());
@@ -172,7 +182,7 @@ async fn monitor_process(args: &Args) -> Result<(), Box<dyn std::error::Error>> 
         .flatten()
         .max()
         .map(std::time::Duration::from_secs);
-    monitor_process_agent(args, flags, stop_after).await
+    monitor_process_agent(args, flags, stop_after, cold_start_ms).await
 }
 
 /// trace 录制线程收尾：join → 拉回提示 → SQL 分析报告。
@@ -250,16 +260,26 @@ fn print_stack_result(
     }
 }
 
-/// 冷启动测量（独立于采样，先执行再开始监控）
-fn run_cold_start(args: &Args) {
+/// 冷启动测量（独立于采样，先执行再开始监控）。
+/// 返回 TotalTime 毫秒数（未测量/测量失败为 None；成功与否都继续进监控流程）
+fn run_cold_start(args: &Args) -> Option<u64> {
     let package = args.package.clone().unwrap_or_default();
     if let Some(ref activity) = args.cold_start {
         println!("{}", "========== 冷启动测量 ==========".green().bold());
-        match coldstart::measure(&package, activity) {
-            Ok(r) => println!("{}", r.summary().cyan()),
-            Err(e) => println!("{}", format!("冷启动测量失败: {}", e).yellow()),
-        }
+        let r = match coldstart::measure(&package, activity) {
+            Ok(r) => {
+                println!("{}", r.summary().cyan());
+                Some(r.total_time_ms)
+            }
+            Err(e) => {
+                println!("{}", format!("冷启动测量失败: {}", e).yellow());
+                None
+            }
+        };
         println!("{}", "================================".green().bold());
+        r
+    } else {
+        None
     }
 }
 
@@ -299,10 +319,12 @@ fn metric_flags(args: &Args) -> xperf_core::MetricFlags {
 /// 输出策略：interval ≥ 500ms 逐条详细打印（低频率，同旧轮询模式的信息量）；
 /// < 500ms 时按 ~1s 聚合打印（逐条会刷屏），全量明细均在退出 CSV 中。
 /// stop_after：限时采样（--trace N 与录制同窗口，到点自动结束）；None = Ctrl-C 退出。
+/// cold_start_ms：--cold-start 测量结果（进会话汇总统计；None = 未测量）
 async fn monitor_process_agent(
     args: &Args,
     flags: xperf_core::MetricFlags,
     stop_after: Option<std::time::Duration>,
+    cold_start_ms: Option<u64>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use xperf_core::agent::{self, AgentEvent};
     let package = args.package.clone().unwrap_or_default();
@@ -812,11 +834,111 @@ async fn monitor_process_agent(
         let stats = alert_stats.lock().unwrap();
         println!("{}", alerts::generate_report(&thresholds, &stats));
     }
+    // 基线对比（--save-baseline / --compare-baseline）：会话汇总统计的保存与 diff
+    if args.save_baseline || args.compare_baseline {
+        let summary =
+            build_session_summary(args, cold_start_ms, &pid_stats, &extra, restart_count);
+        if args.save_baseline {
+            match xperf_core::baseline::save(&package, &summary) {
+                Ok(p) => println!("基线已保存（覆盖旧基线）: {}", p.display()),
+                Err(e) => println!("{}", format!("基线保存失败: {}", e).yellow()),
+            }
+        }
+        if args.compare_baseline {
+            match xperf_core::baseline::load(&package) {
+                Ok(base) => {
+                    let report = xperf_core::baseline::compare(&base, &summary);
+                    println!("{}", report);
+                    if let Ok(dir) = cli_utils::create_timestamp_subdir(&package) {
+                        let path = dir.join("baseline_report.txt");
+                        match std::fs::write(&path, &report) {
+                            Ok(_) => println!("基线对比报告: {}", path.display()),
+                            Err(e) => {
+                                println!("{}", format!("基线报告写盘失败: {}", e).yellow())
+                            }
+                        }
+                    }
+                }
+                Err(e) => println!(
+                    "{}",
+                    format!("未找到基线（先用 --save-baseline 保存一次）: {}", e).yellow()
+                ),
+            }
+        }
+    }
     // perfetto 深挖 + simpleperf 函数热点：录制与采样同窗口应已完成，join 后做分析
     // （录制失败不影响采样产出；报告按 trace → stack 顺序输出）
     print_trace_result(trace_handle, args);
     print_stack_result(stack_handle, args);
     Ok(())
+}
+
+/// 构建会话汇总统计（基线保存/对比的数据体）：pid_stats 的 CPU/内存/FPS + B 类时序的
+/// GPU/IO/网络，多 PID 样本全量合并（口径见 `baseline::SessionSummary` 文档）。
+/// 时长取全部 CPU/内存/FPS 样本时间戳的首尾跨度；长会话内存序列已抽稀时均值为
+/// 均匀抽稀下的近似（CSV 全量仍在）。
+fn build_session_summary(
+    args: &Args,
+    cold_start_ms: Option<u64>,
+    pid_stats: &std::collections::HashMap<String, xperf_core::PidStats>,
+    extra: &cli_utils::ExtraSeries,
+    restart_count: u32,
+) -> xperf_core::baseline::SessionSummary {
+    let package = args.package.clone().unwrap_or_default();
+    // 会话时长：所有时序（含 B 类设备级指标——GPU-only 会话也有时长）首/末样本时间的全局跨度（0 = 单样本或无样本）
+    let mut first: Option<DateTime<Local>> = None;
+    let mut last: Option<DateTime<Local>> = None;
+    let mut span = |dq_front: Option<DateTime<Local>>, dq_back: Option<DateTime<Local>>| {
+        if let (Some(f), Some(l)) = (dq_front, dq_back) {
+            first = Some(first.map_or(f, |m: DateTime<Local>| m.min(f)));
+            last = Some(last.map_or(l, |m: DateTime<Local>| m.max(l)));
+        }
+    };
+    for s in pid_stats.values() {
+        span(s.cpu_data.timestamps.front().copied(), s.cpu_data.timestamps.back().copied());
+        span(s.memory_data.timestamps.front().copied(), s.memory_data.timestamps.back().copied());
+        span(s.fps_data.timestamps.front().copied(), s.fps_data.timestamps.back().copied());
+    }
+    span(extra.gpu.front().map(|(t, _, _, _)| *t), extra.gpu.back().map(|(t, _, _, _)| *t));
+    for samples in extra.io.values() {
+        span(samples.front().map(|(t, _, _, _, _)| *t), samples.back().map(|(t, _, _, _, _)| *t));
+    }
+    span(extra.net.front().map(|(t, _, _)| *t), extra.net.back().map(|(t, _, _)| *t));
+    let duration_s = match (first, last) {
+        (Some(a), Some(b)) => (b - a).num_milliseconds() as f64 / 1000.0,
+        _ => 0.0,
+    };
+
+    let mut pids: Vec<String> = pid_stats.keys().cloned().collect();
+    pids.sort();
+    let mut b = xperf_core::baseline::SummaryBuilder::new(&package, args.interval, duration_s);
+    b.pids(pids);
+    b.restarts(Some(restart_count));
+    b.cold_start_ms(cold_start_ms);
+    for s in pid_stats.values() {
+        for v in &s.cpu_data.process_cpu {
+            b.push_cpu(*v as f64);
+        }
+        for d in &s.memory_data.memory_details {
+            b.push_mem(d.total_pss as f64);
+        }
+        for (i, f) in s.fps_data.fps.iter().enumerate() {
+            let jank = s.fps_data.jank_counts.get(i).copied().unwrap_or(0);
+            b.push_fps(*f as f64, jank);
+        }
+    }
+    for (_, busy, _, _) in &extra.gpu {
+        b.push_gpu(*busy as f64);
+    }
+    for samples in extra.io.values() {
+        for (_, r, w, _, _) in samples {
+            b.push_io(*r as f64, *w as f64);
+        }
+    }
+    for (_, rx, tx) in &extra.net {
+        b.push_net(*rx as f64, *tx as f64);
+    }
+    b.finish()
 }
 
 /// B 类指标退出图表：每指标一张多序列折线（freq 每核一条 / temp 每传感器一条 / io 每 PID 读写两条）。
@@ -1264,8 +1386,13 @@ async fn main() -> Result<()> {
         eprintln!("❌ 包名不合法: {}", e);
         std::process::exit(1);
     }
-    run_cold_start(&args);
-    if let Err(e) = monitor_process(&args).await {
+    // 设备选择（--device > 单台自动）须在冷启动/采样前完成：后续 adb 调用全部带 -s
+    if let Err(e) = select_device(args.device.as_deref()) {
+        eprintln!("❌ {}", e);
+        std::process::exit(1);
+    }
+    let cold_start_ms = run_cold_start(&args);
+    if let Err(e) = monitor_process(&args, cold_start_ms).await {
         eprintln!("Monitor error: {}", e);
         std::process::exit(1);
     }

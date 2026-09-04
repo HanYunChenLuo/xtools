@@ -374,9 +374,9 @@ pub fn ensure_agent_built() -> Result<PathBuf> {
 /// 尝试 adb root（生产构建可能失败，静默忽略）。
 /// 不解析 adb root 文案（各版本不同），直接 `adb shell id` 验证 uid。
 fn try_adb_root() {
-    let _ = Command::new("adb").args(["root"]).output();
+    let _ = crate::utils::adb().args(["root"]).output();
     // adbd 重启后等设备回来
-    let _ = Command::new("adb").args(["wait-for-device"]).output();
+    let _ = crate::utils::adb().args(["wait-for-device"]).output();
     let id = crate::run_adb_command(&["shell", "id"]).map(|o| o.stdout).unwrap_or_default();
     if id.contains("uid=0") {
         eprintln!("adb root: 成功（uid=0）");
@@ -440,7 +440,7 @@ pub fn spawn_agent(
             cmd_args.extend(["--qnx-host".to_string(), qnx.to_string()]);
         }
     }
-    let mut child = Command::new("adb")
+    let mut child = crate::utils::adb()
         .args(&cmd_args)
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -452,16 +452,30 @@ pub fn spawn_agent(
     })
 }
 
-/// 任一 adb 设备是否在线
+/// 目标设备是否在线（重连轮询用）。已选择目标设备时只认该设备
+/// （`adb -s <serial> get-state` = "device"）——多台设备同连时其他设备在
+/// 不算"回来了"；未选择设备时任意一台在线即可。
 fn device_online() -> bool {
-    Command::new("adb")
+    let any_online = crate::utils::adb()
         .arg("devices")
         .output()
         .map(|o| {
             o.status.success()
                 && String::from_utf8_lossy(&o.stdout).lines().skip(1).any(|l| !l.trim().is_empty())
         })
-        .unwrap_or(false)
+        .unwrap_or(false);
+    if !any_online {
+        return false;
+    }
+    match crate::utils::target_serial() {
+        // get-state：正常输出 "device"；offline/unauthorized/serial 无效时 adb 报错（status != 0）
+        Some(_) => crate::utils::adb()
+            .arg("get-state")
+            .output()
+            .map(|o| o.status.success() && String::from_utf8_lossy(&o.stdout).trim() == "device")
+            .unwrap_or(false),
+        None => true,
+    }
 }
 
 /// QNX kgsl 统计链停止（会话结束由 host 兜底执行）。
@@ -477,7 +491,7 @@ pub fn qnx_stop_stats(platform: &dyn crate::platform::Platform, interval_ms: u64
     // `[n]` 正则防检测命令载体自匹配。
     let mut others = 0u32;
     for _ in 0..10 {
-        let Ok(out) = Command::new("adb").arg("shell").arg("pgrep -fc 'xperf-age[n]t'").output() else { return };
+        let Ok(out) = crate::utils::adb().arg("shell").arg("pgrep -fc 'xperf-age[n]t'").output() else { return };
         others = String::from_utf8_lossy(&out.stdout).trim().parse::<u32>().unwrap_or(0);
         if others == 0 {
             break; // 自身已收尸且无他人
@@ -493,7 +507,7 @@ pub fn qnx_stop_stats(platform: &dyn crate::platform::Platform, interval_ms: u64
         "({{ sleep 1; echo root; sleep 1; echo 'slog2info -W | grep frame &'; sleep 3; }} | busybox telnet {})",
         ip
     );
-    let Ok(out) = Command::new("adb").arg("shell").arg(&probe).output() else { return };
+    let Ok(out) = crate::utils::adb().arg("shell").arg(&probe).output() else { return };
     let flowing = String::from_utf8_lossy(&out.stdout).matches("frame ").count();
     if flowing < 2 {
         return; // 链未在流（agent 退出钩子已清理 / 本就无链）：不写，死写入者撞停链会复活
@@ -503,7 +517,7 @@ pub fn qnx_stop_stats(platform: &dyn crate::platform::Platform, interval_ms: u64
         "({{ sleep 1; echo root; sleep 1; echo 'echo gpubusystats {} > /dev/kgsl-control'; sleep 2; }} | busybox telnet {})",
         period, ip
     );
-    let _ = Command::new("adb").arg("shell").arg(&kill).output();
+    let _ = crate::utils::adb().arg("shell").arg(&kill).output();
 }
 
 /// 断连恢复：事件流 EOF（adb 长连接断开 / agent 进程退出）后调用。
