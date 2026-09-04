@@ -23,6 +23,7 @@
 | 695946a | fix：清理确认改 tauri-plugin-dialog 原生对话框（webkit2gtk 的 JS confirm() 窗口标题是 "Javascript-taurixxx"） |
 | e0eaf7e | review: 前端 UI 修复 9 项——M1 #package 补 type=text（属性选择器不匹配无 type 输入框→白底不随主题）/ M2 recorded 阶段退出进度态（原冻结在 100%"录制中"）/ M3 录制时长残留 flex 包裹改 label / M4 进度条颜色主题变量化 / L1-L2 死 CSS+旧注释 / L3 NoProcess 不抹进度条 / L5 recording 文案 / L7 内联样式收口 .sidebar-row / 后端 export_csv 补 validate_package |
 | 57e84ba | review: UI 布局缺陷 6 项（逐项代码实证属实后修）——tab 内容区 3 处 inline flex 收口 .tab-content / #status flex-shrink 防窄窗截断 / 指标页 idleHint 空闲引导（开始后隐藏）/ 侧栏「深挖录制」「数据管理」分组标题 / 清理按钮幽灵样式降级（破坏性操作视觉区分）/ resize 50ms 硬编码收敛双 rAF |
+| e8f75c9 | feat：`--package` 自动启动与 UI 手动启动统一流程——后端 startup_args 命令（AppState 记录包名/间隔/flags，spawn_sampling 统一写入）+ 前端初始化回填（包名/间隔/勾选 toggleCharts 同步/idleHint 隐藏/状态文案带包名）；深挖按钮 .flex-fill 等分（「Perfetto 分析」长文案曾把 simpleperf 按钮挤出侧栏）；顺带修 2 个 clippy 警告 |
 | （docs） | CLAUDE.md（新代码规则 + simpleperf 章节 + 输出文件表）/ WORKSPACE / SESSION 更新 |
 
 ### 完成内容
