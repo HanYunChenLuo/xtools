@@ -608,11 +608,11 @@ listen('stack', (e) => {
     setStatus('调用栈已拉回，生成报告中…');
   } else if (stage === 'done') {
     document.getElementById('stackBtn').disabled = false;
-    setStatus('函数热点分析完成');
+    setStatus('Simpleperf 分析完成');
     switchTab('stack');
   } else if (stage === 'error') {
     document.getElementById('stackBtn').disabled = false;
-    setStatus('函数热点分析失败');
+    setStatus('Simpleperf 分析失败');
     switchTab('stack');
   }
   _diag('stack: ' + stage);
@@ -628,11 +628,11 @@ document.getElementById('stackBtn').addEventListener('click', async () => {
   try {
     await invoke('start_stack', { package, seconds });
     document.getElementById('stackBtn').disabled = true;
-    // 录制期间留在指标页观察实时曲线（采样与录制并行），完成/失败时自动切到函数热点页
-    setStatus('函数热点录制中: ' + package);
+    // 录制期间留在指标页观察实时曲线（采样与录制并行），完成/失败时自动切到 Simpleperf 分析页
+    setStatus('Simpleperf 分析录制中: ' + package);
     _diag('stackBtn: ' + package + ' ' + seconds + 's');
   } catch (err) {
-    setStatus('函数热点错误: ' + err);
+    setStatus('Simpleperf 错误: ' + err);
     _diag('stackBtn invoke ERROR: ' + JSON.stringify(err));
   }
 });
