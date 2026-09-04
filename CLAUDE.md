@@ -200,6 +200,7 @@ Platform trait + `adb devices -l` product 字段自动检测（HU_SS3/HU_SS2MAXF
 - **选择策略**（`pick_device`）：`--device` 显式（须在线）> 单台自动 > 多台报错（错误信息列设备清单）。CLI 在 main() 解析（冷启动/采样之前）；GUI `--package` 自动启动前做前置解析（多台未指定**确定性跳过**自动启动——避免与前端设备下拉自动选择的竞态；`--device` 无效同样跳过，不静默换台）
 - **GUI 侧栏设备下拉**：`list_devices`（带 `selected` 已生效项，前端不覆盖 `--device` 选择）+ `select_device`（校验在线后写全局）；页面加载先选设备再拉包列表（`list_packages` 依赖目标已选定）；切换即重选并刷新包列表；手动「开始监控」时 `spawn_sampling` 内兜底（未选择则单台自动、多台 emit `sampling-error` 事件给前端——同时构建/部署/启动失败也走该事件，前端置错误文案并复位按钮）
 - **动态检测（热插拔）**：`spawn_device_monitor` 线程每 3s 轮询 `adb devices -l`，与上次快照 diff（`diff_devices` 纯函数），变化时 emit `devices-changed {devices, selected, added, removed}` → 前端增量重建下拉（保持当前选择）；首轮只建快照不通知（首屏由 loadDevices 填充）；目标设备被移除不清后端 serial（断连重连逻辑仍指向它，插回即恢复采样），下拉占位"（已断开）"+ 状态提示；新设备接入状态提示可切换。**软件手段（kill-server/reconnect/wait-for-disconnect）制造不出 diff**——server 重启后枚举快于 3s 轮询窗且 serial 不变，验证须物理插拔
+- **默认窗口大小（7cb4b4b）**：`resize_default` 命令按屏幕逻辑尺寸动态计算（宽 72% clamp[1080,1600]、高 88% clamp[880,1280]，各留屏幕边距防超出；min 1080×720 + 侧栏 overflow 兜底），前端加载完成后调用——**坑：setup 阶段 webview 未就绪直接 `set_size` 会导致 webkit2gtk 渲染空白**（真机实测，窗口只有标题栏内容全灰），必须等前端 ready 再设；conf 固定尺寸 1400×1000 为检测失败兜底。侧栏指标勾选两列 grid + PIDs 列表限高 140px，默认窗口高度下侧栏免滚动全量显示
 - **平台检测**：`detect_platform_live` 按 serial 过滤设备行再 detect——**坑：过滤须补回表头**（`detect_platform` 按 `skip(1)` 跳表头，曾因表头被滤掉、SS3 行被当表头跳过而误判 Android，真机复现+单测锁定）
 - **重连**：`device_online` 只认目标设备（`adb -s X get-state` = "device"）——多台同连时其他设备在线不算"回来了"
 - **QNX 收尾**：`qnx_stop_stats` 的 pgrep 多会话保护/probe/停链均带 `-s`（语义不变，作用域收敛到目标设备）
