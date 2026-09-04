@@ -585,6 +585,8 @@ async fn export_csv(
     gpuproc: std::collections::HashMap<String, Vec<(f64, f64)>>,
 ) -> Result<String, String> {
     use std::io::Write;
+    // 包名拼入数据目录路径（/tmp/xperf/<pkg>/<ts>），须与 start_sampling 等同一校验
+    validate_package(&package)?;
     let dir = gui_data_root()
         .join(&package)
         .join(Local::now().format("%Y%m%d_%H%M%S").to_string());

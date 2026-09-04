@@ -50,7 +50,10 @@ body { font-family: -apple-system, "Segoe UI", "Noto Sans CJK SC", "PingFang SC"
 #sidebar { width: 280px; padding: 16px; background: var(--bg-card); color: var(--text); overflow-y: auto; overflow-x: hidden; }
 #sidebar h2 { margin-bottom: 16px; color: var(--accent); }
 #sidebar label { display: block; margin: 8px 0; font-size: 13px; }
-#sidebar input[type=text], #sidebar input[type=number] { width: 100%; padding: 4px; margin-top: 2px; background: var(--bg-input); color: var(--text); border: 1px solid var(--border); border-radius: 3px; }
+#sidebar input[type=text] { width: 100%; padding: 4px; margin-top: 2px; background: var(--bg-input); color: var(--text); border: 1px solid var(--border); border-radius: 3px; }
+/* 侧栏横向紧凑行（打点 / 分析按钮对）：小按钮宽度自适应，不被 #sidebar button 的 100% 拉伸 */
+.sidebar-row { display: flex; gap: 4px; margin: 4px 0; align-items: center; }
+.sidebar-row .small { width: auto; padding: 4px 8px; flex-shrink: 0; }
 .checkboxes { display: flex; flex-wrap: wrap; gap: 8px 12px; margin: 8px 0; }
 .checkboxes label { display: inline-flex; align-items: center; gap: 4px; font-size: 13px; white-space: nowrap; }
 .checkboxes input[type=checkbox] {
@@ -96,10 +99,12 @@ body { font-family: -apple-system, "Segoe UI", "Noto Sans CJK SC", "PingFang SC"
 #tabBar .tab { padding: 6px 16px; border: none; border-radius: 6px 6px 0 0; cursor: pointer; font-size: 13px; background: var(--bg-input); color: var(--text-mute); }
 #tabBar .tab.active { background: var(--bg-card); color: var(--accent); font-weight: 600; }
 #status { margin-left: auto; max-width: 50%; padding: 6px 10px; background: var(--bg-input); border-radius: 3px; font-size: 12px; text-align: center; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; position: relative; }
-/* 录制进度态：绿色填充按 --progress 比例铺开（0%–100%），文字压在填充上方 */
+/* 录制进度态：绿色填充按 --progress 比例铺开（0%–100%）；填色/文字用主题变量，
+   暗亮两套（dark: #a6e3a1 亮字 / light: #40a02b 白字）均满足对比度 */
 #status.progress {
   --progress: 0%;
-  background-image: linear-gradient(to right, #4caf50 var(--progress), transparent var(--progress));
+  background-image: linear-gradient(to right, var(--ok) var(--progress), transparent var(--progress));
+  color: var(--on-ok);
   font-weight: 600;
 }
 #themeBtn { margin-left: 8px; padding: 6px 12px; flex-shrink: 0; border: none; border-radius: 4px; cursor: pointer; font-size: 13px; background: var(--bg-btn); color: var(--text); }
@@ -126,6 +131,6 @@ body { font-family: -apple-system, "Segoe UI", "Noto Sans CJK SC", "PingFang SC"
 .trace-file-label { font-size: 12px; color: var(--text-mute); word-break: break-all; }
 .trace-report-box { flex: 1; min-height: 0; background: var(--bg-card); border-radius: 6px; padding: 10px 14px; overflow: auto; }
 .trace-report-box pre { white-space: pre-wrap; font-size: 12px; line-height: 1.5; margin: 0; color: var(--text); }
-/* 侧栏行内输入（打点标签 / Perfetto 秒数）：行内 flex，宽度收缩 */
+/* 侧栏行内输入（打点标签）：行内 flex，宽度收缩 */
 .inline-input { flex: 1; width: auto; padding: 4px; background: var(--bg-input); color: var(--text); border: 1px solid var(--border); border-radius: 3px; font-size: 12px; }
 
