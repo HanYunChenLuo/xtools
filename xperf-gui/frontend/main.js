@@ -273,10 +273,11 @@ window.addEventListener('error', (e) => {
 
 // PID 变化时刷新状态栏：PIDs 融入「监控中」文案（如「监控中: pkg（PID 4428）」），
 // 不单独占面板；多 PID 逗号分隔，进程重启换 PID 自动跟随。停止后不再刷新。
+// 已退出（stopped）的 PID 不展示——防止列表无限增长。
 function renderPidList() {
   if (!samplingRunning) return;
   const pkg = document.getElementById('package').value || '';
-  const pids = Object.keys(pidData);
+  const pids = Object.keys(pidData).filter(pid => !pidData[pid].stopped);
   setStatus(pids.length ? `监控中: ${pkg}（PID ${pids.join(', ')}）` : `监控中: ${pkg}`);
 }
 
@@ -853,7 +854,8 @@ async function loadDevices() {
       : (r.devices[0]?.serial || '');
     if (target) {
       sel.value = target;
-      if (target !== r.selected) await invoke('select_device', { serial: target });
+      // 仅当后端尚未选设备时才写（首次加载默认第一台）；已有选择（--device/用户切换）不覆盖
+      if (!r.selected) await invoke('select_device', { serial: target });
       _diag('device selected: ' + target);
     }
     return true;
@@ -898,8 +900,10 @@ listen('devices-changed', (e) => {
     sel.value = selected;
     setStatus('目标设备已断开: ' + selected + '（采样等待重连，插回自动恢复）');
   } else if (devices.length > 0) {
-    // 原选中项不在列表（如从未选择）且目标仍有效 → 对齐 selected
-    sel.value = selected && devices.some(d => d.serial === selected) ? selected : devices[0].serial;
+    // 原选中项不在列表且 selected 无效 → 选第一台并同步后端
+    const fallback = selected && devices.some(d => d.serial === selected) ? selected : devices[0].serial;
+    sel.value = fallback;
+    if (!selected) invoke('select_device', { serial: fallback }).catch(() => {});
   }
   if (removed.length > 0) {
     _diag('devices removed: ' + removed.join(','));

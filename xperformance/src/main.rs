@@ -846,13 +846,15 @@ async fn monitor_process_agent(
     if args.save_baseline || args.compare_baseline {
         let summary =
             build_session_summary(args, cold_start_ms, &pid_stats, &extra, restart_count);
-        if args.save_baseline {
+        // 无任何采集指标时跳过（避免保存全空基线/对比全空）
+        if summary.samples == 0 && summary.gpu_busy.is_none() {
+            println!("{}", "基线对比跳过：本次会话无任何采集数据（至少 --cpu/--memory/--fps/--gpu 之一）".yellow());
+        } else if args.save_baseline {
             match xperf_core::baseline::save(&package, &summary) {
                 Ok(p) => println!("基线已保存（覆盖旧基线）: {}", p.display()),
                 Err(e) => println!("{}", format!("基线保存失败: {}", e).yellow()),
             }
-        }
-        if args.compare_baseline {
+        } else if args.compare_baseline {
             match xperf_core::baseline::load(&package) {
                 Ok(base) => {
                     let report = xperf_core::baseline::compare(&base, &summary);
