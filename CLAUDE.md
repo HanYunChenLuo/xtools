@@ -176,9 +176,32 @@ Platform trait + `adb devices -l` product 字段自动检测（HU_SS3/HU_SS2MAXF
 ### C 类验证能力
 
 - `--threshold cpu>80,mem>500,fps<30,gpu>90`：实时告警（静止界面 fps=0 不触发低值规则）+ 退出验证报告（触发次数/极值/总结论）
-- `--cold-start .MainActivity`：am start -W 解析（30s 超时，status!=ok 报错）
+- `--cold-start .MainActivity`：am start -W 解析（30s 超时，status!=ok 报错）；测量结果（TotalTime ms）进基线汇总
 - `--stack N`：simpleperf 函数热点（详见下节）
+- `--save-baseline` / `--compare-baseline`：基线对比（详见下节）
 - 打点：CLI Unix socket `/tmp/xperf-marker.sock`（`echo 标签 | nc -U ...`，每连接线程+10s 读超时）或 GUI 按钮 → 图表竖线 + markers.csv
+
+### 基线对比模式（`--save-baseline`/`--compare-baseline`，xperf-core/src/baseline.rs，CLI 与 GUI 共用）
+
+「保存-对比」模式回答"改完有没有变差"：第一次运行 `--save-baseline` 把会话汇总存为该包基线，改动后再跑 `--compare-baseline` 出逐指标 diff 报告。CLI 与 GUI 数据互通（同一基线文件）。
+
+- **汇总口径**（`SessionSummary`，多 PID 样本全量合并）：CPU%（单核口径）、PSS（KB）、FPS（全部样本均值，静止 0 帧计入——两次同场景对比下口径公平）、Jank（总数，对比换算为**每分钟次数**，须时长 > 0）、GPU busy%、IO 读/写 KB/s、网络 RX/TX KB/s、进程重启次数（绝对差判定，不用百分比）、冷启动 TotalTime ms（`--cold-start` 测量时才有）。会话时长取全部时序（含 B 类设备级指标——GPU-only 会话也有时长）首/末样本跨度；CLI 长会话内存序列已抽稀时均值为均匀抽稀近似（CSV 全量在）
+- **判定口径**：变化须**同时**超过相对 ±10% 与指标绝对地板值才判回归/改善，否则持平（地板值抑制近零噪声：CPU 2pp / PSS 4MB / FPS 2 / Jank 0.5 次每分 / GPU 3pp / IO·网络 50KB/s / 冷启动 150ms；基线为 0 时退化为纯绝对差）；仅一侧采集的指标如实标「⊘ 单侧未采集」不硬判
+- **存放**：`~/.local/share/xperf/baselines/<pkg>.json`（XDG 数据目录，用户数据语义，`--clean-cache` **不**清理）；包名拼路径前校验（与包名校验同字符集）；保存即覆盖
+- **CLI**：两 flag 互斥；退出阶段在验证报告之后执行；对比报告落盘 `<ts>/baseline_report.txt`（与 CSV 同目录）；无采样 flag 时跳过并提示
+- **GUI**：侧栏「数据管理」区「保存基线/对比基线」两按钮（数据源 `collectSessionData()`，与导出 CSV 同一份前端序列）；报告展示在指标页峰值区的「基线对比」面板，新会话自动隐藏清空；后端命令 `save_baseline`/`compare_baseline`（build_summary_from_series 与 CLI 口径一致——restarts 为 None（GUI 路径未统计，如实单侧标注））
+- **真机基线（SS3 svm，2026-09-04）**：空闲态 20s×2 次，CPU 均值 30.3/29.8（持平）、PSS 462MB（持平）、FPS 29.7/30.0、Jank 5.98 次/分（持平）、GPU busy 15.3/15.4（持平）——svm 稳态噪声远小于判定闸门；篡改基线制造回归场景正确触发（⚠ 4 项 + 指标名列表）
+
+### 多设备 adb（utils 全局 `-s`，CLI `--device`/GUI 设备下拉）
+
+多台设备同连时 adb 不带 `-s` 全部报 `more than one device`——工具链整体失效（SS3 车机 + 手机双连实测触发，2026-09-04）。
+
+- **core 注入点**：`utils::TARGET_SERIAL` 全局 + `adb()` 构造器（16 处 adb 调用点统一收敛：agent/trace/simpleperf/coldstart）+ `run_adb_command` 自动在参数前注入 `-s`（mock 注入点之前，测试不受影响）
+- **选择策略**（`pick_device`）：`--device` 显式（须在线）> 单台自动 > 多台报错（错误信息列设备清单）。CLI 在 main() 解析（冷启动/采样之前）；GUI `--package` 自动启动前做前置解析（多台未指定**确定性跳过**自动启动——避免与前端设备下拉自动选择的竞态；`--device` 无效同样跳过，不静默换台）
+- **GUI 侧栏设备下拉**：`list_devices`（带 `selected` 已生效项，前端不覆盖 `--device` 选择）+ `select_device`（校验在线后写全局）；页面加载先选设备再拉包列表（`list_packages` 依赖目标已选定）；切换即重选并刷新包列表；手动「开始监控」时 `spawn_sampling` 内兜底（未选择则单台自动、多台 emit `sampling-error` 事件给前端——同时构建/部署/启动失败也走该事件，前端置错误文案并复位按钮）
+- **平台检测**：`detect_platform_live` 按 serial 过滤设备行再 detect——**坑：过滤须补回表头**（`detect_platform` 按 `skip(1)` 跳表头，曾因表头被滤掉、SS3 行被当表头跳过而误判 Android，真机复现+单测锁定）
+- **重连**：`device_online` 只认目标设备（`adb -s X get-state` = "device"）——多台同连时其他设备在线不算"回来了"
+- **QNX 收尾**：`qnx_stop_stats` 的 pgrep 多会话保护/probe/停链均带 `-s`（语义不变，作用域收敛到目标设备）
 
 ### perfetto 深挖模式（`--trace N`，xperf-core/src/trace.rs，CLI 与 GUI 共用）
 

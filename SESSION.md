@@ -7,6 +7,42 @@
 
 ---
 
+## 2026-09-04（四）下午二 — 基线对比 C-6 收官 + 多设备 adb 全局 `-s`（46bd161）
+
+**任务线**：WORKSPACE C 类最后一项（基线对比）+ 会话中途手机接入实测触发 E 节候补（多设备 adb 不带 `-s` 全链路失效），同会话两项落地。
+
+### Commits
+
+| commit | 内容 |
+|--------|------|
+| 46bd161 | feat：①基线对比——xperf-core/src/baseline.rs（SessionSummary 汇总 + SummaryBuilder + 保存/读取 + compare 报告，单测 11 个）+ CLI `--save-baseline`/`--compare-baseline`（互斥，报告落盘 `<ts>/baseline_report.txt`，--cold-start 结果进汇总）+ GUI 侧栏「保存基线/对比基线」按钮 + 峰值区基线对比面板（collectSessionData 与导出 CSV 同源）+ GUI 命令级测试 2 个。②多设备 adb——utils TARGET_SERIAL 全局 + adb() 构造器 + run_adb_command 自动注入 `-s`（16 处调用点收敛）+ parse/list/pick_device + CLI `--device/-d` + GUI 设备下拉（list_devices/select_device）+ `--package` 自动启动设备前置解析（多台未指定确定性跳过，消除与前端下拉的竞态；--device 无效不静默换台）+ sampling-error 事件（构建/部署/启动失败前端可见）+ detect_platform_live 按 serial 过滤（**修表头 bug**）+ device_online 只认目标设备。13 文件 +1396/-69 |
+
+### 完成内容
+
+- **基线判定口径（先设计后编码）**：变化须**同时**超过相对 ±10% 与指标绝对地板值才判回归/改善（地板值抑制近零噪声：CPU 2pp/PSS 4MB/FPS 2/Jank 0.5 次每分/GPU 3pp/IO·网络 50KB/s/冷启动 150ms）；基线为 0 退化为纯绝对差；仅一侧采集如实标「⊘ 单侧未采集」；Jank 按两侧各自时长换算为次/分钟（时长 0 不可算→单侧标注）；重启次数用绝对差不用百分比
+- **汇总口径**：多 PID 样本全量合并；时长取全部时序（含 GPU-only 的设备级指标）首末样本跨度——曾因只扫 pid_stats 致 GPU-only 会话时长 0，真机发现后修
+- **基线存放**：`~/.local/share/xperf/baselines/<pkg>.json`（XDG 数据目录，用户数据语义，--clean-cache 不清理）；包名拼路径前校验；CLI/GUI 同一文件互通（GUI 保存的基线 CLI 可对比，反之亦然）
+- **真机验证（SS3 svm，`--device` 全程指定）**：保存（20s，CPU 30.3 均值/PSS 462MB/FPS 29.7/Jank 5.98 次分/GPU 15.3%）→ 对比（同场景二次运行，持平 9 项 + 单侧 5 项，GPU 15.4 vs 15.3 不误报）→ 篡改基线制造回归（CPU 基线压到 10% → ⚠ 回归 4 项 + 指标名列表）→ 无基线包（"未找到基线（先用 --save-baseline 保存一次）"）→ 篡改后真数据重存恢复
+- **多设备真机验证（SS3 + Redmi 1280da60 双连）**：CLI 不指定 → 报错列设备清单；`--device 6eb792dfb0f` → 平台 SS3 + QNX GPU 通道正常（15.3% busy 同单设备场景）；`--device 1280da60` → Android 平台 + com.miui.home 采样正常（pid 7424）；GUI `--package --device` 自动启动全链路（平台 SS3、CPU/Mem/GPU 事件流）；单台连接自动选择；`--device deadbeef` → "指定设备不在线"跳过自动启动
+- **验证门槛**：96 测试全绿（+18：baseline 11 + platform 过滤 1 + utils 设备 2 + GUI 基线命令级/汇总 3 + 既有回归）、clippy 零警告、cargo doc 零 warning（默认 lint 集 + 3 crate missing_docs）
+
+### 关键结论与基线
+
+- **detect_platform 表头坑（真机发现）**：按 serial 过滤 `adb devices -l` 行时必须补回表头——`detect_platform` 用 `skip(1)` 跳表头，滤掉表头后 SS3 行被当表头跳过、平台误判 Android（QNX GPU 通道跟着选错）；单测 `test_filter_device_line_picks_target` 锁定
+- **`adb -s X devices -l` 仍列全部设备**（-s 对 devices 无过滤作用），平台检测必须自己按 serial 行过滤
+- GUI 自动启动与前端设备下拉存在天然竞态（前端 loadDevices 会写全局 serial）——解法是**启动前在 main() 前置解析**（确定性），线程内兜底只服务手动开始路径
+- svm 稳态噪声远小于判定闸门（CPU ±0.5pp / PSS ±0.1MB / GPU ±0.1pp），判定参数有效
+- 正确包名是 `com.lixiang.car.x.svm`（不是 `com.li.xiang.car.x.svm`——验证中打错包名致 CPU 零样本，GPU 设备级指标照常流导致一度误判；目标进程不在线时 Noproc 静默，注意区分）
+
+### 遗留问题
+
+- GUI 多台未指定 `--device` 的自动启动跳过路径未双机复现（验证时手机恰断开，只剩 SS3 单台走了自动路径）；行为由 pick_device 单测 + CLI 同逻辑真机覆盖
+- GUI 基线按钮/设备下拉的点击渲染为人工目验项（后端命令级测试已锁定链路）
+- GUI 侧基线对比不含 restarts/cold-start（前端序列无这两路数据，如实单侧标注）
+- 手机（1280da60）为标准 Android 平台——kgsl/thermalservice 真数据路径未完整采样验证（仅 CPU/平台检测），后续可在手机上验证 Android 平台 GPU/温度通道
+
+---
+
 ## 2026-09-04（四） — simpleperf 函数热点 --stack N：C 类"CPU 高在哪个函数"落地（CLI + GUI）
 
 **任务线**：WORKSPACE C 类候选项——simpleperf 调用栈采样；同时确立新工作流规则（cargo doc 门槛写入 CLAUDE.md）。
