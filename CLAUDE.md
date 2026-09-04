@@ -159,6 +159,8 @@ CLI 退出图表用通用 helper `generate_multi_line_chart`（xperformance/util
 - **三视图报告**（设备端 `simpleperf report`，须在 pull 前跑——`.data` 还在设备上；单个视图失败不中断，错误嵌入报告文本）：线程 CPU 分布（`--sort comm,pid,tid`）/ 函数热点 self（`--sort symbol,dso`，**"CPU 高在哪个函数"的直接回答**）/ 函数热点 children（`--children --sort symbol,dso`，调用链累计热点路径）；均 `--percent-limit 1` 去噪
 - **解析**：report 为 header 定宽对齐文本（Symbol 列按最长符号名 padding，可达数百列宽），行解析按「首/尾 token 锚定」而非列位置切片（线程名/符号名可含空格，dso 恒无空格）；报告文件落盘前空格压缩（实测 4.9MB → 566KB）
 - **产物**：`log/<pkg>/<ts>/stack/{stack_<ts>.data, simpleperf_report.txt}`；`.data` 可 `adb push` 回设备换参数复跑 report（如 `--full-callgraph`）
+- **浏览器火焰图**（`open_stack_in_browser`，GUI「函数热点」tab 按钮）：AOSP 官方 `report_html.py` 把 `.data` 渲染成单文件 HTML（火焰图/Chart/Sample Table，3.3MB→7.8MB ~1.2s）后 xdg-open。脚本集首次从 gitiles blob `?format=TEXT` 逐文件引导下载（`~/.cache/xperf/simpleperf_scripts/`，~10MB 后离线；**+archive 不支持多级子路径（实测 INVALID_ARGUMENT）、整仓 tarball 80MB 太重**故逐文件；含 `report_html.js` 内联 JS 与 `etm_types.py` 两个易漏依赖）；依赖闭包：report_html.py/js + simpleperf_report_lib/utils + etm_types + `bin/<os>/<arch>/libsimpleperf_report.so`（linux-x86_64 `.so` / darwin-x86_64 `.dylib`，上游仅这两种主机预编译库）。失败清半截 HTML（防 reuse 误判）；HTML 新于 `.data` 复用不重渲染；需 python3
+- **录制进度**：core `record` 带 `progress: Option<&dyn Fn(u64)>` 回调（等待循环每到整秒触发 elapsed 1..=N）；GUI 传闭包 emit `stage:'progress'`（message 如 `调用栈录制中 3/8s`），前端 progress 分支只更新 status 不覆盖报告文本；CLI 传 None（打印会刷屏）
 - **实测基线（SS3，simpleperf 1.build.47）**：svm 空闲态 8s ≈ 8500 样本 / 0 丢失 / 3.3MB（样本率随 CPU 活动浮动）；设备端应用 so 多为 stripped（函数名显示 `libxxx.so[+偏移]`，偏移可用未剥离 so 离线符号化），系统库与 `[kernel.kallsyms]` 有符号；非 root 设备上非 debuggable 应用被 run-as 路径拒绝（错误由 simpleperf 透传）
 
 ### 平台抽象（xperf-core/src/platform/）
@@ -180,7 +182,7 @@ Platform trait + `adb devices -l` product 字段自动检测（HU_SS3/HU_SS2MAXF
 
 ### perfetto 深挖模式（`--trace N`，xperf-core/src/trace.rs，CLI 与 GUI 共用）
 
-「录制-分析」模式，与实时采样互补：采样回答"什么时候高"，trace 回答"为什么高"。CLI 侧可与采样指标并行（`--cpu --trace 10`：后台线程录制 + 采样限时同窗口，到点自动结束）或单独使用（无指标 flag 时只录 trace）；GUI 侧深挖按钮与采样会话并行（采样不限时，窗口对照靠时间戳）。core 模块不打印不建目录：输出目录由调用方传入，报告以文本返回（CLI println / GUI 走 Tauri `trace` 事件 `{stage: recording|recorded|done|error, message}`，done 的 message 即完整报告）。
+「录制-分析」模式，与实时采样互补：采样回答"什么时候高"，trace 回答"为什么高"。CLI 侧可与采样指标并行（`--cpu --trace 10`：后台线程录制 + 采样限时同窗口，到点自动结束）或单独使用（无指标 flag 时只录 trace）；GUI 侧深挖按钮与采样会话并行（采样不限时，窗口对照靠时间戳）。core 模块不打印不建目录：输出目录由调用方传入，报告以文本返回（CLI println / GUI 走 Tauri `trace` 事件 `{stage: recording|progress|recorded|done|error, message}`——progress 为每秒录制进度（elapsed/Ns，core `record` 的 `progress` 回调），done 的 message 即完整报告）。
 
 - **录制链路**：`adb shell perfetto -c - --txt -o /data/misc/perfetto-traces/xperf_<ts>.pftrace`，配置经 stdin 喂入（text proto，**对齐团队 Performance_Tools general_debug.pbtxt 口径**：ftrace 全事件 sched/power/gpu_mem/ext4/f2fs/kmem/mmc + atrace 17 类目 + `atrace_apps "*"` + android.log/packages_list/gpu.memory/process_stats(scan_all_on_start) + frametimeline；buffer0 128MB ftrace + buffer1 32MB stats/log，`write_into_file: true` + 2s 刷盘长录制内存有界）；10s ≈ 46MB（~4.6MB/s，600s ≈ 2.8GB）。不存在的 ftrace 事件（memory_bus/\*、SS3 的 cpu_frequency）perfetto 静默忽略。录完 adb pull 到 `log/<pkg>/<ts>/trace/` 并清理设备端文件。SS3 实测：atrace slice 17 万/10s（surfaceflinger 等系统进程有 app 层轨道）、log 3425 条、cpuidle counter 生效、cpufreq 仍无（GVM）。
 - **trace_processor 定位链**：`~/.local/share/perfetto/prebuilts/trace_processor_shell*`（get.perfetto.dev 官方脚本缓存）→ PATH → `/tmp/trace_processor`（自举脚本）→ 均无则从 get.perfetto.dev 下载引导。分析失败不致命（trace 文件已保存，提示 ui.perfetto.dev 手动分析）。
@@ -236,6 +238,7 @@ Platform trait + `adb devices -l` product 字段自动检测（HU_SS3/HU_SS2MAXF
 | B 类图表（freq 每核/temp 每传感器/io 每 PID/net/gpu） | 退出时对应序列 > 1 点 | `log/<pkg>/<ts>/{freq,thermal,io,net,gpu}/` |
 | perfetto 深挖（--trace N） | 录制完成即拉回；分析随即落盘 | `log/<pkg>/<ts>/trace/{*.pftrace, trace_analysis.txt, trace_queries.sql}` |
 | simpleperf 函数热点（--stack N） | 录制完成即在设备端生成三视图并拉回 | `log/<pkg>/<ts>/stack/{*.data, simpleperf_report.txt}` |
+| simpleperf 浏览器火焰图（GUI 按钮） | 首次点击时渲染生成（复用不重渲染） | `log/<pkg>/<ts>/stack/*.html`（同目录同名） |
 
 - 内存中的时序序列只服务退出图表：超过 2×30k 点时每 2 取 1 原地抽稀（`CHART_SERIES_CAP`，保完整时间范围、分辨率随运行时长自适应降级）；CSV 始终全量。
 - `CpuTimeSeriesData.top_threads` 已无读者，CLI agent 路径不再写入（线程明细走 thread_time_series + 流式 CSV）。
