@@ -48,6 +48,7 @@
       <input id="markerLabel" type="text" placeholder="打点标签" class="inline-input" />
       <button id="markerBtn" class="small">打点</button>
     </div>
+    <h3>深挖录制</h3>
     <label>录制时长:
       <select id="recordSeconds" title="录制时长（秒）：Perfetto / simpleperf 分析共用">
         <option value="5">5 秒</option>
@@ -63,8 +64,9 @@
       <button id="traceBtn" class="small">Perfetto 分析</button>
       <button id="stackBtn" class="small">simpleperf 分析</button>
     </div>
+    <h3>数据管理</h3>
     <button id="exportBtn" class="small">导出 CSV</button>
-    <button id="cleanBtn" class="small">清理缓存与数据</button>
+    <button id="cleanBtn" class="small clean-btn">清理缓存与数据</button>
     <h3>PIDs</h3>
     <ul id="pidList"></ul>
   </div>
@@ -76,7 +78,8 @@
       <div id="status">未开始</div>
       <button id="themeBtn" title="切换暗色/亮色主题">☾ 亮色</button>
     </div>
-    <div id="perfContent" style="display:flex;flex-direction:column;gap:12px;flex:1;min-height:0">
+    <div id="perfContent" class="tab-content">
+    <div id="idleHint" class="idle-hint">填包名 → 勾指标 → 「开始监控」。采集数据落 `/tmp/xperf/<包名>/`；深挖用「Perfetto 分析」/「simpleperf 分析」。</div>
     <div id="cpuChartBox" class="chart"><canvas id="cpuChart"></canvas></div>
     <div id="memChartBox" class="chart"><canvas id="memChart"></canvas></div>
     <div id="fpsChartBox" class="chart hidden"><canvas id="fpsChart"></canvas></div>
@@ -101,7 +104,7 @@
       </div>
     </div>
     </div>
-    <div id="traceContent" class="hidden" style="flex:1;min-height:0;display:flex;flex-direction:column;gap:8px">
+    <div id="traceContent" class="tab-content hidden">
       <div class="trace-toolbar">
         <button id="openPerfBtn" class="small" disabled>在浏览器打开 Perfetto UI</button>
         <span id="traceFileLabel" class="trace-file-label"></span>
@@ -110,7 +113,7 @@
         <pre id="traceReport"></pre>
       </div>
     </div>
-    <div id="stackContent" class="hidden" style="flex:1;min-height:0;display:flex;flex-direction:column;gap:8px">
+    <div id="stackContent" class="tab-content hidden">
       <div class="trace-toolbar">
         <button id="openStackBtn" class="small" disabled>在浏览器打开火焰图</button>
         <span id="stackFileLabel" class="trace-file-label"></span>
