@@ -119,6 +119,10 @@ pub struct AdbDevice {
     pub product: String,
     /// model 字段（展示用；缺失为空）
     pub model: String,
+    /// Android 版本（`ro.build.version.release`，如 `"14"`；`parse_adb_devices`
+    /// 纯解析不填，恒为空串，`list_adb_devices` 逐台补齐；取失败为 `?`）。
+    /// 采集方式与 Android 版本相关（如 BLAST 合成层是 12+ 特性），供选路参考。
+    pub android_version: String,
 }
 
 /// 解析 `adb devices -l` 输出为在线设备列表（跳过 `offline`/`unauthorized` 行）。
@@ -144,15 +148,27 @@ pub fn parse_adb_devices(output: &str) -> Vec<AdbDevice> {
             serial: serial.to_string(),
             product: field("product"),
             model: field("model"),
+            android_version: String::new(),
         });
     }
     out
 }
 
-/// 拉取在线设备列表（`adb devices -l`；`-s` 对 `devices` 子命令无效，恒列全部）
+/// 拉取在线设备列表（`adb devices -l`；`-s` 对 `devices` 子命令无效，恒列全部），
+/// 并逐台 `getprop ro.build.version.release` 补 Android 版本（采集方式与版本相关，
+/// 如 BLAST 合成层是 12+ 特性；取失败标 `?`）
 pub fn list_adb_devices() -> Result<Vec<AdbDevice>> {
     let out = run_command("adb", &["devices", "-l"]).context("执行 adb devices -l 失败")?;
-    Ok(parse_adb_devices(&out.stdout))
+    let mut devices = parse_adb_devices(&out.stdout);
+    for d in &mut devices {
+        let ver = run_command("adb", &["-s", &d.serial, "shell", "getprop", "ro.build.version.release"])
+            .ok()
+            .map(|o| o.stdout.trim().to_string())
+            .filter(|v| !v.is_empty())
+            .unwrap_or_else(|| "?".to_string());
+        d.android_version = ver;
+    }
+    Ok(devices)
 }
 
 /// 设备选择策略：`preferred`（须在在线列表中）> 单台自动 > 多台报错（错误信息带设备清单）。
@@ -170,7 +186,7 @@ pub fn pick_device(preferred: Option<&str>, devices: &[AdbDevice]) -> Result<Adb
         1 => Ok(devices[0].clone()),
         _ => anyhow::bail!(
             "多台设备连接，请用 --device <serial> 指定（GUI 在侧栏设备下拉选择）：\n  {}",
-            devices.iter().map(|d| format!("{}（model: {}）", d.serial, d.model)).collect::<Vec<_>>().join("\n  ")
+            devices.iter().map(|d| format!("{}（model: {}，Android {}）", d.serial, d.model, d.android_version)).collect::<Vec<_>>().join("\n  ")
         ),
     }
 }
@@ -292,7 +308,7 @@ mod tests {
         assert_eq!(devices.len(), 2); // offline 行跳过
         assert_eq!(
             devices[0],
-            AdbDevice { serial: "1280da60".into(), product: "dada".into(), model: "24129PN74C".into() }
+            AdbDevice { serial: "1280da60".into(), product: "dada".into(), model: "24129PN74C".into(), android_version: String::new() }
         );
         assert_eq!(devices[1].serial, "6eb792dfb0f");
         assert_eq!(devices[1].product, "HU_SS3");
@@ -323,7 +339,7 @@ mod tests {
     // ---- 热插拔 diff ----
 
     fn dev(serial: &str) -> AdbDevice {
-        AdbDevice { serial: serial.into(), product: String::new(), model: String::new() }
+        AdbDevice { serial: serial.into(), product: String::new(), model: String::new(), android_version: String::new() }
     }
 
     #[test]

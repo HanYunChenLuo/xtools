@@ -108,16 +108,26 @@ fn parse_list_layers(list: &str, package: &str) -> Vec<String> {
     layers
 }
 
+/// 图层发现：ownerPID 归属匹配 ∪ `--list` 包名匹配（并集去重）。
+///
+/// 不能 ownerPID 非空就跳过兜底：SS3 实测 ownerPID 只拿到 Activity View 层
+/// （静止无新帧），真正的渲染层 `SurfaceView[...](BLAST)#0`（Android 12+
+/// BLAST 合成，app 直提 buffer）漏掉 → FPS 恒 0；包名匹配能把 BLAST 层补进。
+/// 无 buffer 的辅助层（Background for/Bounds for/ActivityRecord…）并入无害：
+/// 空缓冲层不建帧基线、不发事件（sample_round 的 None 基线路径）。
 fn sf_discover_layers(pid: u32, package: &str) -> Vec<String> {
-    let by_owner = dumpsys(&["SurfaceFlinger"])
+    let mut layers = dumpsys(&["SurfaceFlinger"])
         .map(|s| parse_owned_buffer_layers(&s, pid))
         .unwrap_or_default();
-    if !by_owner.is_empty() {
-        return by_owner;
-    }
-    dumpsys(&["SurfaceFlinger", "--list"])
+    let by_name = dumpsys(&["SurfaceFlinger", "--list"])
         .map(|s| parse_list_layers(&s, package))
-        .unwrap_or_default()
+        .unwrap_or_default();
+    for name in by_name {
+        if !layers.contains(&name) {
+            layers.push(name);
+        }
+    }
+    layers
 }
 
 impl FpsState {

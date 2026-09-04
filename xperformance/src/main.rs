@@ -114,7 +114,13 @@ fn select_device(device: Option<&str>) -> Result<()> {
     let devices = xperf_core::list_adb_devices()?;
     let picked = xperf_core::pick_device(device, &devices)?;
     xperf_core::set_target_serial(Some(picked.serial.clone()));
-    println!("目标设备: {}（model: {}，在线 {} 台）", picked.serial, picked.model, devices.len());
+    println!(
+        "目标设备: {}（model: {}，Android {}，在线 {} 台）",
+        picked.serial,
+        picked.model,
+        picked.android_version,
+        devices.len()
+    );
     Ok(())
 }
 

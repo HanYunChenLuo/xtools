@@ -574,7 +574,7 @@ fn is_running(state: State<'_, AppState>) -> Result<bool, String> {
 }
 
 /// 在线设备清单与当前选择（侧栏设备下拉用）：
-/// `{devices: [{serial, model}], selected}`（`selected` = 已生效的 `-s` 目标，
+/// `{devices: [{serial, model, version}], selected}`（`selected` = 已生效的 `-s` 目标，
 /// `--device` 自动启动或下拉切换后非空；前端据此初始化选中项，不覆盖已有选择）
 #[tauri::command]
 fn list_devices() -> Result<serde_json::Value, String> {
@@ -582,7 +582,7 @@ fn list_devices() -> Result<serde_json::Value, String> {
     Ok(serde_json::json!({
         "devices": devices
             .into_iter()
-            .map(|d| serde_json::json!({ "serial": d.serial, "model": d.model }))
+            .map(|d| serde_json::json!({ "serial": d.serial, "model": d.model, "version": d.android_version }))
             .collect::<Vec<_>>(),
         "selected": xperf_core::target_serial(),
     }))
@@ -630,7 +630,7 @@ fn spawn_device_monitor(app: tauri::AppHandle) {
                 "devices-changed",
                 serde_json::json!({
                     "devices": devices.iter().map(|d| serde_json::json!({
-                        "serial": d.serial, "model": d.model,
+                        "serial": d.serial, "model": d.model, "version": d.android_version,
                     })).collect::<Vec<_>>(),
                     "selected": xperf_core::target_serial(),
                     "added": added,
@@ -1005,6 +1005,11 @@ fn resize_default(app: tauri::AppHandle) -> Result<(), String> {
 }
 
 fn main() {
+    // webkit2gtk 的 DMABUF 渲染路径在本机间歇性空白（窗口仅标题栏、内容全灰，
+    // 浏览器等 GPU 重负载应用占用时触发，2026-09-04 实测连续复现）；
+    // 进程内禁用 DMABUF renderer 实测恢复。须在任何 webview 初始化前设置，
+    // 故放在 main 最开头（此时单线程，set_var 安全）。
+    std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
     // 支持命令行自动启动：xperf-gui --package <pkg> [--interval 1000] [--cpu] [--memory] [--fps] [--freq] [--io] [--net] [--gpu] [--thermal] [--trace N] [--stack N]
     // （便于脚本化/验证；不传参数则手动在前端操作）
     let args: Vec<String> = std::env::args().collect();
