@@ -51,9 +51,11 @@ body { font-family: -apple-system, "Segoe UI", "Noto Sans CJK SC", "PingFang SC"
 #sidebar h2 { margin-bottom: 16px; color: var(--accent); }
 #sidebar label { display: block; margin: 8px 0; font-size: 13px; }
 #sidebar input[type=text] { width: 100%; padding: 4px; margin-top: 2px; background: var(--bg-input); color: var(--text); border: 1px solid var(--border); border-radius: 3px; }
-/* 侧栏横向紧凑行（打点 / 分析按钮对）：小按钮宽度自适应，不被 #sidebar button 的 100% 拉伸 */
+/* 侧栏横向紧凑行（打点 / 分析按钮对）：小按钮宽度自适应，不被 #sidebar button 的 100% 拉伸。
+   深挖按钮行两按钮等分（flex:1）：长文案（「Perfetto 分析」）不会把另一按钮挤出容器 */
 .sidebar-row { display: flex; gap: 4px; margin: 4px 0; align-items: center; }
 .sidebar-row .small { width: auto; padding: 4px 8px; flex-shrink: 0; }
+.sidebar-row .small.flex-fill { flex: 1; }
 .checkboxes { display: flex; flex-wrap: wrap; gap: 8px 12px; margin: 8px 0; }
 .checkboxes label { display: inline-flex; align-items: center; gap: 4px; font-size: 13px; white-space: nowrap; }
 .checkboxes input[type=checkbox] {

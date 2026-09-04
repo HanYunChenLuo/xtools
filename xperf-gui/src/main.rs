@@ -124,6 +124,11 @@ fn map_event(
 /// 采样在设备端 agent 进行，本线程只阻塞读事件流并转发给前端。
 fn spawn_sampling(app: tauri::AppHandle, package: String, interval: u64, flags: MetricFlags, running: Arc<Mutex<bool>>) {
     eprintln!("[sampling] 启动: package={} interval={} flags={:?}", package, interval, flags);
+    // 记录当前采样包名与启动参数（startup_args 回查给前端回填输入框/勾选）
+    if let Some(state) = app.try_state::<AppState>() {
+        *state.package.lock().unwrap() = package.clone();
+        *state.startup_extra.lock().unwrap() = Some((interval, flags));
+    }
     std::thread::spawn(move || {
         let platform = xperf_core::detect_platform_live();
         eprintln!("[sampling] 平台: {} ({})", platform.name(), platform.description());
@@ -228,6 +233,10 @@ struct AppState {
     trace_running: Arc<Mutex<bool>>,
     /// 函数热点录制进行中（与采样/深挖互不干扰，可并行）
     stack_running: Arc<Mutex<bool>>,
+    /// 当前采样包名（`--package` 自动启动与手动开始均写入；`startup_args` 回查用）
+    package: Mutex<String>,
+    /// 采样启动参数（间隔 + 指标 flags，与 `package` 同一写入点；None = 非本进程启动）
+    startup_extra: Mutex<Option<(u64, xperf_core::MetricFlags)>>,
 }
 
 /// 包名校验：防路径遍历（包名会拼入日志目录路径）
@@ -541,6 +550,33 @@ fn is_running(state: State<'_, AppState>) -> Result<bool, String> {
     Ok(*state.running.lock().map_err(|e| e.to_string())?)
 }
 
+/// 启动参数回查（`--package` 等命令行自动启动时前端回填输入框用）：
+/// 返回 `{package, interval, flags}`（运行中才有值；`--interval` 与指标
+/// flag 来自启动线程的同一来源，保证与实际采样一致）。前端据此把 UI 状态
+/// （包名/间隔/勾选/idleHint/按钮）同步成与手动「开始监控」一致的效果。
+#[tauri::command]
+fn startup_args(
+    state: State<'_, AppState>,
+) -> Result<Option<serde_json::Value>, String> {
+    let running = *state.running.lock().map_err(|e| e.to_string())?;
+    if !running {
+        return Ok(None);
+    }
+    let package = state.package.lock().map_err(|e| e.to_string())?.clone();
+    let extra = *state.startup_extra.lock().map_err(|e| e.to_string())?;
+    let Some((interval, flags)) = extra else { return Ok(None) };
+    // MetricFlags 未派生 Serialize（core 协议类型，避免 serde 依赖），手动展开
+    Ok(Some(serde_json::json!({
+        "package": package,
+        "interval": interval,
+        "flags": {
+            "cpu": flags.cpu, "memory": flags.memory, "fps": flags.fps,
+            "freq": flags.freq, "thermal": flags.thermal, "gpu": flags.gpu,
+            "io": flags.io, "net": flags.net,
+        }
+    })))
+}
+
 /// IO 导出行：(ms, r, w, dr, dw) KB/s
 type IoExportPoints = Vec<(f64, f64, f64, f64, f64)>;
 /// GPU 显存导出行：(ms, 进程 MB, 整机 MB)
@@ -756,6 +792,8 @@ fn main() {
             running: Arc::new(Mutex::new(false)),
             trace_running: Arc::new(Mutex::new(false)),
             stack_running: Arc::new(Mutex::new(false)),
+            package: Mutex::new(String::new()),
+            startup_extra: Mutex::new(None),
         })
         .setup(move |app| {
             if let Some(package) = auto_package.clone() {
@@ -813,6 +851,7 @@ fn main() {
             clean_cache,
             diag_log,
             list_packages,
+            startup_args,
             is_running,
             add_marker,
             export_csv
