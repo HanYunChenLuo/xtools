@@ -893,7 +893,6 @@ mod tests {
     #[test]
     #[ignore = "真实链路：需要 log/ 下有 .data 且有桌面环境（会弹浏览器）"]
     fn test_open_stack_in_browser_real() {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
         // 找 /tmp/xperf/<pkg>/<会话时间戳>/stack/ 下最新的 .data（数据根见 data_root）
         let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
         let stack_root = std::env::temp_dir().join("xperf");

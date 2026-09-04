@@ -857,11 +857,27 @@ document.getElementById('refreshPkgs').addEventListener('click', loadPackages);
 loadPackages();
 
 // ---- 初始化同步按钮状态（自动启动时开始按钮应禁用）----
-invoke('is_running').then((running) => {
-  if (running) {
+// --package 自动启动与手动「开始监控」走同一流程：回填包名/间隔/勾选、
+// 隐藏 idle 引导、按钮状态与状态文案一致
+invoke('startup_args').then((args) => {
+  if (args) {
     samplingRunning = true;
+    document.getElementById('package').value = args.package;
+    if (args.interval) document.getElementById('interval').value = String(args.interval);
+    if (args.flags) {
+      const flagToBox = {
+        cpu: 'cpu', memory: 'memory', fps: 'fps', freq: 'freq',
+        thermal: 'thermal', gpu: 'gpu', io: 'io', net: 'net',
+      };
+      for (const [f, id] of Object.entries(flagToBox)) {
+        if (args.flags[f]) document.getElementById(id).checked = true;
+      }
+      toggleCharts();
+      updateEffectiveRates();
+    }
+    document.getElementById('idleHint').classList.add('hidden');
     document.getElementById('startBtn').disabled = true;
     document.getElementById('stopBtn').disabled = false;
-    setStatus('监控中');
+    setStatus('监控中: ' + args.package);
   }
 }).catch(() => {});
