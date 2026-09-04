@@ -50,6 +50,10 @@ body { font-family: -apple-system, "Segoe UI", "Noto Sans CJK SC", "PingFang SC"
 #sidebar { width: 280px; padding: 16px; background: var(--bg-card); color: var(--text); overflow-y: auto; overflow-x: hidden; }
 #sidebar h2 { margin-bottom: 16px; color: var(--accent); }
 #sidebar label { display: block; margin: 8px 0; font-size: 13px; }
+/* 指标勾选两列排布：8 项侧栏纵向空间省一半，默认窗口高度下侧栏免滚动全量可见 */
+.checkboxes { display: grid; grid-template-columns: 1fr 1fr; gap: 2px 8px; margin: 4px 0; }
+.checkboxes label { display: flex; align-items: center; gap: 6px; margin: 0; }
+#sidebar ul { max-height: 140px; overflow-y: auto; font-size: 12px; color: var(--text-dim); list-style: none; padding: 0; margin: 4px 0 0; }
 #sidebar input[type=text] { width: 100%; padding: 4px; margin-top: 2px; background: var(--bg-input); color: var(--text); border: 1px solid var(--border); border-radius: 3px; }
 /* 侧栏横向紧凑行（打点 / 分析按钮对）：小按钮宽度自适应，不被 #sidebar button 的 100% 拉伸。
    深挖按钮行两按钮等分（flex:1）：长文案（「Perfetto 分析」）不会把另一按钮挤出容器 */
