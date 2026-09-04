@@ -507,6 +507,64 @@ pub fn open_stack_in_browser(data_path: &Path) -> Result<String> {
     })
 }
 
+// ==================== 缓存清理 ====================
+
+/// 缓存清理结果（各目录不存在视为 0，不报错）
+pub struct CleanReport {
+    /// 清掉的字节数
+    pub bytes: u64,
+    /// 清掉的文件数
+    pub files: u64,
+}
+
+/// 删除目录并统计（不存在静默返回 0；删除中目录被并发重建的部分忽略）
+fn remove_dir_counted(path: &Path) -> (u64, u64) {
+    if !path.is_dir() {
+        return (0, 0);
+    }
+    let (mut bytes, mut files) = (0u64, 0u64);
+    // 先统计再删（目录树小：UI 镜像 ~20 文件、simpleperf 脚本 6 个）
+    fn count_dir(p: &Path, bytes: &mut u64, files: &mut u64) {
+        for e in std::fs::read_dir(p).into_iter().flatten().flatten() {
+            let meta = match e.metadata() {
+                Ok(m) => m,
+                Err(_) => continue,
+            };
+            if meta.is_dir() {
+                count_dir(&e.path(), bytes, files);
+            } else {
+                *bytes += meta.len();
+                *files += 1;
+            }
+        }
+    }
+    count_dir(path, &mut bytes, &mut files);
+    let _ = std::fs::remove_dir_all(path);
+    (bytes, files)
+}
+
+/// 清理全部缓存与采集数据：`~/.cache/xperf`（perfetto UI 镜像 + simpleperf 脚本集，
+/// 首次使用会重新引导下载）+ `/tmp/xperf`（采集数据目录，含 CSV/图表/trace/调用栈）。
+/// trace_processor 官方缓存 `~/.local/share/perfetto` **不在清理范围**（属
+/// get.perfetto.dev 官方工具缓存，与 perfetto UI 镜像不同源）。
+/// 正在采样/录制时调用是安全的：文件被删后流式写入方 create/append 会按需重建，
+/// 但当前会话的 CSV 追加与图表生成可能丢——建议空闲时清。
+pub fn clean_all_caches() -> Result<CleanReport> {
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_default();
+    let mut total = CleanReport { bytes: 0, files: 0 };
+    for dir in [
+        home.join(".cache").join("xperf"),
+        std::env::temp_dir().join("xperf"),
+    ] {
+        let (b, f) = remove_dir_counted(&dir);
+        total.bytes += b;
+        total.files += f;
+    }
+    Ok(total)
+}
+
 // ==================== 报告解析与渲染 ====================
 
 /// 单线程 CPU 开销（线程视图行：`--sort comm,pid,tid`，值为 self 开销占比）
@@ -836,9 +894,9 @@ mod tests {
     #[ignore = "真实链路：需要 log/ 下有 .data 且有桌面环境（会弹浏览器）"]
     fn test_open_stack_in_browser_real() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
-        // 找 log/<pkg>/<会话时间戳>/stack/ 下最新的 .data
+        // 找 /tmp/xperf/<pkg>/<会话时间戳>/stack/ 下最新的 .data（数据根见 data_root）
         let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
-        let stack_root = root.join("log");
+        let stack_root = std::env::temp_dir().join("xperf");
         if let Ok(rd) = std::fs::read_dir(&stack_root) {
             for pkg in rd.flatten() {
                 // 每个包名下是多个会话时间戳目录，每个会话里才有 stack/

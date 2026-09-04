@@ -29,12 +29,18 @@ pub fn validate_package_name(pkg: &str) -> Result<()> {
 
 pub fn create_log_dir_if_needed(package: &str) -> Result<PathBuf> {
     validate_package_name(package)?;
-    let log_dir = PathBuf::from("log").join(package);
+    // 数据统一落 /tmp/xperf/<pkg>（跨 CLI/GUI 一处存放；/tmp 重启自清 + 可显式清理）
+    let log_dir = data_root().join(package);
     if !log_dir.exists() {
         fs::create_dir_all(&log_dir)?;
         println!("Created log directory: {}", log_dir.display());
     }
     Ok(log_dir)
+}
+
+/// 采集数据根目录 `/tmp/xperf`（CLI 与 GUI 共用；见 CLAUDE.md「输出目录」）
+pub fn data_root() -> PathBuf {
+    std::env::temp_dir().join("xperf")
 }
 
 pub fn generate_cpu_chart(

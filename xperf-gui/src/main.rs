@@ -240,6 +240,12 @@ fn validate_package(package: &str) -> Result<(), String> {
     }
 }
 
+/// 采集数据根目录 `/tmp/xperf`（与 CLI 的 `cli_utils::data_root` 同一定位；GUI 独立
+/// 定义避免跨 crate 公共依赖改动——两处实现一致）
+fn gui_data_root() -> std::path::PathBuf {
+    std::env::temp_dir().join("xperf")
+}
+
 #[tauri::command]
 #[allow(clippy::too_many_arguments)] // tauri 命令参数须扁平，指标开关逐一对应前端勾选框
 async fn start_sampling(
@@ -298,7 +304,7 @@ fn spawn_trace(app: tauri::AppHandle, package: String, seconds: u64, running: Ar
                 serde_json::json!({ "stage": stage, "message": message, "trace_path": trace_path }),
             );
         };
-        let dir = std::path::PathBuf::from("log")
+        let dir = gui_data_root()
             .join(&package)
             .join(Local::now().format("%Y%m%d_%H%M%S").to_string())
             .join("trace");
@@ -380,7 +386,7 @@ fn spawn_stack(app: tauri::AppHandle, package: String, seconds: u64, running: Ar
                 serde_json::json!({ "stage": stage, "message": message, "data_path": data_path }),
             );
         };
-        let dir = std::path::PathBuf::from("log")
+        let dir = gui_data_root()
             .join(&package)
             .join(Local::now().format("%Y%m%d_%H%M%S").to_string())
             .join("stack");
@@ -463,6 +469,20 @@ async fn open_stack_html(data_path: String) -> Result<String, String> {
         return Err(format!("数据文件不存在: {}", data_path));
     }
     xperf_core::simpleperf::open_stack_in_browser(&path).map_err(|e| e.to_string())
+}
+
+/// 清理缓存与采集数据（与 CLI `--clean-cache` 同一实现）：
+/// `~/.cache/xperf`（perfetto UI 镜像 + simpleperf 脚本集，首次使用重新下载）
+/// + `/tmp/xperf`（全部采集数据）。采样/录制进行中会丢当前会话产物——前端
+/// 弹确认框后调用。返回人类可读结果（清理文件数与体积）。
+#[tauri::command]
+async fn clean_cache() -> Result<String, String> {
+    let r = xperf_core::simpleperf::clean_all_caches().map_err(|e| e.to_string())?;
+    Ok(format!(
+        "缓存已清理: {} 个文件，{:.1} MB（~/.cache/xperf + /tmp/xperf）",
+        r.files,
+        r.bytes as f64 / 1e6
+    ))
 }
 
 /// 在浏览器打开 Perfetto UI 并自动加载 trace。
@@ -565,7 +585,7 @@ async fn export_csv(
     gpuproc: std::collections::HashMap<String, Vec<(f64, f64)>>,
 ) -> Result<String, String> {
     use std::io::Write;
-    let dir = std::path::PathBuf::from("log")
+    let dir = gui_data_root()
         .join(&package)
         .join(Local::now().format("%Y%m%d_%H%M%S").to_string());
     let fmt_ts = |ms: f64| {
@@ -787,6 +807,7 @@ fn main() {
             start_stack,
             open_perfetto_ui,
             open_stack_html,
+            clean_cache,
             diag_log,
             list_packages,
             is_running,
@@ -866,7 +887,7 @@ mod tests {
         let gpumem_csv = std::fs::read_to_string(format!("{}/gpumem/gpumem_1234_data.csv", dir)).unwrap();
         assert!(gpumem_csv.starts_with("Timestamp,Process GPU Mem (MB),Global GPU Mem (MB)\n"));
         assert!(gpumem_csv.contains(",154.4,2639\n"));
-        std::fs::remove_dir_all(std::path::PathBuf::from("log").join(&pkg)).ok();
+        std::fs::remove_dir_all(gui_data_root().join(&pkg)).ok();
     }
 
     #[tokio::test]

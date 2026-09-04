@@ -27,8 +27,8 @@ use xperf_core::simpleperf;
 #[command(version, about = "XPerformance Monitor - Android process CPU/memory monitor", long_about = None)]
 struct Args {
     /// Package name to monitor
-    #[arg(short, long)]
-    package: String,
+    #[arg(short, long, required_unless_present = "clean_cache")]
+    package: Option<String>,
 
     /// Monitor CPU usage
     #[arg(long)]
@@ -87,6 +87,11 @@ struct Args {
     /// 函数热点排名（children/self），回答"CPU 高在哪个函数"；可与采样指标并行（同窗口对照）或单独使用
     #[arg(long, value_name = "SECONDS", value_parser = clap::value_parser!(u64).range(1..=600))]
     stack: Option<u64>,
+
+    /// 清理缓存与采集数据后退出（~/.cache/xperf 的 UI 镜像/脚本集 + /tmp/xperf 的全部采集产物；
+    /// 清后首次深挖/火焰图会重新引导下载脚本）
+    #[arg(long)]
+    clean_cache: bool,
 }
 
 fn check_adb() -> Result<()> {
@@ -112,7 +117,7 @@ fn check_adb() -> Result<()> {
 
 async fn monitor_process(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
     println!("{}", "XPerformance Monitor".green().bold());
-    println!("Monitoring package: {}", args.package.cyan());
+    println!("Monitoring package: {}", args.package.as_deref().unwrap_or("").cyan());
     println!("Sampling interval: {} ms", args.interval);
 
     check_adb()?;
@@ -133,7 +138,7 @@ async fn monitor_process(args: &Args) -> Result<(), Box<dyn std::error::Error>> 
         // --trace 与 --stack 可同时给：并行录制同窗口对照，报告按 trace → stack 顺序输出
         let trace_handle = args.trace.map(|n| {
             println!("perfetto 深挖：录制 {}s…", n);
-            let pkg = args.package.clone();
+            let pkg = args.package.clone().unwrap_or_default();
             std::thread::spawn(move || {
                 let dir = cli_utils::create_timestamp_subdir(&pkg)?.join("trace");
                 trace::record(n, &dir, None)
@@ -141,7 +146,7 @@ async fn monitor_process(args: &Args) -> Result<(), Box<dyn std::error::Error>> 
         });
         let stack_handle = args.stack.map(|n| {
             println!("simpleperf 函数热点：录制 {}s…", n);
-            let pkg = args.package.clone();
+            let pkg = args.package.clone().unwrap_or_default();
             std::thread::spawn(move || {
                 let dir = cli_utils::create_timestamp_subdir(&pkg)?.join("stack");
                 simpleperf::record(n, &pkg, &dir, None)
@@ -177,6 +182,7 @@ fn print_trace_result(
     handle: Option<std::thread::JoinHandle<Result<xperf_core::trace::RecordedTrace>>>,
     args: &Args,
 ) -> bool {
+    let package = args.package.clone().unwrap_or_default();
     let Some(h) = handle else { return true };
     match h.join() {
         Ok(Ok(rec)) => {
@@ -189,7 +195,7 @@ fn print_trace_result(
                 )
                 .green()
             );
-            match trace::analyze_and_report(&rec, &args.package) {
+            match trace::analyze_and_report(&rec, &package) {
                 Ok(text) => println!("{}", text),
                 Err(e) => println!("{}", e.to_string().yellow()),
             }
@@ -213,6 +219,7 @@ fn print_stack_result(
     handle: Option<std::thread::JoinHandle<Result<xperf_core::simpleperf::RecordedStack>>>,
     args: &Args,
 ) -> bool {
+    let package = args.package.clone().unwrap_or_default();
     let Some(h) = handle else { return true };
     match h.join() {
         Ok(Ok(rec)) => {
@@ -226,7 +233,7 @@ fn print_stack_result(
                 )
                 .green()
             );
-            match simpleperf::analyze_and_report(&rec, &args.package) {
+            match simpleperf::analyze_and_report(&rec, &package) {
                 Ok(text) => println!("{}", text),
                 Err(e) => println!("{}", e.to_string().yellow()),
             }
@@ -245,9 +252,10 @@ fn print_stack_result(
 
 /// 冷启动测量（独立于采样，先执行再开始监控）
 fn run_cold_start(args: &Args) {
+    let package = args.package.clone().unwrap_or_default();
     if let Some(ref activity) = args.cold_start {
         println!("{}", "========== 冷启动测量 ==========".green().bold());
-        match coldstart::measure(&args.package, activity) {
+        match coldstart::measure(&package, activity) {
             Ok(r) => println!("{}", r.summary().cyan()),
             Err(e) => println!("{}", format!("冷启动测量失败: {}", e).yellow()),
         }
@@ -297,18 +305,19 @@ async fn monitor_process_agent(
     stop_after: Option<std::time::Duration>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use xperf_core::agent::{self, AgentEvent};
+    let package = args.package.clone().unwrap_or_default();
 
     let bin = agent::ensure_agent_built()?;
     agent::deploy_agent(&bin)?;
     let platform = xperf_core::detect_platform_live();
     println!("平台: {} ({})", platform.name(), platform.description());
-    let mut stream = agent::spawn_agent(Some(&args.package), args.interval, flags, Some(&*platform))?;
+    let mut stream = agent::spawn_agent(Some(&package), args.interval, flags, Some(&*platform))?;
     println!("agent 已部署并启动（间隔 {}ms）", args.interval);
 
     // perfetto 深挖（--trace N）：后台线程录制，与采样同窗口（agent 启动后同时开跑）
     let trace_handle = args.trace.map(|n| {
         println!("perfetto 深挖：后台录制 {}s trace，采样同步限时", n);
-        let pkg = args.package.clone();
+        let pkg = args.package.clone().unwrap_or_default();
         std::thread::spawn(move || {
             let dir = cli_utils::create_timestamp_subdir(&pkg)?.join("trace");
             trace::record(n, &dir, None)
@@ -317,7 +326,7 @@ async fn monitor_process_agent(
     // simpleperf 函数热点（--stack N）：后台线程录制，与采样/trace 同窗口
     let stack_handle = args.stack.map(|n| {
         println!("simpleperf 函数热点：后台录制 {}s 调用栈", n);
-        let pkg = args.package.clone();
+        let pkg = args.package.clone().unwrap_or_default();
         std::thread::spawn(move || {
             let dir = cli_utils::create_timestamp_subdir(&pkg)?.join("stack");
             simpleperf::record(n, &pkg, &dir, None)
@@ -404,7 +413,7 @@ async fn monitor_process_agent(
                 println!("{}", "连接断开，等待设备恢复…（Ctrl-C 退出）".yellow());
                 let r = running.clone();
                 match agent::reconnect_agent(
-                    Some(&args.package), args.interval, flags, Some(&*platform),
+                    Some(&package), args.interval, flags, Some(&*platform),
                     &move || r.load(Ordering::SeqCst),
                 ) {
                     Some(s) => {
@@ -466,7 +475,7 @@ async fn monitor_process_agent(
                 s.active = true;
                 // top_threads 无读者（线程数据走下方 thread_time_series + 流式 CSV），不存
                 s.cpu_data.add_data_point(t, cpu, Vec::new());
-                csv.cpu_row(&args.package, pid, t, cpu);
+                csv.cpu_row(&package, pid, t, cpu);
                 if s.cpu_time.is_none() || cpu > s.cpu_usage {
                     s.cpu_usage = cpu;
                     s.cpu_time = Some(t);
@@ -477,7 +486,7 @@ async fn monitor_process_agent(
                     for t2 in threads {
                         if t2.cpu_usage > 0.0 {
                             if let Ok(tid) = t2.tid.parse::<u32>() {
-                                csv.thread_row(&args.package, pid, tid, &t2.name, t, t2.cpu_usage);
+                                csv.thread_row(&package, pid, tid, &t2.name, t, t2.cpu_usage);
                             }
                             let series = per_pid.entry(t2.name.clone()).or_default();
                             // 与 xperf-core 时序同策略：超 2×CAP 每 2 取 1 抽稀，长测内存有界
@@ -531,7 +540,7 @@ async fn monitor_process_agent(
                     total_pss: pss,
                 };
                 s.memory_data.add_data_point(t, details.clone());
-                csv.mem_row(&args.package, pid, t, &details);
+                csv.mem_row(&package, pid, t, &details);
                 if s.memory_time.is_none() || pss > s.memory_usage {
                     s.memory_usage = pss;
                     s.memory_time = Some(t);
@@ -562,7 +571,7 @@ async fn monitor_process_agent(
                 let s = pid_stats.entry(pid.to_string()).or_default();
                 s.active = true;
                 s.fps_data.add_data_point(t, fps, jank, &layer);
-                csv.fps_row(&args.package, pid, t, &layer, fps, jank);
+                csv.fps_row(&package, pid, t, &layer, fps, jank);
                 // 静止界面（frames=0）不触发低 FPS 告警
                 check_threshold(&thresholds, &alert_stats, "fps", fps, &t, frames > 0);
                 let a = aggs.entry(pid).or_default();
@@ -579,7 +588,7 @@ async fn monitor_process_agent(
                     let cells: Vec<String> = mhz.iter().map(|m| format!("{:.0}", m)).collect();
                     println!("[{}] CPU Freq MHz: [{}]", t.format("%H:%M:%S"), cells.join(", ").blue());
                 }
-                csv.freq_row(&args.package, t, &mhz);
+                csv.freq_row(&package, t, &mhz);
                 extra.push_freq(t, mhz.clone());
                 latest_freq = khz;
             }
@@ -600,7 +609,7 @@ async fn monitor_process_agent(
                         pid.to_string().yellow()
                     );
                 }
-                csv.io_row(&args.package, pid, t, r, w, dr, dw);
+                csv.io_row(&package, pid, t, r, w, dr, dw);
                 extra.push_io(pid, t, r, w, dr, dw);
                 aggs.entry(pid).or_default().io = Some((r, w));
             }
@@ -618,7 +627,7 @@ async fn monitor_process_agent(
                         format!("{:.1}", tx).yellow()
                     );
                 }
-                csv.net_row(&args.package, t, rx, tx);
+                csv.net_row(&package, t, rx, tx);
                 extra.push_net(t, rx, tx);
                 latest_net = Some((rx, tx));
             }
@@ -642,7 +651,7 @@ async fn monitor_process_agent(
                         extra_info
                     );
                 }
-                csv.gpu_row(&args.package, t, busy, util, mhz, maxmhz);
+                csv.gpu_row(&package, t, busy, util, mhz, maxmhz);
                 extra.push_gpu(t, busy, util, mhz);
                 latest_gpu = Some((busy, mhz));
                 check_threshold(&thresholds, &alert_stats, "gpu", busy, &t, true);
@@ -661,7 +670,7 @@ async fn monitor_process_agent(
                         pid.to_string().yellow()
                     );
                 }
-                csv.gpuproc_row(&args.package, pid, t, busy);
+                csv.gpuproc_row(&package, pid, t, busy);
                 extra.push_gpuproc(pid, t, busy);
                 aggs.entry(pid).or_default().gpuproc = Some(busy);
             }
@@ -682,7 +691,7 @@ async fn monitor_process_agent(
                         pid.to_string().yellow()
                     );
                 }
-                csv.gpumem_row(&args.package, pid, t, mb, global_mb);
+                csv.gpumem_row(&package, pid, t, mb, global_mb);
                 extra.push_gpumem(pid, t, mb, global_mb);
                 aggs.entry(pid).or_default().gpumem = Some((mb, global_mb));
             }
@@ -702,7 +711,7 @@ async fn monitor_process_agent(
                         if status >= 0 { status.to_string().red() } else { "未知".into() }
                     );
                 }
-                csv.temp_row(&args.package, t, status, &sensors);
+                csv.temp_row(&package, t, status, &sensors);
                 extra.push_temp(t, status, &sensors);
                 latest_temp = Some((status, sensors));
             }
@@ -784,7 +793,7 @@ async fn monitor_process_agent(
     println!("Process Restarts: {}", restart_count.to_string().red());
     // 写打点文件
     if !markers.is_empty() {
-        if let Ok(dir) = cli_utils::create_timestamp_subdir(&args.package) {
+        if let Ok(dir) = cli_utils::create_timestamp_subdir(&package) {
             let path = dir.join("markers.csv");
             let content: String = markers.iter()
                 .map(|m| {
@@ -947,10 +956,11 @@ fn generate_final_outputs(
     thread_time_series: &std::collections::HashMap<String, std::collections::HashMap<String, Vec<ThreadCpuInfo>>>,
     extra: &cli_utils::ExtraSeries,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let package = args.package.clone().unwrap_or_default();
     // 线程时序图（按 PID）
     if args.thread && args.cpu && !thread_time_series.is_empty() {
         println!("Program ending, generating final thread time series chart...");
-        if let Ok(timestamp_dir) = cli_utils::create_timestamp_subdir(&args.package) {
+        if let Ok(timestamp_dir) = cli_utils::create_timestamp_subdir(&package) {
             let thread_dir = timestamp_dir.join("thread");
             if !thread_dir.exists() {
                 std::fs::create_dir_all(&thread_dir)?;
@@ -961,7 +971,7 @@ fn generate_final_outputs(
                     continue;
                 }
                 // 线程 CSV 已在采样时流式落盘，这里只出时序图
-                match cli_utils::generate_thread_time_series_chart(thread_dir.clone(), &args.package, pid, per_pid_series) {
+                match cli_utils::generate_thread_time_series_chart(thread_dir.clone(), &package, pid, per_pid_series) {
                     Ok(name) if !name.is_empty() => println!("✓ Final thread time series chart (pid {}) generated: {}", pid, name),
                     Ok(_) => {}
                     Err(e) => println!("Failed to generate thread chart for pid {}: {}", pid, e),
@@ -970,7 +980,7 @@ fn generate_final_outputs(
         }
     }
 
-    let timestamp_dir = match cli_utils::create_timestamp_subdir(&args.package) {
+    let timestamp_dir = match cli_utils::create_timestamp_subdir(&package) {
         Ok(d) => d,
         Err(_) => {
             println!("Warning: Could not create timestamp directory.");
@@ -1014,7 +1024,7 @@ fn generate_final_outputs(
                 cpu_series_for_summary.push((pid.clone(), &s.cpu_data.timestamps, &s.cpu_data.process_cpu));
             }
             if cpu_series_for_summary.len() >= 2 {
-                match cli_utils::generate_cpu_summary_chart(&cpu_dir, &args.package, &cpu_series_for_summary) {
+                match cli_utils::generate_cpu_summary_chart(&cpu_dir, &package, &cpu_series_for_summary) {
                     Ok(p) => println!("✓ CPU summary chart generated: {}", p.display()),
                     Err(e) => println!("Failed to generate CPU summary chart: {}", e),
                 }
@@ -1041,7 +1051,7 @@ fn generate_final_outputs(
                     format!("{} KB", s.memory_usage).red(),
                     s.memory_time.map(|t| t.format("%Y-%m-%d %H:%M:%S").to_string()).unwrap_or_else(|| "N/A".to_string())
                 );
-                match generate_memory_charts(&memory_dir, &args.package, pid, &s.memory_data) {
+                match generate_memory_charts(&memory_dir, &package, pid, &s.memory_data) {
                     Ok(paths) => {
                         for path in paths {
                             println!("✓ Memory chart generated (pid {}): {}", pid, path.display());
@@ -1052,7 +1062,7 @@ fn generate_final_outputs(
                 mem_series.push((pid.clone(), &s.memory_data));
             }
             if mem_series.len() >= 2 {
-                match generate_memory_summary_chart(&memory_dir, &args.package, &mem_series) {
+                match generate_memory_summary_chart(&memory_dir, &package, &mem_series) {
                     Ok(p) => println!("✓ Memory summary chart generated: {}", p.display()),
                     Err(e) => println!("Failed to generate memory summary chart: {}", e),
                 }
@@ -1061,7 +1071,7 @@ fn generate_final_outputs(
     }
     // FPS CSV 已在采样时流式落盘（fps/<pkg>_fps_data_pid<pid>.csv），CLI 不出 FPS 图表
     // B 类指标退出图表（CSV 同样已流式落盘在各自子目录）
-    generate_extra_charts(&timestamp_dir, &args.package, extra);
+    generate_extra_charts(&timestamp_dir, &package, extra);
     Ok(())
 }
 
@@ -1237,8 +1247,20 @@ fn generate_memory_summary_chart(
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
+    // --clean-cache：清理后即退出（不进监控流程，无需包名）
+    if args.clean_cache {
+        let r = xperf_core::simpleperf::clean_all_caches()?;
+        println!(
+            "缓存已清理: {} 个文件，{:.1} MB\n  - ~/.cache/xperf（perfetto UI 镜像 + simpleperf 脚本集，首次使用重新下载）\n  - /tmp/xperf（全部采集数据：CSV/图表/trace/调用栈）",
+            r.files,
+            r.bytes as f64 / 1e6
+        );
+        return Ok(());
+    }
+    // 监控流程必带 --package（clap required_unless_present 已保证非 clean_cache 时必填）
+    let package = args.package.clone().unwrap_or_default();
     // 包名校验：启动时即报错，不延迟到 CSV 落盘
-    if let Err(e) = validate_package_name(&args.package) {
+    if let Err(e) = validate_package_name(&package) {
         eprintln!("❌ 包名不合法: {}", e);
         std::process::exit(1);
     }
