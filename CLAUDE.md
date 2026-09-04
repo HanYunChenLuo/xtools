@@ -65,7 +65,7 @@ GUI:  start_sampling / 自动启动 → spawn_sampling()（std::thread 阻塞读
 - **设备端**：xperf-agent 常驻，直接读 /proc（CPU/线程）、smaps_rollup 或 dumpsys meminfo（内存）、本地 dumpsys SurfaceFlinger（FPS），按绝对节拍（start + round×interval，防漂移）逐轮输出 JSON 行
 - **主机侧**：只是表现层（CLI 打印/流式 CSV/图表；GUI emit 给前端）。ADB 断开 → exec-out EOF → `reconnect_agent` 每 500ms 轮询等设备回来，重新部署+启动 agent，主机侧状态（时序/峰值/CSV）保留；Ctrl-C → 关闭连接 → agent 写 stdout 失败自行退出
 - **xperf-core 已无轮询实现**（原 Sampler/cpu/memory/fps 参考实现已删除，225d89b）；core 只保留协议类型（ThreadCpuInfo/MemoryDetails/FpsTimeSeriesData/PidStats/SampleEvent）+ agent 传输层 + platform/marker + trace（perfetto 深挖，CLI/GUI 共用）；采样全在 agent（零依赖独立发布，解析逻辑与 core 类型对应）
-- **GUI 前端**：CPU/内存/FPS 折线（series 保留完整会话历史，窗口跟随 10min / 全部历史切换，绘制时二分裁剪 + stride 抽稀防卡顿）、Top 线程表（500ms 节流渲染）、峰值面板（新峰值才更新 DOM）、导出 CSV（`export_csv` 命令写 `/tmp/xperf/<pkg>/<导出时刻>/`）、perfetto 深挖（侧栏秒数+按钮 → `start_trace` 命令 → `trace` 事件推进度 → 报告面板展示，与采样并行互不干扰；`--trace N` 命令行自动启动可脚本化验证）
+- **GUI 前端**：CPU/内存/FPS 折线（series 保留完整会话历史，窗口跟随 10min / 全部历史切换，绘制时二分裁剪 + stride 抽稀防卡顿）、Top 线程表（500ms 节流渲染）、峰值面板（新峰值才更新 DOM）、导出 CSV（`export_csv` 命令写 `/tmp/xperf/<pkg>/<导出时刻>/`）、perfetto 深挖（共享录制时长下拉 + 按钮 → `start_trace` 命令 → `trace` 事件推进度 → 报告面板展示，与采样并行互不干扰；`--trace N` 命令行自动启动可脚本化验证）、`--package` 命令行自动启动与手动开始**同流程**（后端 `startup_args` 回查包名/间隔/勾选并回填 UI，e8f75c9）
 
 ### CPU 采样口径（agent）
 
@@ -153,7 +153,7 @@ CLI 退出图表用通用 helper `generate_multi_line_chart`（xperformance/util
 
 ### simpleperf 函数热点模式（`--stack N`，xperf-core/src/simpleperf.rs，CLI 与 GUI 共用）
 
-「录制-分析」三级下钻的函数层：采样回答"什么时候高"，perfetto 回答"线程/调度/帧层面为什么高"，simpleperf 回答"**CPU 高在哪个函数**"。CLI 侧独立（`--stack N` 无指标 flag 时只录调用栈）或与采样并行（`--cpu --stack 10`：后台线程录制 + 采样限时同窗口）；`--trace` 与 `--stack` 可同给（并行录制同窗口对照，报告按 trace → stack 顺序输出，采样限时取两者 max）；独立模式录制失败**非零退出**（脚本化验证门槛；分析失败不算——数据已拉回可手动处理）。GUI 侧「函数热点」独立 tab（与 Perfetto 分析并列，均隐藏侧栏）+ 侧栏秒数/按钮 + `stack` 事件推进度（`{stage: recording|recorded|done|error, message, data_path}`，与 trace 事件同构）+ `--stack N` 命令行自动启动。
+「录制-分析」三级下钻的函数层：采样回答"什么时候高"，perfetto 回答"线程/调度/帧层面为什么高"，simpleperf 回答"**CPU 高在哪个函数**"。CLI 侧独立（`--stack N` 无指标 flag 时只录调用栈）或与采样并行（`--cpu --stack 10`：后台线程录制 + 采样限时同窗口）；`--trace` 与 `--stack` 可同给（并行录制同窗口对照，报告按 trace → stack 顺序输出，采样限时取两者 max）；独立模式录制失败**非零退出**（脚本化验证门槛；分析失败不算——数据已拉回可手动处理）。GUI 侧「simpleperf 分析」独立 tab（与「Perfetto 分析」并列，均隐藏侧栏）+ 共享录制时长下拉 + 两按钮（`.flex-fill` 等分防长文案挤出）+ `stack` 事件推进度（`{stage: recording|recorded|done|error, message, data_path}`，与 trace 事件同构；**recorded 阶段前端退出进度态显示"生成报告中"**——不退会冻结在 100%"录制中"）+ `--stack N` 命令行自动启动。
 
 - **录制链路**：`adb shell simpleperf record --app <pkg> -g --duration N -o /data/local/tmp/xperf_stack_<ts>.data`（cpu-cycles 默认 4000Hz + dwarf 调用栈；`--app` 覆盖该应用全部进程并容忍进程重启，root 下非 debuggable 也可采）。**坑：`--app` 对未运行应用输出 `Waiting for process of app …` 无限等待，`--duration` 拦不住**（等待发生在采样开始前）→ 录制前 `pidof` 前置拦截 + 主机侧超时兜底（N+25s，Ctrl-C 中断标志可提前放弃，同 trace 模式）
 - **三视图报告**（设备端 `simpleperf report`，须在 pull 前跑——`.data` 还在设备上；单个视图失败不中断，错误嵌入报告文本）：线程 CPU 分布（`--sort comm,pid,tid`）/ 函数热点 self（`--sort symbol,dso`，**"CPU 高在哪个函数"的直接回答**）/ 函数热点 children（`--children --sort symbol,dso`，调用链累计热点路径）；均 `--percent-limit 1` 去噪
@@ -229,7 +229,7 @@ Platform trait + `adb devices -l` product 字段自动检测（HU_SS3/HU_SS2MAXF
 
 ### 输出文件触发时机
 
-**数据根目录为 `/tmp/xperf`**（CLI 与 GUI 共用同一根，替代旧的 `./log`；`/tmp` 重启自清）。**清理**：CLI `xperformance --clean-cache`（无需 --package）或 GUI 侧栏「清理缓存与数据」按钮——清 `~/.cache/xperf`（perfetto UI 镜像 + simpleperf 脚本集，首次使用重新引导下载）与 `/tmp/xperf`（全部采集数据）；`~/.local/share/perfetto`（trace_processor 官方缓存）不动。采样/录制进行中清理会丢当前会话产物（GUI 有 confirm 确认）。
+**数据根目录为 `/tmp/xperf`**（CLI 与 GUI 共用同一根，替代旧的 `./log`；`/tmp` 重启自清）。**清理**：CLI `xperformance --clean-cache`（无需 --package）或 GUI 侧栏「清理缓存与数据」按钮（`tauri-plugin-dialog` 原生 confirm——webkit2gtk 的 JS `confirm()` 窗口标题是 "Javascript-taurixxx"，695946a）——清 `~/.cache/xperf`（perfetto UI 镜像 + simpleperf 脚本集，首次使用重新引导下载）与 `/tmp/xperf`（全部采集数据）；`~/.local/share/perfetto`（trace_processor 官方缓存）不动。采样/录制进行中清理会丢当前会话产物（GUI 有 confirm 确认）。
 
 | 场景 | 触发条件 | 输出位置 |
 |------|---------|---------|

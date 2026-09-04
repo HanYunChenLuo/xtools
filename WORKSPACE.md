@@ -2,7 +2,7 @@
 
 > 本文件记录跨会话的待办事项（backlog）。每次会话的历史总结见 `SESSION.md`。
 > 完成一项就把状态改为 ✅ 并注明完成的 commit；新增想法随时追加。
-> 最后更新：2026-09-04（simpleperf 函数热点 --stack N：CLI/GUI 三视图报告，见 SESSION 当日条目）
+> 最后更新：2026-09-04 下午（`--package` 自动启动 UI 统一 + 两轮 UI review + 缓存清理，见 SESSION 当日条目）
 
 ## 当前状态速览
 

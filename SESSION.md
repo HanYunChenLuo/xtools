@@ -24,7 +24,8 @@
 | e0eaf7e | review: 前端 UI 修复 9 项——M1 #package 补 type=text（属性选择器不匹配无 type 输入框→白底不随主题）/ M2 recorded 阶段退出进度态（原冻结在 100%"录制中"）/ M3 录制时长残留 flex 包裹改 label / M4 进度条颜色主题变量化 / L1-L2 死 CSS+旧注释 / L3 NoProcess 不抹进度条 / L5 recording 文案 / L7 内联样式收口 .sidebar-row / 后端 export_csv 补 validate_package |
 | 57e84ba | review: UI 布局缺陷 6 项（逐项代码实证属实后修）——tab 内容区 3 处 inline flex 收口 .tab-content / #status flex-shrink 防窄窗截断 / 指标页 idleHint 空闲引导（开始后隐藏）/ 侧栏「深挖录制」「数据管理」分组标题 / 清理按钮幽灵样式降级（破坏性操作视觉区分）/ resize 50ms 硬编码收敛双 rAF |
 | e8f75c9 | feat：`--package` 自动启动与 UI 手动启动统一流程——后端 startup_args 命令（AppState 记录包名/间隔/flags，spawn_sampling 统一写入）+ 前端初始化回填（包名/间隔/勾选 toggleCharts 同步/idleHint 隐藏/状态文案带包名）；深挖按钮 .flex-fill 等分（「Perfetto 分析」长文案曾把 simpleperf 按钮挤出侧栏）；顺带修 2 个 clippy 警告 |
-| （docs） | CLAUDE.md（新代码规则 + simpleperf 章节 + 输出文件表）/ WORKSPACE / SESSION 更新 |
+| 90b57ed | chore：Cargo.lock 同步 tauri-plugin-dialog 依赖锁（695946a 引入依赖时漏提交） |
+| （docs） | b7405c2 / 22445ae（61535f7 + 2bd6bca 收尾）、461b47f（e0eaf7e 补记）、c4e5835（57e84ba 补记）、c77e0f1（e8f75c9 补记）——CLAUDE.md 路径与行为同步 + WORKSPACE / SESSION 更新 |
 
 ### 完成内容
 
@@ -54,6 +55,9 @@
 - 多设备连接 adb 不带 -s 的全局问题（E 节既有候补项，本模块同样不带 -s，与全工具链一致）
 - GUI 前端按钮点击渲染为人工目验项（后端链路已由 ignored 真实测试 + diag log 验证）
 - 火焰图 HTML 的样式/交互库（bootstrap/jquery/google-charts）走公网 CDN——离线打开时图表样式降级（数据/火焰图本体已内嵌，核心可看）
+- trace/stack 并行录制共用单个 status 栏：文案/进度条互相覆盖，后完成者胜（单用户场景罕见，不修）
+- 图表 series 色板在 JS 硬编码镜像 CSS 变量（mocha/latte 两套），主题色改动需双处同步（漂移风险，重构收益低）
+- 深色主题下 tauri-plugin-dialog 原生对话框跟随系统主题而非应用主题（插件行为，无配置入口）
 
 ---
 
