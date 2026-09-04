@@ -492,7 +492,7 @@ function switchTab(which) {
   // 分析页隐藏左侧采样控制栏（报告占满全宽）；性能指标页恢复
   document.getElementById('sidebar').classList.toggle('hidden', !perf);
   // 图表容器显隐变化后尺寸需刷新
-  if (perf) setTimeout(() => { for (const c of allCharts) c.resize(); }, 50);
+  if (perf) refreshChartSizes();
 }
 document.getElementById('tabPerfBtn').addEventListener('click', () => switchTab('perf'));
 document.getElementById('tabTraceBtn').addEventListener('click', () => switchTab('trace'));
@@ -703,6 +703,7 @@ document.getElementById('startBtn').addEventListener('click', async () => {
     samplingRunning = true;
     document.getElementById('startBtn').disabled = true;
     document.getElementById('stopBtn').disabled = false;
+    document.getElementById('idleHint').classList.add('hidden');
     setStatus('监控中: ' + package);
   } catch (e) {
     setStatus('错误: ' + e);
@@ -722,6 +723,11 @@ document.getElementById('stopBtn').addEventListener('click', async () => {
 _diag('UI handlers bound');
 
 // ---- 图表随勾选状态显示/隐藏 ----
+// rAF 刷新图表尺寸：容器显隐后布局完成时机不确定（webkit2gtk 布局异步），
+// 用双 rAF 保证在下一帧布局完成后取到正确 clientWidth/Height
+function refreshChartSizes() {
+  requestAnimationFrame(() => { for (const c of allCharts) c.resize(); });
+}
 function toggleCharts() {
   const pairs = [
     ['cpu', 'cpuChartBox'], ['memory', 'memChartBox'], ['fps', 'fpsChartBox'],
@@ -735,7 +741,7 @@ function toggleCharts() {
   // 线程数据来自 CpuUpdate：CPU 关闭时线程面板同步隐藏
   document.getElementById('threadPanel').classList.toggle('hidden', !document.getElementById('cpu').checked);
   // 容器显隐变化后 chart 尺寸需刷新
-  setTimeout(() => { for (const c of allCharts) c.resize(); }, 50);
+  refreshChartSizes();
 }
 
 // ---- 勾选即生效：监控运行中改指标勾选 → 重启采样会话应用新 flag 集 ----
