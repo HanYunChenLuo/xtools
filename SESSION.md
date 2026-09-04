@@ -7,9 +7,9 @@
 
 ---
 
-## 2026-09-03（三）晚二 — perfetto `--trace N` 深挖模式
+## 2026-09-03（三）晚二 ～ 09-04（四） — perfetto 深挖模式：浏览器全自动加载 + 配置对齐 + GUI 主题 + cargo doc 全覆盖
 
-**任务线**：WORKSPACE C 类第二项——perfetto 深挖模式（2026-09-01 已验证可行性，本轮落地为产品功能）。
+**任务线**：WORKSPACE C 类第二项——perfetto 深挖模式（2026-09-01 已验证可行性，2026-09-03 落地为产品功能；后续按用户反馈迭代：浏览器加载方案两轮演进 → trace 配置对齐团队口径 → GUI 布局与主题 → 多轮 code/doc review + cargo doc 全覆盖）。
 
 ### Commits
 
@@ -44,16 +44,21 @@
 ### 关键结论与基线
 
 - v15.0 配置坑：ProcessStatsConfig 的 `scan_period_ms`/`proc_stats_poll_period_ms` 字段都不存在，省略子配置用默认值即可（进程/线程全名映射正常）
-- SS3 GVM 无 `cpu_frequency` ftrace 事件（`/sys/kernel/tracing/events/cpu_frequency` 不存在，只有 devfreq）——trace 里频率段恒空，如实标注；实时频率走 agent `--freq`（sysfs 可读）
+- SS3 GVM 无 `cpu_frequency` ftrace 事件（`/sys/kernel/tracing/events/cpu_frequency` 不存在，只有 devfreq）——trace 里频率段恒空，如实标注；实时频率走 agent `--freq`（sysfs 可读）；**power/cpu_idle 事件生效**（cpuidle counter 每核一条 track）
 - trace_processor 多语句输出：结果集 = 表头 + 数据行 + 空行；查询失败 abort 整文件剩余语句且退出码非零，但已完成语句的 stdout 仍有效（只要非空就继续解析）
-- 10s trace ≈ 11.8MB / sched ~14 万事件；帧时间线 231 帧无归属（与 2026-09-01 结论一致）；adb pull root 0600 文件 OK（adbd root）
+- **配置对齐团队 general_debug.pbtxt 后（cc76721）**：10s ≈ 46MB（~4.6MB/s，600s ≈ 2.8GB 落盘）、atrace slice 17 万/10s（系统进程有 app 层归因轨道）、android_logs 3425 条、sched 20 万；不存在的 ftrace 事件（memory_bus/\* 等）perfetto 静默忽略
+- **浏览器加载（3ee4ea2）**：ui.perfetto.dev + 本地 HTTP + ?url= 深链被 CSP connect-src 白名单 + Chrome 152 LNA 双重拦截；可行方案是本地镜像 UI（~20 资源，缓存 ~/.cache/xperf/perfetto_ui）+ 同源深链（url 参数必须**绝对 URL**——SPA `new URL()` 不传 base）
+- **rustdoc 三类坑（fdfef14/af65eed）**：doc 裸尖括号当未闭合 HTML（xperformance `#![deny(warnings)]` 升级为 error）、裸 URL、日志样例 `[GPU0]` 当 intra-doc 链接；`<wall_ms>` 含下划线恰好躲过 lint 但渲染坏——协议样例统一包 code block。**检查必须跑完整 `cargo doc`（默认 lint 集），单跑 `-W missing_docs` 不够**
+- **webkit2gtk（Tauri webview）对原生控件暗色渲染支持不全**：color-scheme 有效但 checkbox 仍白底 → appearance:none 自绘（cddb84e）；Chrome 验证结论不能直接外推到 webkit2gtk
+- adb pull root 0600 文件 OK（adbd root）
 
 ### 遗留问题
 
 - 长录制（>60s）超时/中断路径未真机实测（有兜底逻辑）；600s 上限内 write_into_file 理论无内存问题
 - 限时采样（--trace）+ 采集中途断连：主循环进 reconnect_agent 无限轮询等设备，deadline 不打断重连（Ctrl-C 可退；修复需给 reconnect 回调传 deadline，收益小改动大，记录不修）
-- trace_processor 分析大 trace（600s ~700MB）加载耗时数分钟，无超时（Ctrl-C 可中断，深挖场景等得起，设计如此）
-- simpleperf 调用栈采样（"CPU 高在哪个函数"）为下轮 C 类候选
+- trace_processor 分析大 trace（600s ~2.8GB）加载耗时数分钟，无超时（Ctrl-C 可中断，深挖场景等得起，设计如此）
+- 镜像的 Perfetto UI 版本与官方同步问题：无失效检测（UI 结构大改导致资源 404 时会报错回退拖拽，可接受；手动清 ~/.cache/xperf/perfetto_ui 重新镜像）
+- simpleperf 调用栈采样（"CPU 高在哪个函数"）为下轮 C 类候选（见 WORKSPACE.md）
 
 ---
 
