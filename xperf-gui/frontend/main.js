@@ -546,7 +546,7 @@ document.getElementById('traceBtn').addEventListener('click', async () => {
     setStatus('请先填写包名');
     return;
   }
-  const seconds = parseInt(document.getElementById('traceSeconds').value, 10) || 10;
+  const seconds = parseInt(document.getElementById('recordSeconds').value, 10) || 10;
   try {
     await invoke('start_trace', { package, seconds });
     document.getElementById('traceBtn').disabled = true;
@@ -613,7 +613,7 @@ document.getElementById('stackBtn').addEventListener('click', async () => {
     setStatus('请先填写包名');
     return;
   }
-  const seconds = parseInt(document.getElementById('stackSeconds').value, 10) || 10;
+  const seconds = parseInt(document.getElementById('recordSeconds').value, 10) || 10;
   try {
     await invoke('start_stack', { package, seconds });
     document.getElementById('stackBtn').disabled = true;

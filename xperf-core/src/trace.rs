@@ -147,6 +147,15 @@ pub fn record(
     let started = Instant::now();
     let mut last_reported: u64 = 0;
     loop {
+        // 进度上报放循环头：adb 启动开销 ~0.5s 会推迟首个整秒，若只在 None 分支报，
+        // N 秒录制只能看到 1..=N-1（最后一秒在 try_wait=Some 的轮次里被跳过）
+        if let Some(cb) = progress {
+            let elapsed = started.elapsed().as_secs();
+            if elapsed > last_reported {
+                last_reported = elapsed;
+                cb(elapsed);
+            }
+        }
         match child.try_wait()? {
             Some(_) => break,
             None if crate::utils::is_interrupted() => {
@@ -161,17 +170,7 @@ pub fn record(
                     dev_path
                 );
             }
-            None => {
-                // 进度回调：每到整秒触发（elapsed 1..=N；超时兜底窗口内也可能 >N）
-                if let Some(cb) = progress {
-                    let elapsed = started.elapsed().as_secs();
-                    if elapsed > last_reported {
-                        last_reported = elapsed;
-                        cb(elapsed);
-                    }
-                }
-                std::thread::sleep(Duration::from_millis(100));
-            }
+            None => std::thread::sleep(Duration::from_millis(100)),
         }
     }
     let out = child.wait_with_output()?;

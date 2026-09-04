@@ -48,13 +48,20 @@
       <input id="markerLabel" type="text" placeholder="打点标签" class="inline-input" />
       <button id="markerBtn" class="small" style="width:auto;padding:4px 8px;flex-shrink:0">打点</button>
     </div>
-    <div style="display:flex;gap:4px;margin:4px 0">
-      <input id="traceSeconds" type="number" min="1" max="600" value="10" title="录制秒数（1-600）" class="inline-input" style="width:52px;flex:none" />
-      <button id="traceBtn" class="small" style="width:auto;padding:4px 8px;flex-shrink:0">Perfetto 分析</button>
+    <div style="display:flex;gap:4px;margin:4px 0;align-items:center">
+      <select id="recordSeconds" title="录制时长（1-600 秒）" style="flex:1">
+        <option value="5">5 秒</option>
+        <option value="10" selected>10 秒</option>
+        <option value="15">15 秒</option>
+        <option value="30">30 秒</option>
+        <option value="60">60 秒</option>
+        <option value="120">120 秒</option>
+      </select>
     </div>
+    <div class="record-hint">录制时长（秒）：Perfetto / simpleperf 分析共用，录制期间观察实时曲线</div>
     <div style="display:flex;gap:4px;margin:4px 0">
-      <input id="stackSeconds" type="number" min="1" max="600" value="10" title="录制秒数（1-600）" class="inline-input" style="width:52px;flex:none" />
-      <button id="stackBtn" class="small" style="width:auto;padding:4px 8px;flex-shrink:0">函数热点</button>
+      <button id="traceBtn" class="small" style="width:auto;padding:4px 8px;flex-shrink:0">Perfetto 分析</button>
+      <button id="stackBtn" class="small" style="width:auto;padding:4px 8px;flex-shrink:0">simpleperf 分析</button>
     </div>
     <button id="exportBtn" class="small">导出 CSV</button>
     <h3>PIDs</h3>
