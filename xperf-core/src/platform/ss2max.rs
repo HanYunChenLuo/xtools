@@ -6,6 +6,7 @@
 
 use super::{Platform, PlatformId};
 
+/// SS2 MAX 平台（SA8155）
 pub struct Ss2Max;
 
 impl Platform for Ss2Max {

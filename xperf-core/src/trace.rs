@@ -33,10 +33,15 @@ const TP_CACHE_SUBDIR: &str = ".local/share/perfetto/prebuilts";
 
 // ==================== 录制 ====================
 
+/// 录制完成的 trace（拉回主机后的产物描述）
 pub struct RecordedTrace {
+    /// 拉回到主机的 trace 文件路径
     pub local_path: PathBuf,
+    /// 录制发起时刻（墙钟，含 adb 启动开销）
     pub wall_start: DateTime<Local>,
+    /// 录制完成时刻（墙钟）
     pub wall_end: DateTime<Local>,
+    /// trace 文件大小（字节）
     pub bytes: u64,
 }
 
@@ -284,50 +289,84 @@ pub fn ensure_trace_processor() -> Result<PathBuf> {
 
 // ==================== SQL 分析 ====================
 
+/// 包内单线程的 CPU 时间（ms）
 pub struct ThreadCpuMs {
+    /// 线程 TID
     pub tid: u32,
+    /// 线程名（ftrace comm，最长 15 字符）
     pub name: String,
+    /// 窗口内 CPU 时间（ms）
     pub cpu_ms: f64,
 }
 
+/// 包内单线程的抢占/调度延迟统计（thread_state R/R+）
 pub struct ThreadRunnable {
+    /// 线程 TID
     pub tid: u32,
+    /// 线程名
     pub name: String,
+    /// runnable 次数
     pub count: u64,
+    /// runnable 总时长（ms）
     pub runnable_ms: f64,
+    /// 最长单次 runnable（ms）
     pub max_ms: f64,
 }
 
+/// 单核 busy 统计（排除 idle）
 pub struct CoreBusy {
+    /// 核号
     pub cpu: u32,
+    /// 非 idle busy 时长（ms）
     pub busy_ms: f64,
+    /// 非 idle 上下文切换次数
     pub switches: u64,
 }
 
+/// 单核频率统计（无 cpufreq 事件的平台无数据）
 pub struct FreqStat {
+    /// 核号
     pub cpu: u32,
+    /// 最低频率（MHz）
     pub min_mhz: f64,
+    /// 最高频率（MHz）
     pub max_mhz: f64,
+    /// 平均频率（MHz）
     pub avg_mhz: f64,
 }
 
+/// 帧时间线全局统计
 pub struct FrameStats {
+    /// 帧数
     pub frames: u64,
+    /// 平均帧耗时（ms）
     pub avg_ms: f64,
+    /// 最差帧耗时（ms）
     pub max_ms: f64,
 }
 
+/// SQL 归因分析结果（各段缺失时为默认值，notes 说明原因）
 pub struct Analysis {
+    /// trace 窗口时长（ms，trace_bounds）
     pub window_ms: f64,
+    /// 包 CPU 总时间（ms）
     pub pkg_cpu_ms: f64,
+    /// 包线程 CPU 时间 top（ms）
     pub pkg_threads: Vec<ThreadCpuMs>,
+    /// 包线程抢占/调度延迟 top
     pub pkg_runnable: Vec<ThreadRunnable>,
+    /// 系统级 CPU top：(进程名, CPU ms)
     pub top_procs: Vec<(String, f64)>,
+    /// 每核 busy/切换（排除 idle）
     pub per_core: Vec<CoreBusy>,
+    /// 每核频率统计
     pub cpufreq: Vec<FreqStat>,
+    /// 帧时间线统计（None = frametimeline 表不可用）
     pub frame: Option<FrameStats>,
-    pub worst_frames: Vec<(f64, f64)>, // (boot ts_ms, dur_ms)
-    pub notes: Vec<String>,            // 执行中止等异常说明
+    /// 最差 5 帧：(boot 时刻 ms, 耗时 ms)
+    pub worst_frames: Vec<(f64, f64)>,
+    /// 异常说明（查询链中止等）
+    pub notes: Vec<String>,
 }
 
 fn sql_escape(s: &str) -> String {
@@ -585,6 +624,7 @@ pub fn analyze(tp: &Path, trace: &Path, package: &str, sql_path: &Path) -> Resul
 }
 
 impl Analysis {
+    /// 渲染人类可读的分析报告（纯文本，含窗口/包 CPU/线程/抢占/系统 top/每核/频率/帧时间线各段）
     pub fn report(&self, package: &str, rec: &RecordedTrace) -> String {
         let mut s = String::new();
         s.push_str(&format!("========== Perfetto 深挖分析（{}）==========\n", package));

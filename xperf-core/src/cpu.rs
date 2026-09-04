@@ -7,9 +7,13 @@ use std::cmp::Ordering;
 /// 线程 CPU 使用信息（agent 协议 → 前端展示）
 #[derive(Debug, Clone, Serialize)]
 pub struct ThreadCpuInfo {
+    /// 线程 TID
     pub tid: String,
+    /// 线程 CPU %（单核口径）
     pub cpu_usage: f32,
+    /// 线程名
     pub name: String,
+    /// 采样时刻（None = 未知）
     pub timestamp: Option<DateTime<Local>>,
 }
 

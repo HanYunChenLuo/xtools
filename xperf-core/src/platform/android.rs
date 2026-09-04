@@ -5,6 +5,7 @@
 
 use super::{Platform, PlatformId};
 
+/// 标准安卓平台（未识别的 product 归此）
 pub struct Android;
 
 impl Platform for Android {
