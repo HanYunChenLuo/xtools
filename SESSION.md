@@ -22,6 +22,7 @@
 | 2bd6bca | feat：采集数据统一落 `/tmp/xperf`（CLI utils data_root / GUI gui_data_root，替代 ./log，/tmp 重启自清）+ 缓存/数据清理（core clean_all_caches：~/.cache/xperf + /tmp/xperf，CLI `--clean-cache` 无需 --package、GUI 侧栏按钮 confirm 确认）。验证：清理 40.7MB/29 文件、CLI/GUI 采集均落新根 |
 | 695946a | fix：清理确认改 tauri-plugin-dialog 原生对话框（webkit2gtk 的 JS confirm() 窗口标题是 "Javascript-taurixxx"） |
 | e0eaf7e | review: 前端 UI 修复 9 项——M1 #package 补 type=text（属性选择器不匹配无 type 输入框→白底不随主题）/ M2 recorded 阶段退出进度态（原冻结在 100%"录制中"）/ M3 录制时长残留 flex 包裹改 label / M4 进度条颜色主题变量化 / L1-L2 死 CSS+旧注释 / L3 NoProcess 不抹进度条 / L5 recording 文案 / L7 内联样式收口 .sidebar-row / 后端 export_csv 补 validate_package |
+| 57e84ba | review: UI 布局缺陷 6 项（逐项代码实证属实后修）——tab 内容区 3 处 inline flex 收口 .tab-content / #status flex-shrink 防窄窗截断 / 指标页 idleHint 空闲引导（开始后隐藏）/ 侧栏「深挖录制」「数据管理」分组标题 / 清理按钮幽灵样式降级（破坏性操作视觉区分）/ resize 50ms 硬编码收敛双 rAF |
 | （docs） | CLAUDE.md（新代码规则 + simpleperf 章节 + 输出文件表）/ WORKSPACE / SESSION 更新 |
 
 ### 完成内容
