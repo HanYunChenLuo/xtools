@@ -54,18 +54,18 @@ CLI 和 GUI 不再有 adb 轮询路径，**所有采样都在设备端 agent（x
 
 ```
 CLI:  main() → monitor_process() → monitor_process_agent()
-GUI:  start_sampling / 自动启动 → spawn_sampling()（std::thread 阻塞读流）
+GUI:  start_sampling(serial) / 自动启动 → spawn_sampling()（std::thread 阻塞读流）
         │
         ├─ agent::ensure_agent_built()   ← 无二进制时自动交叉编译（NDK）
-        ├─ agent::deploy_agent()         ← push 到 /data/local/tmp（大小不一致才推）
-        ├─ agent::spawn_agent()          ← adb exec-out 长连接
+        ├─ agent::deploy_agent(bin, serial) ← push 到 /data/local/tmp（大小不一致才推）
+        ├─ agent::spawn_agent(..., serial)  ← adb -s <serial> exec-out 长连接
         └─ 事件循环：next_event() 阻塞读 NDJSON 行 → 打印/emit + 累积 pid_stats
 ```
 
 - **设备端**：xperf-agent 常驻，直接读 /proc（CPU/线程）、smaps_rollup 或 dumpsys meminfo（内存）、本地 dumpsys SurfaceFlinger（FPS），按绝对节拍（start + round×interval，防漂移）逐轮输出 JSON 行
 - **主机侧**：只是表现层（CLI 打印/流式 CSV/图表；GUI emit 给前端）。ADB 断开 → exec-out EOF → `reconnect_agent` 每 500ms 轮询等设备回来，重新部署+启动 agent，主机侧状态（时序/峰值/CSV）保留；Ctrl-C → 关闭连接 → agent 写 stdout 失败自行退出
 - **xperf-core 已无轮询实现**（原 Sampler/cpu/memory/fps 参考实现已删除，225d89b）；core 只保留协议类型（ThreadCpuInfo/MemoryDetails/FpsTimeSeriesData/PidStats/SampleEvent）+ agent 传输层 + platform/marker + trace（perfetto 深挖，CLI/GUI 共用）；采样全在 agent（零依赖独立发布，解析逻辑与 core 类型对应）
-- **GUI 前端**：CPU/内存/FPS 折线（series 保留完整会话历史，窗口跟随 10min / 全部历史切换，绘制时二分裁剪 + stride 抽稀防卡顿）、Top 线程表（500ms 节流渲染）、峰值面板（新峰值才更新 DOM）、导出 CSV（`export_csv` 命令写 `/tmp/xperf/<pkg>/<导出时刻>/`）、perfetto 深挖（共享录制时长下拉 + 按钮 → `start_trace` 命令 → `trace` 事件推进度 → 报告面板展示，与采样并行互不干扰；`--trace N` 命令行自动启动可脚本化验证）、`--package` 命令行自动启动与手动开始**同流程**（后端 `startup_args` 回查包名/间隔/勾选并回填 UI，e8f75c9）
+- **GUI 前端**：**多设备并行（顶栏每台在线设备一个 tab，热插拔动态增删；断开设备 tab 灰显保留数据、插回自动恢复采样）**。每设备页 = 独立侧栏（包名/间隔/勾选/开始停止/深挖/数据管理 + 「应用操作」：Activity 输入（留空自动 `resolve-activity`）+「打开应用」/「重启应用」（force-stop→800ms→`am start -W`，顺带测冷启动，结果进「冷启动」面板，最近 5 次；启动被系统重定向（如车机熄屏进引导页）时状态栏警示）+ 主区三子 tab（性能指标 / Perfetto 分析 / Simpleperf 分析，分析页隐藏侧栏占满全宽）。JS 为 `DeviceSession` 类（模板 `<template id="devicePageTpl">` 克隆实例，全部状态/图表/面板设备内隔离；datalist id 须按 serial 唯一化）+ App 管理器（事件 payload 均带 `serial` 分发；顶栏 status 显示激活设备的状态，进度条语义不变）。CPU/内存/FPS 折线（series 保留完整会话历史，窗口跟随 10min / 全部历史切换，绘制时二分裁剪 + stride 抽稀防卡顿）、Top 线程表（500ms 节流渲染，仅激活页）、峰值面板（新峰值才更新 DOM）、导出 CSV（`export_csv` 命令写 `/tmp/xperf/<pkg>/<导出时刻>/`）、perfetto 深挖（共享录制时长下拉 + 按钮 → `start_trace` 命令 → `trace` 事件推进度 → 报告面板展示，与采样并行互不干扰；`--trace N` 命令行自动启动可脚本化验证）、`--package --device` 命令行自动启动与手动开始**同流程**（后端 `startup_sessions` 回查全部活跃会话回填 UI 并切到对应设备页）
 
 ### CPU 采样口径（agent）
 
@@ -181,10 +181,10 @@ Platform trait + `adb devices -l` product 字段自动检测（HU_SS3/HU_SS2MAXF
 ### C 类验证能力
 
 - `--threshold cpu>80,mem>500,fps<30,gpu>90`：实时告警（静止界面 fps=0 不触发低值规则）+ 退出验证报告（触发次数/极值/总结论）
-- `--cold-start .MainActivity`：am start -W 解析（30s 超时，status!=ok 报错）；测量结果（TotalTime ms）进基线汇总
+- `--cold-start .MainActivity`：am start -W 解析（15s 手动超时，status!=ok 报错）；测量结果（TotalTime ms）进基线汇总。**模块在 `xperf-core/src/coldstart.rs`**（CLI/GUI 共用，带 serial 参数）：`measure`（activity 留空自动 `resolve_activity` 解析主入口）、`force_stop`（重启前置）、`ColdStartResult`（Serialize，GUI 直接回前端）。GUI 侧栏「打开应用」/「重启应用」按钮同链路（force-stop→800ms→am start -W），结果进「冷启动」面板（最近 5 次）；**启动被系统重定向（Activity 不属于目标包，如车机熄屏进引导页）时状态栏警示**——测量值（0ms）无效，唤醒设备重试
 - `--stack N`：simpleperf 函数热点（详见下节）
 - `--save-baseline` / `--compare-baseline`：基线对比（详见下节）
-- 打点：CLI Unix socket `/tmp/xperf-marker.sock`（`echo 标签 | nc -U ...`，每连接线程+10s 读超时）或 GUI 按钮 → 图表竖线 + markers.csv
+- 打点：CLI Unix socket `/tmp/xperf-marker.sock`（`echo 标签 | nc -U ...`，每连接线程+10s 读超时）→ 图表竖线 + markers.csv（GUI 打点功能已删，78f93a9）
 
 ### 基线对比模式（`--save-baseline`/`--compare-baseline`，xperf-core/src/baseline.rs，CLI 与 GUI 共用）
 
@@ -197,15 +197,16 @@ Platform trait + `adb devices -l` product 字段自动检测（HU_SS3/HU_SS2MAXF
 - **GUI**：侧栏「数据管理」区「保存基线/对比基线」两按钮（数据源 `collectSessionData()`，与导出 CSV 同一份前端序列）；报告展示在指标页峰值区的「基线对比」面板，新会话自动隐藏清空；后端命令 `save_baseline`/`compare_baseline`（build_summary_from_series 与 CLI 口径一致——restarts 为 None（GUI 路径未统计，如实单侧标注））
 - **真机基线（SS3 svm，2026-09-04）**：空闲态 20s×2 次，CPU 均值 30.3/29.8（持平）、PSS 462MB（持平）、FPS 29.7/30.0、Jank 5.98 次/分（持平）、GPU busy 15.3/15.4（持平）——svm 稳态噪声远小于判定闸门；篡改基线制造回归场景正确触发（⚠ 4 项 + 指标名列表）
 
-### 多设备 adb（utils 全局 `-s`，CLI `--device`/GUI 设备下拉）
+### 多设备 adb（core 会话级 `-s`；CLI 全局/`--device`，GUI 每设备一 tab 并行）
 
 多台设备同连时 adb 不带 `-s` 全部报 `more than one device`——工具链整体失效（SS3 车机 + 手机双连实测触发，2026-09-04）。
 
-- **core 注入点**：`utils::TARGET_SERIAL` 全局 + `adb()` 构造器（16 处 adb 调用点统一收敛：agent/trace/simpleperf/coldstart）+ `run_adb_command` 自动在参数前注入 `-s`（mock 注入点之前，测试不受影响）
-- **选择策略**（`pick_device`）：`--device` 显式（须在线）> 单台自动 > 多台报错（错误信息列设备清单，含 Android 版本）。CLI 在 main() 解析（冷启动/采样之前）；GUI `--package` 自动启动前做前置解析（多台未指定**确定性跳过**自动启动——避免与前端设备下拉自动选择的竞态；`--device` 无效同样跳过，不静默换台）
-- **Android 版本检测**（9cfa9a5）：`AdbDevice.android_version`（`ro.build.version.release`，`list_adb_devices` 逐台 getprop，失败标 `?`）；CLI「目标设备」打印/多台报错清单、GUI 下拉（`serial（model，Android 14）`）均展示。采集方式与版本相关——实测印证：SS3=Android 12（帧走 `SurfaceView[...](BLAST)` 层）、SS2MAX=Android 11（帧走 `SurfaceView - ` 层，无 BLAST）
-- **GUI 侧栏设备下拉**：`list_devices`（带 `selected` 已生效项，前端不覆盖 `--device` 选择）+ `select_device`（校验在线后写全局）；页面加载先选设备再拉包列表（`list_packages` 依赖目标已选定）；切换即重选并刷新包列表；手动「开始监控」时 `spawn_sampling` 内兜底（未选择则单台自动、多台 emit `sampling-error` 事件给前端——同时构建/部署/启动失败也走该事件，前端置错误文案并复位按钮）
-- **动态检测（热插拔）**：`spawn_device_monitor` 线程每 3s 轮询 `adb devices -l`，与上次快照 diff（`diff_devices` 纯函数），变化时 emit `devices-changed {devices, selected, added, removed}` → 前端增量重建下拉（保持当前选择）；首轮只建快照不通知（首屏由 loadDevices 填充）；目标设备被移除不清后端 serial（断连重连逻辑仍指向它，插回即恢复采样），下拉占位"（已断开）"+ 状态提示；新设备接入状态提示可切换。**软件手段（kill-server/reconnect/wait-for-disconnect）制造不出 diff**——server 重启后枚举快于 3s 轮询窗且 serial 不变，验证须物理插拔
+- **core 注入点（两级）**：全局 `utils::TARGET_SERIAL` + `adb()`/`run_adb_command`（CLI 用；mock 注入点之前，测试不受影响）；**会话级 `adb_for(serial)`/`run_adb_command_for(serial, …)`/`resolve_serial`**（GUI 多设备并行用）——`spawn_agent`/`deploy_agent`/`reconnect_agent`/`qnx_stop_stats`/`trace::record`/`simpleperf::record`/`detect_platform_live`/`coldstart::*` 均带 `serial: Option<&str>` 参数：`None` 回退全局（CLI 调用点零行为变化）、`Some(s)` 显式路由（空串视同 None）。每台设备的 adb 长连接互不干扰，**双机并行采样/深挖实测可用**
+- **选择策略**（`pick_device`）：`--device` 显式（须在线）> 单台自动 > 多台报错（错误信息列设备清单，含 Android 版本）。CLI 在 main() 解析（冷启动/采样之前）；GUI `--package` 自动启动前做前置解析（多台未指定**确定性跳过**自动启动；`--device` 无效同样跳过，不静默换台）
+- **Android 版本检测**（9cfa9a5）：`AdbDevice.android_version`（`ro.build.version.release`，`list_adb_devices` 逐台 getprop，失败标 `?`）；CLI「目标设备」打印/多台报错清单、GUI 设备 tab 均展示。采集方式与版本相关——实测印证：SS3=Android 12（帧走 `SurfaceView[...](BLAST)` 层）、SS2MAX=Android 11（帧走 `SurfaceView - ` 层，无 BLAST）
+- **GUI 多设备并行**：`AppState.sessions: HashMap<serial, DeviceSession>`（每台设备独立 running/trace_running/stack_running/package/startup_extra；`session()` 取或建 + `record_startup()` 写启动记录）；全部命令带 serial（`start_sampling`/`stop_sampling`/`start_trace`/`start_stack`/`list_packages`/`is_running`/`launch_app`/`restart_app`——前置校验设备在线 `ensure_device_online` + 包名防遍历）；事件 payload 均带 serial（`sample={serial, event}`、`trace`/`stack`/`sampling-error` 同）→ 前端按 serial 分发到对应 `DeviceSession`；`startup_sessions` 回查全部活跃会话（自动启动回填 + 切到对应设备页）；关窗遍历全部会话置停止。GUI 不再使用全局 serial（`select_device` 命令已删，`list_devices` 无 selected 字段）
+- **trace/stack 落盘目录隔离**：GUI 深挖目录 `<pkg>/<ts>-<serial>/`（serial 后缀防双设备同秒录制撞目录；CLI 结构 `<pkg>/<ts>/` 不变）
+- **动态检测（热插拔）**：`spawn_device_monitor` 线程每 3s 轮询 `adb devices -l`，与上次快照 diff（`diff_devices` 纯函数），变化时 emit `devices-changed {devices, added, removed}` → 前端：新设备建 tab，断开设备 tab 灰显「（已断开）」——**数据与采样线程保留，设备插回后 `reconnect_agent` 自动恢复采样**（采样中状态栏提示等待重连）；首轮只建快照不通知。**软件手段（kill-server/reconnect/wait-for-disconnect）制造不出 diff**——server 重启后枚举快于 3s 轮询窗且 serial 不变，验证须物理插拔
 - **默认窗口大小（7cb4b4b）**：`resize_default` 命令按屏幕逻辑尺寸动态计算（宽 72% clamp[1080,1600]、高 88% clamp[880,1280]，各留屏幕边距防超出；min 1080×720 + 侧栏 overflow 兜底），前端加载完成后调用；conf 固定尺寸 1400×1000 为检测失败兜底。侧栏指标勾选两列 grid + PIDs 列表限高 140px，默认窗口高度下侧栏免滚动全量显示。（曾把 webview 空白归因于 setup 阶段 `set_size` 时序——**9cfa9a5 修正为误判**，真凶见下条）
 - **webview 间歇空白（9cfa9a5 修）**：webkit2gtk 的 DMABUF 渲染路径在本机间歇性空白（窗口仅标题栏、内容全灰；浏览器等 GPU 重负载应用占用时触发，同代码两次启动一好一坏连续复现）——修复：main 最开头进程内 `set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1")`（须在任何 webview 初始化前）。**判别方法**：空白时 `WEBKIT_DISABLE_DMABUF_RENDERER=1` 手动启动对比即可确认
 - **平台检测**：`detect_platform_live` 按 serial 过滤设备行再 detect——**坑：过滤须补回表头**（`detect_platform` 按 `skip(1)` 跳表头，曾因表头被滤掉、SS3 行被当表头跳过而误判 Android，真机复现+单测锁定）

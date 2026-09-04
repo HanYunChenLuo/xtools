@@ -373,11 +373,13 @@ pub fn ensure_agent_built() -> Result<PathBuf> {
 
 /// 尝试 adb root（生产构建可能失败，静默忽略）。
 /// 不解析 adb root 文案（各版本不同），直接 `adb shell id` 验证 uid。
-fn try_adb_root() {
-    let _ = crate::utils::adb().args(["root"]).output();
+/// `serial`：目标设备（多设备并行会话用，`None` 回退全局选择）。
+fn try_adb_root(serial: Option<&str>) {
+    let adb = || crate::utils::adb_for(serial);
+    let _ = adb().args(["root"]).output();
     // adbd 重启后等设备回来
-    let _ = crate::utils::adb().args(["wait-for-device"]).output();
-    let id = crate::run_adb_command(&["shell", "id"]).map(|o| o.stdout).unwrap_or_default();
+    let _ = adb().args(["wait-for-device"]).output();
+    let id = crate::utils::run_adb_command_for(serial, &["shell", "id"]).map(|o| o.stdout).unwrap_or_default();
     if id.contains("uid=0") {
         eprintln!("adb root: 成功（uid=0）");
     } else {
@@ -387,42 +389,45 @@ fn try_adb_root() {
 
 /// 推送 agent 到设备（设备上不存在或大小/mtime 不一致时）
 /// 大小+修改时间双判：同尺寸不同版本（改代码但恰好等长）也能被更新。
-pub fn deploy_agent(local: &Path) -> Result<()> {
+/// `serial`：目标设备（多设备并行会话用，`None` 回退全局选择）。
+pub fn deploy_agent(local: &Path, serial: Option<&str>) -> Result<()> {
     // 自动尝试 root（生产构建会静默失败，不影响后续流程）
-    try_adb_root();
+    try_adb_root(serial);
     let local_meta = std::fs::metadata(local)?;
     let local_size = local_meta.len();
     let local_mtime = local_meta.modified().ok()
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    let remote_size = crate::run_adb_command(&["shell", "stat", "-c", "%s", DEVICE_AGENT_PATH])
+    let remote_size = crate::utils::run_adb_command_for(serial, &["shell", "stat", "-c", "%s", DEVICE_AGENT_PATH])
         .ok()
         .and_then(|o| o.stdout.trim().parse::<u64>().ok());
-    let remote_mtime = crate::run_adb_command(&["shell", "stat", "-c", "%Y", DEVICE_AGENT_PATH])
+    let remote_mtime = crate::utils::run_adb_command_for(serial, &["shell", "stat", "-c", "%Y", DEVICE_AGENT_PATH])
         .ok()
         .and_then(|o| o.stdout.trim().parse::<u64>().ok());
     if remote_size == Some(local_size) && remote_mtime == Some(local_mtime) {
         return Ok(()); // 已是最新（大小一致）
     }
-    crate::run_adb_command(&[
+    crate::utils::run_adb_command_for(serial, &[
         "push",
         &local.to_string_lossy(),
         DEVICE_AGENT_PATH,
     ])?;
     // push 后同步 mtime 对齐本地，使下次部署的 mtime 匹配判断生效
-    let _ = crate::run_adb_command(&["shell", &format!("touch -d @{} {}", local_mtime, DEVICE_AGENT_PATH)]);
-    crate::run_adb_command(&["shell", "chmod", "755", DEVICE_AGENT_PATH])?;
+    let _ = crate::utils::run_adb_command_for(serial, &["shell", &format!("touch -d @{} {}", local_mtime, DEVICE_AGENT_PATH)]);
+    crate::utils::run_adb_command_for(serial, &["shell", "chmod", "755", DEVICE_AGENT_PATH])?;
     Ok(())
 }
 
 /// 启动设备端采样器，返回事件流。Ctrl-C/断连时 agent 因 stdout 写失败自行退出。
 /// platform: 平台提示（如 "ss3"），传入时 agent 跳过对应探测
+/// `serial`：目标设备（多设备并行会话用，`None` 回退全局选择）。
 pub fn spawn_agent(
     package: Option<&str>,
     interval_ms: u64,
     flags: MetricFlags,
     platform: Option<&dyn Platform>,
+    serial: Option<&str>,
 ) -> Result<AgentStream> {
     // setsid：agent 脱离 adb 会话——adbd 断连清理时不再被信号直杀，而是走 stdout
     // 写失败（EPIPE）路径：心跳/退出钩子得以执行（QNX 链清理等），随后自行退出。
@@ -440,7 +445,7 @@ pub fn spawn_agent(
             cmd_args.extend(["--qnx-host".to_string(), qnx.to_string()]);
         }
     }
-    let mut child = crate::utils::adb()
+    let mut child = crate::utils::adb_for(serial)
         .args(&cmd_args)
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -452,11 +457,13 @@ pub fn spawn_agent(
     })
 }
 
-/// 目标设备是否在线（重连轮询用）。已选择目标设备时只认该设备
+/// 目标设备是否在线（重连轮询用）。已指定目标设备时只认该设备
 /// （`adb -s <serial> get-state` = "device"）——多台设备同连时其他设备在
-/// 不算"回来了"；未选择设备时任意一台在线即可。
-fn device_online() -> bool {
-    let any_online = crate::utils::adb()
+/// 不算"回来了"；未指定设备时任意一台在线即可。
+/// `serial`：目标设备（多设备并行会话用，`None` 回退全局选择）。
+fn device_online(serial: Option<&str>) -> bool {
+    let adb = || crate::utils::adb_for(serial);
+    let any_online = adb()
         .arg("devices")
         .output()
         .map(|o| {
@@ -467,9 +474,9 @@ fn device_online() -> bool {
     if !any_online {
         return false;
     }
-    match crate::utils::target_serial() {
+    match crate::utils::resolve_serial(serial) {
         // get-state：正常输出 "device"；offline/unauthorized/serial 无效时 adb 报错（status != 0）
-        Some(_) => crate::utils::adb()
+        Some(_) => adb()
             .arg("get-state")
             .output()
             .map(|o| o.status.success() && String::from_utf8_lossy(&o.stdout).trim() == "device")
@@ -483,15 +490,17 @@ fn device_online() -> bool {
 /// 信号直杀 agent（setsid 也挡不住），钩子无机会执行。此函数经独立短 telnet 会话处理：
 /// 先纯观察探测（只读 slog，不动 kgsl-control），frame 流在跑才发 echo>（死写入者）
 /// 停止命令——对已停链写入会将其全部复活（真机实测 toggle 语义），故不可无条件执行。
-pub fn qnx_stop_stats(platform: &dyn crate::platform::Platform, interval_ms: u64) {
+pub fn qnx_stop_stats(platform: &dyn crate::platform::Platform, interval_ms: u64, serial: Option<&str>) {
     let Some(ip) = platform.qnx_host() else { return };
     // 多会话并发保护：还有其他 agent 在跑则跳过（停链会杀掉对方采样中的流）。
     // 先等自身 agent 退出（adbd 异步收尸有 1-2s 延迟，立即探测会把残留的自身
     // 误判为他人——真机实测），轮询最多 ~5s；之后计数 ≥1 即有他人。
-    // `[n]` 正则防检测命令载体自匹配。
+    // `[n]` 正则防检测命令载体自匹配。pgrep 在目标设备上执行，多设备并行时
+    // 各设备天然隔离（一台设备的停链不受另一台上还在采样的 agent 影响）。
+    let adb = || crate::utils::adb_for(serial);
     let mut others = 0u32;
     for _ in 0..10 {
-        let Ok(out) = crate::utils::adb().arg("shell").arg("pgrep -fc 'xperf-age[n]t'").output() else { return };
+        let Ok(out) = adb().arg("shell").arg("pgrep -fc 'xperf-age[n]t'").output() else { return };
         others = String::from_utf8_lossy(&out.stdout).trim().parse::<u32>().unwrap_or(0);
         if others == 0 {
             break; // 自身已收尸且无他人
@@ -507,7 +516,7 @@ pub fn qnx_stop_stats(platform: &dyn crate::platform::Platform, interval_ms: u64
         "({{ sleep 1; echo root; sleep 1; echo 'slog2info -W | grep frame &'; sleep 3; }} | busybox telnet {})",
         ip
     );
-    let Ok(out) = crate::utils::adb().arg("shell").arg(&probe).output() else { return };
+    let Ok(out) = adb().arg("shell").arg(&probe).output() else { return };
     let flowing = String::from_utf8_lossy(&out.stdout).matches("frame ").count();
     if flowing < 2 {
         return; // 链未在流（agent 退出钩子已清理 / 本就无链）：不写，死写入者撞停链会复活
@@ -517,28 +526,30 @@ pub fn qnx_stop_stats(platform: &dyn crate::platform::Platform, interval_ms: u64
         "({{ sleep 1; echo root; sleep 1; echo 'echo gpubusystats {} > /dev/kgsl-control'; sleep 2; }} | busybox telnet {})",
         period, ip
     );
-    let _ = crate::utils::adb().arg("shell").arg(&kill).output();
+    let _ = adb().arg("shell").arg(&kill).output();
 }
 
 /// 断连恢复：事件流 EOF（adb 长连接断开 / agent 进程退出）后调用。
 /// 每 500ms 轮询设备状态，设备回来后重新部署并启动 agent。
 /// `is_running` 返回 false（用户停止 / Ctrl-C）时返回 None；重连成功返回新事件流。
 /// 调用方持有的采样状态（时序、峰值等）不受影响，新 agent 的首轮仅重建基线。
+/// `serial`：目标设备（多设备并行会话用，`None` 回退全局选择）。
 pub fn reconnect_agent(
     package: Option<&str>,
     interval_ms: u64,
     flags: MetricFlags,
     platform: Option<&dyn Platform>,
     is_running: &dyn Fn() -> bool,
+    serial: Option<&str>,
 ) -> Option<AgentStream> {
     loop {
         if !is_running() {
             return None;
         }
-        if device_online() {
+        if device_online(serial) {
             match ensure_agent_built()
-                .and_then(|bin| deploy_agent(&bin))
-                .and_then(|_| spawn_agent(package, interval_ms, flags, platform))
+                .and_then(|bin| deploy_agent(&bin, serial))
+                .and_then(|_| spawn_agent(package, interval_ms, flags, platform, serial))
             {
                 Ok(s) => return Some(s),
                 Err(e) => eprintln!("agent 重连失败: {}，继续等待…", e),

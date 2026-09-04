@@ -14,7 +14,6 @@ use tokio::time::Instant;
 
 mod utils;
 mod alerts;
-mod coldstart;
 use utils as cli_utils;
 use utils::validate_package_name;
 
@@ -157,7 +156,7 @@ async fn monitor_process(args: &Args, cold_start_ms: Option<u64>) -> Result<(), 
             let pkg = args.package.clone().unwrap_or_default();
             std::thread::spawn(move || {
                 let dir = cli_utils::create_timestamp_subdir(&pkg)?.join("trace");
-                trace::record(n, &dir, None)
+                trace::record(n, &dir, None, None)
             })
         });
         let stack_handle = args.stack.map(|n| {
@@ -165,7 +164,7 @@ async fn monitor_process(args: &Args, cold_start_ms: Option<u64>) -> Result<(), 
             let pkg = args.package.clone().unwrap_or_default();
             std::thread::spawn(move || {
                 let dir = cli_utils::create_timestamp_subdir(&pkg)?.join("stack");
-                simpleperf::record(n, &pkg, &dir, None)
+                simpleperf::record(n, &pkg, &dir, None, None)
             })
         });
         let mut failed: Vec<&str> = Vec::new();
@@ -272,7 +271,7 @@ fn run_cold_start(args: &Args) -> Option<u64> {
     let package = args.package.clone().unwrap_or_default();
     if let Some(ref activity) = args.cold_start {
         println!("{}", "========== 冷启动测量 ==========".green().bold());
-        let r = match coldstart::measure(&package, activity) {
+        let r = match xperf_core::coldstart::measure(&package, activity, None) {
             Ok(r) => {
                 println!("{}", r.summary().cyan());
                 Some(r.total_time_ms)
@@ -336,10 +335,10 @@ async fn monitor_process_agent(
     let package = args.package.clone().unwrap_or_default();
 
     let bin = agent::ensure_agent_built()?;
-    agent::deploy_agent(&bin)?;
-    let platform = xperf_core::detect_platform_live();
+    agent::deploy_agent(&bin, None)?;
+    let platform = xperf_core::detect_platform_live(None);
     println!("平台: {} ({})", platform.name(), platform.description());
-    let mut stream = agent::spawn_agent(Some(&package), args.interval, flags, Some(&*platform))?;
+    let mut stream = agent::spawn_agent(Some(&package), args.interval, flags, Some(&*platform), None)?;
     println!("agent 已部署并启动（间隔 {}ms）", args.interval);
 
     // perfetto 深挖（--trace N）：后台线程录制，与采样同窗口（agent 启动后同时开跑）
@@ -348,7 +347,7 @@ async fn monitor_process_agent(
         let pkg = args.package.clone().unwrap_or_default();
         std::thread::spawn(move || {
             let dir = cli_utils::create_timestamp_subdir(&pkg)?.join("trace");
-            trace::record(n, &dir, None)
+            trace::record(n, &dir, None, None)
         })
     });
     // simpleperf 函数热点（--stack N）：后台线程录制，与采样/trace 同窗口
@@ -357,7 +356,7 @@ async fn monitor_process_agent(
         let pkg = args.package.clone().unwrap_or_default();
         std::thread::spawn(move || {
             let dir = cli_utils::create_timestamp_subdir(&pkg)?.join("stack");
-            simpleperf::record(n, &pkg, &dir, None)
+            simpleperf::record(n, &pkg, &dir, None, None)
         })
     });
     let deadline = stop_after.map(|d| Instant::now() + d);
@@ -443,6 +442,7 @@ async fn monitor_process_agent(
                 match agent::reconnect_agent(
                     Some(&package), args.interval, flags, Some(&*platform),
                     &move || r.load(Ordering::SeqCst),
+                    None,
                 ) {
                     Some(s) => {
                         stream = s;
@@ -817,7 +817,7 @@ async fn monitor_process_agent(
     drop(stream); // 杀掉设备端 agent（Drop 里 kill）
     // QNX 统计链清理兜底：agent 可能被 adbd 信号直杀而来不及跑退出钩子
     if flags.gpu {
-        agent::qnx_stop_stats(&*platform, args.interval);
+        agent::qnx_stop_stats(&*platform, args.interval, None);
     }
     generate_final_outputs(args, &pid_stats, &thread_time_series, &extra)?;
     println!("Process Restarts: {}", restart_count.to_string().red());

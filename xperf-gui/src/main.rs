@@ -1,9 +1,10 @@
-//! xperf-gui：xtools 的 Tauri 桌面 GUI——与 CLI 共用 xperf-core 的采样/深挖能力，
-//! 前端呈现折线图/实时数值/Top 线程/峰值/Perfetto 分析报告与 simpleperf 函数热点报告
-//! （各自独立 tab），支持暗/亮主题。
-//! 支持命令行自动启动：`--package <pkg> [--interval N] [--cpu …] [--trace N] [--stack N]`。
+//! xperf-gui：xtools 的 Tauri 桌面 GUI——与 CLI 共用 xperf-core 的采样/深挖能力。
+//! 多设备并行：每台在线设备一个独立会话（顶栏设备 tab），各自持有采样/Perfetto/
+//! simpleperf 三路控制与状态，事件 payload 均带 `serial` 供前端分发。
+//! 支持命令行自动启动：`--package <pkg> [--device <serial>] [--interval N] [--cpu …] [--trace N] [--stack N]`。
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use chrono::{DateTime, Local};
 use tauri::{Emitter, Manager, State};
@@ -121,59 +122,47 @@ fn map_event(
 }
 
 /// 后台采样循环（start_sampling 命令与自动启动共用）。
-/// 采样在设备端 agent 进行，本线程只阻塞读事件流并转发给前端。
-fn spawn_sampling(app: tauri::AppHandle, package: String, interval: u64, flags: MetricFlags, running: Arc<Mutex<bool>>) {
-    eprintln!("[sampling] 启动: package={} interval={} flags={:?}", package, interval, flags);
-    // 记录当前采样包名与启动参数（startup_args 回查给前端回填输入框/勾选）
+/// 采样在设备端 agent 进行，本线程只阻塞读事件流并转发给前端；
+/// 全部 adb 调用带 `-s <serial>` 路由到该设备（多设备并行互不干扰）。
+/// `sample` 事件 payload：`{serial, event}`（前端按 serial 分发到对应设备页）。
+fn spawn_sampling(app: tauri::AppHandle, serial: String, package: String, interval: u64, flags: MetricFlags, running: Arc<Mutex<bool>>) {
+    eprintln!("[sampling] 启动: device={} package={} interval={} flags={:?}", serial, package, interval, flags);
+    // 记录当前采样包名与启动参数（startup_sessions 回查给前端回填输入框/勾选）
     if let Some(state) = app.try_state::<AppState>() {
-        *state.package.lock().unwrap() = package.clone();
-        *state.startup_extra.lock().unwrap() = Some((interval, flags));
+        state.record_startup(&serial, &package, interval, flags);
     }
-    std::thread::spawn(move || {
-        // 设备选择兜底（spawn 前一次）：未选择时单台自动选中；
-        // 多台同连未选择 → 报错给前端（须先在侧栏下拉选定），不进入采样
-        if xperf_core::target_serial().is_none() {
-            let r = xperf_core::list_adb_devices()
-                .map_err(|e| e.to_string())
-                .and_then(|devices| {
-                    xperf_core::pick_device(None, &devices)
-                        .map(|d| d.serial)
-                        .map_err(|e| e.to_string())
-                });
-            match r {
-                Ok(serial) => xperf_core::set_target_serial(Some(serial)),
-                Err(e) => {
-                    let _ = app.emit("sampling-error", serde_json::json!({ "message": e }));
-                    let mut running = running.lock().unwrap();
-                    *running = false;
-                    return;
-                }
-            }
+    let emit_error = {
+        let app = app.clone();
+        let serial = serial.clone();
+        move |message: String| {
+            let _ = app.emit("sampling-error", serde_json::json!({ "serial": serial, "message": message }));
         }
-        let platform = xperf_core::detect_platform_live();
+    };
+    std::thread::spawn(move || {
+        let platform = xperf_core::detect_platform_live(Some(&serial));
         eprintln!("[sampling] 平台: {} ({})", platform.name(), platform.description());
         let bin = match agent::ensure_agent_built() {
             Ok(b) => b,
             Err(e) => {
                 eprintln!("[sampling] agent 构建失败: {}", e);
-                let _ = app.emit("sampling-error", serde_json::json!({ "message": format!("agent 构建失败: {}", e) }));
+                emit_error(format!("agent 构建失败: {}", e));
                 let mut running = running.lock().unwrap();
                 *running = false;
                 return;
             }
         };
-        if let Err(e) = agent::deploy_agent(&bin) {
+        if let Err(e) = agent::deploy_agent(&bin, Some(&serial)) {
             eprintln!("[sampling] agent 部署失败: {}", e);
-            let _ = app.emit("sampling-error", serde_json::json!({ "message": format!("agent 部署失败: {}", e) }));
+            emit_error(format!("agent 部署失败: {}", e));
             let mut running = running.lock().unwrap();
             *running = false;
             return;
         }
-        let mut stream = match agent::spawn_agent(Some(&package), interval, flags, Some(&*platform)) {
+        let mut stream = match agent::spawn_agent(Some(&package), interval, flags, Some(&*platform), Some(&serial)) {
             Ok(s) => s,
             Err(e) => {
                 eprintln!("[sampling] agent 启动失败: {}", e);
-                let _ = app.emit("sampling-error", serde_json::json!({ "message": format!("agent 启动失败: {}", e) }));
+                emit_error(format!("agent 启动失败: {}", e));
                 let mut running = running.lock().unwrap();
                 *running = false;
                 return;
@@ -185,7 +174,7 @@ fn spawn_sampling(app: tauri::AppHandle, package: String, interval: u64, flags: 
                 Ok(Some(Ok(ev))) => {
                     for sev in map_event(ev, &mut known_pids) {
                         eprintln!("[sampling] {}", brief_event(&sev));
-                        let _ = app.emit("sample", sev);
+                        let _ = app.emit("sample", serde_json::json!({ "serial": serial, "event": sev }));
                     }
                 }
                 Ok(Some(Err(e))) => eprintln!("[sampling] 协议解析失败: {}", e),
@@ -196,6 +185,7 @@ fn spawn_sampling(app: tauri::AppHandle, package: String, interval: u64, flags: 
                     match agent::reconnect_agent(
                         Some(&package), interval, flags, Some(&*platform),
                         &move || *running2.lock().unwrap(),
+                        Some(&serial),
                     ) {
                         Some(s) => {
                             stream = s;
@@ -210,7 +200,7 @@ fn spawn_sampling(app: tauri::AppHandle, package: String, interval: u64, flags: 
         drop(stream);
         // QNX 统计链清理兜底：agent 可能被 adbd 信号直杀而来不及跑退出钩子
         if flags.gpu {
-            agent::qnx_stop_stats(&*platform, interval);
+            agent::qnx_stop_stats(&*platform, interval, Some(&serial));
         }
     });
 }
@@ -250,16 +240,56 @@ fn brief_event(ev: &SampleEvent) -> String {
     }
 }
 
-struct AppState {
+/// 单台设备的会话状态（多设备并行：每台在线设备一个独立会话，
+/// 采样/Perfetto/simpleperf 三路控制互不干扰）。
+#[derive(Clone)]
+struct DeviceSession {
+    /// 采样进行中
     running: Arc<Mutex<bool>>,
     /// 深挖录制进行中（与采样互不干扰，可并行）
     trace_running: Arc<Mutex<bool>>,
     /// 函数热点录制进行中（与采样/深挖互不干扰，可并行）
     stack_running: Arc<Mutex<bool>>,
-    /// 当前采样包名（`--package` 自动启动与手动开始均写入；`startup_args` 回查用）
-    package: Mutex<String>,
+    /// 当前采样包名（`--package` 自动启动与手动开始均写入；`startup_sessions` 回查用）
+    package: String,
     /// 采样启动参数（间隔 + 指标 flags，与 `package` 同一写入点；None = 非本进程启动）
-    startup_extra: Mutex<Option<(u64, xperf_core::MetricFlags)>>,
+    startup_extra: Option<(u64, MetricFlags)>,
+}
+
+impl DeviceSession {
+    fn new() -> Self {
+        Self {
+            running: Arc::new(Mutex::new(false)),
+            trace_running: Arc::new(Mutex::new(false)),
+            stack_running: Arc::new(Mutex::new(false)),
+            package: String::new(),
+            startup_extra: None,
+        }
+    }
+}
+
+/// 全部设备会话（serial → 会话）。命令按 serial 定位会话；
+/// 首次触达的 serial 自动建会话（设备在线性由命令前置校验保证）。
+struct AppState {
+    sessions: Mutex<HashMap<String, DeviceSession>>,
+}
+
+impl AppState {
+    /// 取（无则建）指定设备的会话，返回其克隆（Arc/字段均克隆，锁内不持有）
+    fn session(&self, serial: &str) -> DeviceSession {
+        let mut map = self.sessions.lock().unwrap();
+        map.entry(serial.to_string()).or_insert_with(DeviceSession::new).clone()
+    }
+
+    /// 更新指定设备会话的启动记录（包名 + 间隔 + flags；无则先建会话）。
+    /// `--package` 自动启动与手动「开始监控」均经此写入，`startup_sessions` 回查。
+    fn record_startup(&self, serial: &str, package: &str, interval: u64, flags: MetricFlags) {
+        if let Ok(mut map) = self.sessions.lock() {
+            let s = map.entry(serial.to_string()).or_insert_with(DeviceSession::new);
+            s.package = package.to_string();
+            s.startup_extra = Some((interval, flags));
+        }
+    }
 }
 
 /// 包名校验：防路径遍历（包名会拼入日志目录路径）
@@ -272,6 +302,21 @@ fn validate_package(package: &str) -> Result<(), String> {
     }
 }
 
+/// 设备在线性校验（命令入口用）：serial 须在当前在线列表中，
+/// 不在线返回带设备清单的错误（前端展示给用户）。
+fn ensure_device_online(serial: &str) -> Result<(), String> {
+    let devices = xperf_core::list_adb_devices().map_err(|e| e.to_string())?;
+    if devices.iter().any(|d| d.serial == serial) {
+        Ok(())
+    } else {
+        Err(format!(
+            "设备 {} 不在线（当前在线：{}）",
+            serial,
+            if devices.is_empty() { "无".to_string() } else { devices.iter().map(|d| d.serial.as_str()).collect::<Vec<_>>().join(", ") }
+        ))
+    }
+}
+
 /// 采集数据根目录 `/tmp/xperf`（与 CLI 的 `cli_utils::data_root` 同一定位；GUI 独立
 /// 定义避免跨 crate 公共依赖改动——两处实现一致）
 fn gui_data_root() -> std::path::PathBuf {
@@ -281,6 +326,7 @@ fn gui_data_root() -> std::path::PathBuf {
 #[tauri::command]
 #[allow(clippy::too_many_arguments)] // tauri 命令参数须扁平，指标开关逐一对应前端勾选框
 async fn start_sampling(
+    serial: String,
     package: String,
     interval: u64,
     cpu: bool,
@@ -294,51 +340,60 @@ async fn start_sampling(
     state: State<'_, AppState>,
     app: tauri::AppHandle,
 ) -> Result<(), String> {
+    let session = state.session(&serial);
     {
-        let mut running = state.running.lock().map_err(|e| e.to_string())?;
+        let mut running = session.running.lock().map_err(|e| e.to_string())?;
         if *running {
             return Err("已在监控中，请先停止".into());
         }
         *running = true;
     }
-
-    // 包名校验：防路径遍历（包名会拼入日志目录路径）
+    // 前置校验失败时回滚 running
+    let bail = |session: &DeviceSession, e: String| -> String {
+        *session.running.lock().unwrap() = false;
+        e
+    };
     if let Err(e) = validate_package(&package) {
-        *state.running.lock().map_err(|e| e.to_string())? = false;
-        return Err(e);
+        return Err(bail(&session, e));
+    }
+    if let Err(e) = ensure_device_online(&serial) {
+        return Err(bail(&session, e));
     }
 
     let flags = MetricFlags { cpu, memory, fps, freq, thermal, gpu, io, net };
-    spawn_sampling(app, package, interval, flags, state.running.clone());
+    spawn_sampling(app, serial, package, interval, flags, session.running.clone());
 
     Ok(())
 }
 
+/// 停止指定设备的采样（`running` 置 false，采样线程下一轮检测到后退出并清理）
 #[tauri::command]
-fn stop_sampling(state: State<'_, AppState>) -> Result<(), String> {
-    let mut running = state.running.lock().map_err(|e| e.to_string())?;
+fn stop_sampling(serial: String, state: State<'_, AppState>) -> Result<(), String> {
+    let session = state.session(&serial);
+    let mut running = session.running.lock().map_err(|e| e.to_string())?;
     *running = false;
     Ok(())
 }
 
 /// 后台深挖线程（start_trace 命令与 --trace 自动启动共用）：
-/// 录制 → 拉回 → trace_processor SQL 分析，全程 emit("trace") 推进度。
-/// stage: recording / progress（每秒，message 含已录制秒数）/ recorded（已拉回，
-/// 分析中）/ done（message=完整报告文本）/ error；recorded/done 附 trace_path
-/// （前端"在浏览器打开 Perfetto UI"按钮用）。
+/// 录制 → 拉回 → trace_processor SQL 分析，全程 emit("trace") 推进度（payload 带
+/// serial，前端分发到对应设备页）。stage: recording / progress（每秒，message 含已
+/// 录制秒数）/ recorded（已拉回，分析中）/ done（message=完整报告文本）/ error；
+/// recorded/done 附 trace_path（前端"在浏览器打开 Perfetto UI"按钮用）。
 /// 与采样会话互不干扰（可并行；GUI 采样不限时，窗口对照靠报告与图表的时间戳）。
-fn spawn_trace(app: tauri::AppHandle, package: String, seconds: u64, running: Arc<Mutex<bool>>) {
-    eprintln!("[trace] 启动: package={} seconds={}", package, seconds);
+/// 落盘目录 `<pkg>/<ts>-<serial>`（serial 后缀防双设备同秒录制撞目录）。
+fn spawn_trace(app: tauri::AppHandle, serial: String, package: String, seconds: u64, running: Arc<Mutex<bool>>) {
+    eprintln!("[trace] 启动: device={} package={} seconds={}", serial, package, seconds);
     std::thread::spawn(move || {
         let emit_stage = |stage: &str, message: String, trace_path: Option<String>| {
             let _ = app.emit(
                 "trace",
-                serde_json::json!({ "stage": stage, "message": message, "trace_path": trace_path }),
+                serde_json::json!({ "serial": serial, "stage": stage, "message": message, "trace_path": trace_path }),
             );
         };
         let dir = gui_data_root()
             .join(&package)
-            .join(Local::now().format("%Y%m%d_%H%M%S").to_string())
+            .join(format!("{}-{}", Local::now().format("%Y%m%d_%H%M%S"), serial))
             .join("trace");
         emit_stage("recording", format!("录制 {}s perfetto trace…（窗口内操作被测应用）", seconds), None);
         let progress = |elapsed: u64| {
@@ -346,13 +401,14 @@ fn spawn_trace(app: tauri::AppHandle, package: String, seconds: u64, running: Ar
             let _ = app.emit(
                 "trace",
                 serde_json::json!({
+                    "serial": serial,
                     "stage": "progress",
                     "message": format!("perfetto 录制中 {}/{}s", elapsed.min(seconds), seconds),
                     "trace_path": null
                 }),
             );
         };
-        let rec = match xperf_core::trace::record(seconds, &dir, Some(&progress)) {
+        let rec = match xperf_core::trace::record(seconds, &dir, Some(&progress), Some(&serial)) {
             Ok(r) => r,
             Err(e) => {
                 eprintln!("[trace] 录制失败: {}", e);
@@ -382,45 +438,55 @@ fn spawn_trace(app: tauri::AppHandle, package: String, seconds: u64, running: Ar
 /// 深挖模式：录制 N 秒 perfetto trace 并 SQL 归因（详见 xperf-core/src/trace.rs）
 #[tauri::command]
 async fn start_trace(
+    serial: String,
     package: String,
     seconds: u64,
     state: State<'_, AppState>,
     app: tauri::AppHandle,
 ) -> Result<(), String> {
+    let session = state.session(&serial);
     {
-        let mut t = state.trace_running.lock().map_err(|e| e.to_string())?;
+        let mut t = session.trace_running.lock().map_err(|e| e.to_string())?;
         if *t {
             return Err("Perfetto 分析进行中，请等待完成".into());
         }
         *t = true;
     }
+    let bail = |session: &DeviceSession, e: String| -> String {
+        *session.trace_running.lock().unwrap() = false;
+        e
+    };
     if let Err(e) = validate_package(&package) {
-        *state.trace_running.lock().map_err(|e| e.to_string())? = false;
-        return Err(e);
+        return Err(bail(&session, e));
+    }
+    if let Err(e) = ensure_device_online(&serial) {
+        return Err(bail(&session, e));
     }
     let seconds = seconds.clamp(1, 600);
-    spawn_trace(app, package, seconds, state.trace_running.clone());
+    spawn_trace(app, serial, package, seconds, session.trace_running.clone());
     Ok(())
 }
 
 /// 后台函数热点线程（start_stack 命令与 --stack 自动启动共用）：
-/// 录制 → 设备端三视图报告 → 拉回 → 渲染热点报告，全程 emit("stack") 推进度。
-/// stage: recording / progress（每秒，message 含已录制秒数）/ recorded（已拉回，
-/// 渲染报告中）/ done（message=完整报告文本）/ error；recorded/done/error 附
-/// data_path（`.data` 文件路径，前端"在浏览器打开火焰图"按钮用）。
+/// 录制 → 设备端三视图报告 → 拉回 → 渲染热点报告，全程 emit("stack") 推进度
+/// （payload 带 serial，前端分发到对应设备页）。stage: recording / progress（每秒，
+/// message 含已录制秒数）/ recorded（已拉回，渲染报告中）/ done（message=完整报告
+/// 文本）/ error；recorded/done/error 附 data_path（`.data` 文件路径，前端
+/// "在浏览器打开火焰图"按钮用）。
 /// 与采样/trace 会话互不干扰（可并行；GUI 采样不限时，窗口对照靠报告与图表的时间戳）。
-fn spawn_stack(app: tauri::AppHandle, package: String, seconds: u64, running: Arc<Mutex<bool>>) {
-    eprintln!("[stack] 启动: package={} seconds={}", package, seconds);
+/// 落盘目录 `<pkg>/<ts>-<serial>`（serial 后缀防双设备同秒录制撞目录）。
+fn spawn_stack(app: tauri::AppHandle, serial: String, package: String, seconds: u64, running: Arc<Mutex<bool>>) {
+    eprintln!("[stack] 启动: device={} package={} seconds={}", serial, package, seconds);
     std::thread::spawn(move || {
         let emit_stage = |stage: &str, message: String, data_path: Option<String>| {
             let _ = app.emit(
                 "stack",
-                serde_json::json!({ "stage": stage, "message": message, "data_path": data_path }),
+                serde_json::json!({ "serial": serial, "stage": stage, "message": message, "data_path": data_path }),
             );
         };
         let dir = gui_data_root()
             .join(&package)
-            .join(Local::now().format("%Y%m%d_%H%M%S").to_string())
+            .join(format!("{}-{}", Local::now().format("%Y%m%d_%H%M%S"), serial))
             .join("stack");
         emit_stage("recording", format!("录制 {}s 调用栈…（窗口内操作被测应用）", seconds), None);
         let progress = |elapsed: u64| {
@@ -428,13 +494,14 @@ fn spawn_stack(app: tauri::AppHandle, package: String, seconds: u64, running: Ar
             let _ = app.emit(
                 "stack",
                 serde_json::json!({
+                    "serial": serial,
                     "stage": "progress",
                     "message": format!("调用栈录制中 {}/{}s", elapsed.min(seconds), seconds),
                     "data_path": null
                 }),
             );
         };
-        let rec = match xperf_core::simpleperf::record(seconds, &package, &dir, Some(&progress)) {
+        let rec = match xperf_core::simpleperf::record(seconds, &package, &dir, Some(&progress), Some(&serial)) {
             Ok(r) => r,
             Err(e) => {
                 eprintln!("[stack] 录制失败: {}", e);
@@ -469,24 +536,32 @@ fn spawn_stack(app: tauri::AppHandle, package: String, seconds: u64, running: Ar
 /// 函数热点模式：simpleperf 录制 N 秒调用栈并生成热点报告（详见 xperf-core/src/simpleperf.rs）
 #[tauri::command]
 async fn start_stack(
+    serial: String,
     package: String,
     seconds: u64,
     state: State<'_, AppState>,
     app: tauri::AppHandle,
 ) -> Result<(), String> {
+    let session = state.session(&serial);
     {
-        let mut t = state.stack_running.lock().map_err(|e| e.to_string())?;
+        let mut t = session.stack_running.lock().map_err(|e| e.to_string())?;
         if *t {
             return Err("函数热点录制进行中，请等待完成".into());
         }
         *t = true;
     }
+    let bail = |session: &DeviceSession, e: String| -> String {
+        *session.stack_running.lock().unwrap() = false;
+        e
+    };
     if let Err(e) = validate_package(&package) {
-        *state.stack_running.lock().map_err(|e| e.to_string())? = false;
-        return Err(e);
+        return Err(bail(&session, e));
+    }
+    if let Err(e) = ensure_device_online(&serial) {
+        return Err(bail(&session, e));
     }
     let seconds = seconds.clamp(1, 600);
-    spawn_stack(app, package, seconds, state.stack_running.clone());
+    spawn_stack(app, serial, package, seconds, session.stack_running.clone());
     Ok(())
 }
 
@@ -550,11 +625,11 @@ fn diag_log(message: String) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
-/// 列出设备上已安装的全部应用包名（含系统应用，共几百个），供前端搜索选择。
+/// 列出指定设备上已安装的全部应用包名（含系统应用，共几百个），供前端搜索选择。
 /// 用 `pm list packages`（不带 -3，-3 只列第三方会遗漏系统应用）。
 #[tauri::command]
-async fn list_packages() -> Result<Vec<String>, String> {
-    let out = xperf_core::run_adb_command(&["shell", "pm", "list", "packages"])
+async fn list_packages(serial: String) -> Result<Vec<String>, String> {
+    let out = xperf_core::run_adb_command_for(Some(&serial), &["shell", "pm", "list", "packages"])
         .map_err(|e| e.to_string())?;
     let mut pkgs: Vec<String> = out
         .stdout
@@ -567,15 +642,40 @@ async fn list_packages() -> Result<Vec<String>, String> {
     Ok(pkgs)
 }
 
-/// 查询后端采样是否正在运行（前端据此设置开始/停止按钮状态）。
+/// 查询指定设备采样是否正在运行（前端据此设置开始/停止按钮状态）。
 #[tauri::command]
-fn is_running(state: State<'_, AppState>) -> Result<bool, String> {
-    Ok(*state.running.lock().map_err(|e| e.to_string())?)
+fn is_running(serial: String, state: State<'_, AppState>) -> Result<bool, String> {
+    let session = state.session(&serial);
+    let running = session.running.lock().map_err(|e| e.to_string())?;
+    Ok(*running)
 }
 
-/// 在线设备清单与当前选择（侧栏设备下拉用）：
-/// `{devices: [{serial, model, version}], selected}`（`selected` = 已生效的 `-s` 目标，
-/// `--device` 自动启动或下拉切换后非空；前端据此初始化选中项，不覆盖已有选择）
+/// 打开指定设备上的应用并测量冷启动（`am start -W`）。
+///
+/// `activity` 留空时自动解析包的主入口（`cmd package resolve-activity --brief`）；
+/// 支持 `.MainActivity` 相对写法或完整类名。阻塞数秒（应用启动耗时），async 不卡 UI。
+/// 返回 [`xperf_core::coldstart::ColdStartResult`]（TotalTime/WaitTime 等，前端展示）。
+#[tauri::command]
+async fn launch_app(serial: String, package: String, activity: String) -> Result<xperf_core::coldstart::ColdStartResult, String> {
+    validate_package(&package)?;
+    ensure_device_online(&serial)?;
+    xperf_core::coldstart::measure(&package, &activity, Some(&serial)).map_err(|e| e.to_string())
+}
+
+/// 重启指定设备上的应用并测量冷启动：force-stop → 等进程死透（800ms）→
+/// `am start -W`。应用已在采样监控中时，重启后 agent 端自动重扫包名进程
+/// （exit 事件 + 新 PID 发现），前端时序/峰值保留。
+#[tauri::command]
+async fn restart_app(serial: String, package: String, activity: String) -> Result<xperf_core::coldstart::ColdStartResult, String> {
+    validate_package(&package)?;
+    ensure_device_online(&serial)?;
+    xperf_core::coldstart::force_stop(&package, Some(&serial)).map_err(|e| e.to_string())?;
+    // force-stop 异步杀进程，立即 start 会测到残留路径；800ms 缓冲进程死透
+    std::thread::sleep(std::time::Duration::from_millis(800));
+    xperf_core::coldstart::measure(&package, &activity, Some(&serial)).map_err(|e| e.to_string())
+}
+
+/// 在线设备清单（顶栏设备 tab 用）：`{devices: [{serial, model, version}]}`
 #[tauri::command]
 fn list_devices() -> Result<serde_json::Value, String> {
     let devices = xperf_core::list_adb_devices().map_err(|e| e.to_string())?;
@@ -584,27 +684,14 @@ fn list_devices() -> Result<serde_json::Value, String> {
             .into_iter()
             .map(|d| serde_json::json!({ "serial": d.serial, "model": d.model, "version": d.android_version }))
             .collect::<Vec<_>>(),
-        "selected": xperf_core::target_serial(),
     }))
 }
 
-/// 选择目标设备（侧栏下拉切换时调用）：写入全局 serial，后续所有 adb 调用带 `-s`。
-/// serial 须在当前在线列表中（防止拼入无效 serial 后所有命令报错）。
-#[tauri::command]
-fn select_device(serial: String) -> Result<(), String> {
-    let devices = xperf_core::list_adb_devices().map_err(|e| e.to_string())?;
-    if !devices.iter().any(|d| d.serial == serial) {
-        return Err(format!("设备 {} 不在线", serial));
-    }
-    xperf_core::set_target_serial(Some(serial));
-    Ok(())
-}
-
 /// 设备热插拔监视线程：每 3s 轮询 `adb devices -l`，与上次快照 diff，有变化时
-/// emit `devices-changed` 事件：`{devices: [{serial, model}], selected, added, removed}`。
-/// 首轮只建立快照不通知（首屏下拉由前端 loadDevices 填充，避免重复提示）。
-/// adb 暂不可用（如 server 重启中）跳过本轮；目标设备被移除不清全局 serial
-/// （断连重连逻辑仍指向它，设备插回即恢复）。线程随进程存活。
+/// emit `devices-changed` 事件：`{devices: [{serial, model, version}], added, removed}`。
+/// 首轮只建立快照不通知（首屏由前端 loadDevices 填充，避免重复提示）。
+/// adb 暂不可用（如 server 重启中）跳过本轮；线程随进程存活。已移除设备的会话
+/// 数据保留在前端（设备页不销毁，插回后采样线程自动重连恢复）。
 fn spawn_device_monitor(app: tauri::AppHandle) {
     std::thread::spawn(move || {
         let mut last: Vec<xperf_core::AdbDevice> = Vec::new();
@@ -632,7 +719,6 @@ fn spawn_device_monitor(app: tauri::AppHandle) {
                     "devices": devices.iter().map(|d| serde_json::json!({
                         "serial": d.serial, "model": d.model, "version": d.android_version,
                     })).collect::<Vec<_>>(),
-                    "selected": xperf_core::target_serial(),
                     "added": added,
                     "removed": removed,
                 }),
@@ -643,31 +729,32 @@ fn spawn_device_monitor(app: tauri::AppHandle) {
 }
 
 /// 启动参数回查（`--package` 等命令行自动启动时前端回填输入框用）：
-/// 返回 `{package, interval, flags}`（运行中才有值；`--interval` 与指标
-/// flag 来自启动线程的同一来源，保证与实际采样一致）。前端据此把 UI 状态
-/// （包名/间隔/勾选/idleHint/按钮）同步成与手动「开始监控」一致的效果；
-/// 设备选中项经 `list_devices` 的 `selected` 字段回填。
+/// 返回 `{serial: {package, interval, flags}}`——全部运行中的采样会话（多设备
+/// 并行时可有多台）。前端据此把对应设备页的 UI 状态（包名/间隔/勾选/idleHint/
+/// 按钮）同步成与手动「开始监控」一致的效果。
 #[tauri::command]
-fn startup_args(
+fn startup_sessions(
     state: State<'_, AppState>,
-) -> Result<Option<serde_json::Value>, String> {
-    let running = *state.running.lock().map_err(|e| e.to_string())?;
-    if !running {
-        return Ok(None);
+) -> Result<serde_json::Value, String> {
+    let map = state.sessions.lock().map_err(|e| e.to_string())?;
+    let mut out = serde_json::Map::new();
+    for (serial, s) in map.iter() {
+        let Some((interval, flags)) = s.startup_extra else { continue };
+        // MetricFlags 未派生 Serialize（core 协议类型，避免 serde 依赖），手动展开
+        out.insert(
+            serial.clone(),
+            serde_json::json!({
+                "package": s.package,
+                "interval": interval,
+                "flags": {
+                    "cpu": flags.cpu, "memory": flags.memory, "fps": flags.fps,
+                    "freq": flags.freq, "thermal": flags.thermal, "gpu": flags.gpu,
+                    "io": flags.io, "net": flags.net,
+                }
+            }),
+        );
     }
-    let package = state.package.lock().map_err(|e| e.to_string())?.clone();
-    let extra = *state.startup_extra.lock().map_err(|e| e.to_string())?;
-    let Some((interval, flags)) = extra else { return Ok(None) };
-    // MetricFlags 未派生 Serialize（core 协议类型，避免 serde 依赖），手动展开
-    Ok(Some(serde_json::json!({
-        "package": package,
-        "interval": interval,
-        "flags": {
-            "cpu": flags.cpu, "memory": flags.memory, "fps": flags.fps,
-            "freq": flags.freq, "thermal": flags.thermal, "gpu": flags.gpu,
-            "io": flags.io, "net": flags.net,
-        }
-    })))
+    Ok(serde_json::Value::Object(out))
 }
 
 /// IO 导出行：(ms, r, w, dr, dw) KB/s
@@ -1012,30 +1099,30 @@ fn main() {
     let auto_stack: Option<u64> = get_opt("--stack").and_then(|v| v.parse().ok());
     // --device <serial>：命令行自动启动指定目标设备（多台同连时必须给）；
     // 显式指定但无效时直接跳过自动启动（不静默回落到自动选台——用户指定了设备）
+    let mut auto_serial: Option<String> = None;
     let mut auto_start = true;
     if let Some(serial) = get_opt("--device") {
         match xperf_core::pick_device(Some(&serial), &xperf_core::list_adb_devices().unwrap_or_default()) {
-            Ok(d) => xperf_core::set_target_serial(Some(d.serial)),
+            Ok(d) => auto_serial = Some(d.serial),
             Err(e) => {
                 eprintln!("[startup] --device 无效，跳过自动启动: {}", e);
                 auto_start = false;
             }
         }
     }
-    // 未给 --device 时的设备前置解析（避免与前端设备下拉的自动选择竞态）：
-    // 单台自动；多台/无设备则放弃自动启动（确定性跳过，脚本化多设备场景须显式
-    // --device；交互场景在侧栏选定后手动开始）
-    if auto_start && auto_package.is_some() && xperf_core::target_serial().is_none() {
+    // 未给 --device 时的设备前置解析：单台自动；多台/无设备则放弃自动启动
+    // （确定性跳过，脚本化多设备场景须显式 --device；交互场景在各设备页手动开始）
+    if auto_start && auto_package.is_some() && auto_serial.is_none() {
         match xperf_core::list_adb_devices()
             .ok()
             .and_then(|ds| xperf_core::pick_device(None, &ds).ok())
         {
             Some(d) => {
-                xperf_core::set_target_serial(Some(d.serial));
+                auto_serial = Some(d.serial);
             }
             None => {
                 eprintln!(
-                    "[startup] --package 自动启动跳过：多台/无在线设备且未指定 --device（须 GUI 下拉选定后手动开始，或启动参数加 --device）"
+                    "[startup] --package 自动启动跳过：多台/无在线设备且未指定 --device（须在设备页选定后手动开始，或启动参数加 --device）"
                 );
                 auto_start = false;
             }
@@ -1055,62 +1142,60 @@ fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(AppState {
-            running: Arc::new(Mutex::new(false)),
-            trace_running: Arc::new(Mutex::new(false)),
-            stack_running: Arc::new(Mutex::new(false)),
-            package: Mutex::new(String::new()),
-            startup_extra: Mutex::new(None),
+            sessions: Mutex::new(HashMap::new()),
         })
         .setup(move |app| {
             // 默认窗口大小：前端加载完成后经 resize_default 命令按屏幕动态设置
             // （setup 阶段 webview 未就绪直接 set_size 会导致渲染空白，真机实测）
-            // 设备热插拔监视线程（devices-changed 事件 → 前端下拉动态更新）
+            // 设备热插拔监视线程（devices-changed 事件 → 前端设备 tab 动态更新）
             spawn_device_monitor(app.handle().clone());
             // auto_start：设备前置解析通过（--device 或单台自动）才自动启动采样；
-            // 多台未指定时为 false（eprintln 已提示），前端保持空闲态等用户选定
+            // 多台未指定时为 false（eprintln 已提示），前端保持空闲态等用户在设备页开始
             if auto_start {
                 if let Some(package) = auto_package.clone() {
-                    let state = app.state::<AppState>();
-                    let mut running = state.running.lock().unwrap();
-                    if !*running {
-                        *running = true;
-                    drop(running);
-                    // 一个指标都没传时默认 CPU+Memory（保持旧行为）
-                    let flags = if auto_flags.any() {
-                        auto_flags
-                    } else {
-                        MetricFlags { cpu: true, memory: true, ..auto_flags }
-                    };
-                    spawn_sampling(
-                        app.handle().clone(),
-                        package.clone(),
-                        auto_interval,
-                        flags,
-                        state.running.clone(),
-                    );
-                }
-                // 深挖自动启动（--trace N，可与采样并行）
-                if let Some(n) = auto_trace {
-                    let n = n.clamp(1, 600);
-                    let state = app.state::<AppState>();
-                    let mut t = state.trace_running.lock().unwrap();
-                    if !*t {
-                        *t = true;
-                        drop(t);
-                        spawn_trace(app.handle().clone(), package.clone(), n, state.trace_running.clone());
+                    if let Some(serial) = auto_serial.clone() {
+                        let state = app.state::<AppState>();
+                        let session = state.session(&serial);
+                        let mut running = session.running.lock().unwrap();
+                        if !*running {
+                            *running = true;
+                        drop(running);
+                        // 一个指标都没传时默认 CPU+Memory（保持旧行为）
+                        let flags = if auto_flags.any() {
+                            auto_flags
+                        } else {
+                            MetricFlags { cpu: true, memory: true, ..auto_flags }
+                        };
+                        spawn_sampling(
+                            app.handle().clone(),
+                            serial.clone(),
+                            package.clone(),
+                            auto_interval,
+                            flags,
+                            session.running.clone(),
+                        );
+                        // 深挖自动启动（--trace N，可与采样并行）
+                        if let Some(n) = auto_trace {
+                            let n = n.clamp(1, 600);
+                            let mut t = session.trace_running.lock().unwrap();
+                            if !*t {
+                                *t = true;
+                            drop(t);
+                            spawn_trace(app.handle().clone(), serial.clone(), package.clone(), n, session.trace_running.clone());
+                            }
+                        }
+                        // 函数热点自动启动（--stack N，可与采样/深挖并行）
+                        if let Some(n) = auto_stack {
+                            let n = n.clamp(1, 600);
+                            let mut t = session.stack_running.lock().unwrap();
+                            if !*t {
+                                *t = true;
+                            drop(t);
+                            spawn_stack(app.handle().clone(), serial, package, n, session.stack_running.clone());
+                            }
+                        }
+                        }
                     }
-                }
-                // 函数热点自动启动（--stack N，可与采样/深挖并行）
-                if let Some(n) = auto_stack {
-                    let n = n.clamp(1, 600);
-                    let state = app.state::<AppState>();
-                    let mut t = state.stack_running.lock().unwrap();
-                    if !*t {
-                        *t = true;
-                        drop(t);
-                        spawn_stack(app.handle().clone(), package, n, state.stack_running.clone());
-                    }
-                }
                 }
             }
             Ok(())
@@ -1125,27 +1210,35 @@ fn main() {
             clean_cache,
             diag_log,
             list_packages,
-            startup_args,
+            startup_sessions,
             is_running,
+            launch_app,
+            restart_app,
             export_csv,
             save_baseline,
             compare_baseline,
             list_devices,
-            select_device,
             resize_default
         ])
         .on_window_event(|window, event| {
-            // 关窗时停止采样：置 running=false，采样线程在下一轮循环检测到后退出，
-            // exec-out 管道断开 → 设备端 agent 因 stdout 写失败自行退出
+            // 关窗时停止全部设备采样：各会话 running 置 false，采样线程在下一轮
+            // 循环检测到后退出，exec-out 管道断开 → 设备端 agent 因 stdout 写失败自行退出
             if let tauri::WindowEvent::CloseRequested { .. } = event {
                 // 深挖录制线程不等待（最长 600s），置中断标志让其尽快退出；
                 // 未及退出时设备端 perfetto 由 traced TTL 兜底停止（残留文件无害）
                 xperf_core::utils::set_interrupt_flag();
                 let state = window.state::<AppState>();
-                let mut running = state.running.lock().unwrap();
-                if *running {
-                    *running = false;
-                    drop(running);
+                let mut any_running = false;
+                if let Ok(map) = state.sessions.lock() {
+                    for s in map.values() {
+                        let mut running = s.running.lock().unwrap();
+                        if *running {
+                            *running = false;
+                            any_running = true;
+                        }
+                    }
+                }
+                if any_running {
                     // 等采样线程检测到 running=false 并退出（最长一个 interval 周期）
                     std::thread::sleep(std::time::Duration::from_millis(1200));
                 }
@@ -1158,6 +1251,32 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- 多设备会话状态隔离 ----
+
+    #[test]
+    fn test_app_state_sessions_per_device() {
+        let state = AppState { sessions: Mutex::new(HashMap::new()) };
+        let a1 = state.session("devA");
+        let b1 = state.session("devB");
+        assert!(!*a1.running.lock().unwrap());
+        // 同设备两次取会话共享状态（Arc 同一）；不同设备各自独立
+        let a2 = state.session("devA");
+        assert!(Arc::ptr_eq(&a1.running, &a2.running));
+        assert!(!Arc::ptr_eq(&a1.running, &b1.running));
+        // record_startup 只写对应设备；对未启动设备无副作用
+        state.record_startup(
+            "devA",
+            "com.example.app",
+            500,
+            MetricFlags { cpu: true, memory: true, ..MetricFlags::default() },
+        );
+        let map = state.sessions.lock().unwrap();
+        let a = map.get("devA").unwrap();
+        assert_eq!(a.package, "com.example.app");
+        assert_eq!(a.startup_extra.unwrap().0, 500);
+        assert!(map.get("devB").unwrap().startup_extra.is_none());
+    }
 
     #[tokio::test]
     async fn test_export_csv_writes_files() {
