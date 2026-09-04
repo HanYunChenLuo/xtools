@@ -40,21 +40,72 @@ pub struct RecordedTrace {
     pub bytes: u64,
 }
 
-/// trace 配置（text proto）。设备端 v15.0 实测：
-/// - write_into_file + 2s 刷盘周期：录制中文件持续增长，长录制内存有界（ring buffer 只做缓冲）
-/// - cpu_frequency 事件在 SS3 GVM 不存在（频率归 hypervisor），perfetto 不报错、正常录其余源
+/// trace 配置（text proto），对齐团队 Performance_Tools 的 general_debug.pbtxt 口径。
+/// 设备端 v15.0 + SS3 真机实测（2026-09-04，10s ≈ 46MB）：
+/// - ftrace 全事件 + atrace（binder/gfx/view/input 等 17 类目 + atrace_apps "\*"）：atrace
+///   slice 17 万/10s，系统进程（surfaceflinger 等）有 app 层归因轨道
+/// - android.log（kernel/default/system）3425 条/10s；android.gpu.memory / packages_list 生效
+/// - power/cpu_idle 生效（cpuidle counter 每核一条 track）；**cpufreq 仍无**（SS3 GVM
+///   无 cpu_frequency 事件，报告频率段照旧如实标注）
+/// - 不存在的 ftrace 事件（如 memory_bus/\*、SS3 的 cpu_frequency）perfetto 静默忽略不报错
+/// - write_into_file + 2s 刷盘：长录制流式落盘内存有界；buffer0 128MB（ftrace）+
+///   buffer1 32MB（stats/log），RING_BUFFER（数据源多，量 ~4.6MB/s，600s ≈ 2.8GB 落盘）
 fn trace_config(seconds: u64) -> String {
-    format!(
-        "duration_ms: {ms}\n\
-         buffers {{\n  size_kb: 65536\n  fill_policy: RING_BUFFER\n}}\n\
-         data_sources {{\n  config {{\n    name: \"linux.ftrace\"\n    ftrace_config {{\n      \
-         ftrace_events: \"sched_switch\"\n      ftrace_events: \"sched_waking\"\n      \
-         ftrace_events: \"cpu_frequency\"\n      ftrace_events: \"sched_process_exit\"\n    }}\n  }}\n}}\n\
-         data_sources {{\n  config {{ name: \"linux.process_stats\" }}\n}}\n\
-         data_sources {{\n  config {{ name: \"android.surfaceflinger.frametimeline\" }}\n}}\n\
-         write_into_file: true\nfile_write_period_ms: 2000\nflush_period_ms: 2000\n",
-        ms = seconds * 1000
-    )
+    let mut q = String::new();
+    q.push_str("duration_ms: {ms}\n");
+    q.push_str("buffers { size_kb: 131072 fill_policy: RING_BUFFER }\n");
+    q.push_str("buffers { size_kb: 32768 fill_policy: RING_BUFFER }\n");
+    // 进程/包/GPU 显存元数据（团队 general_debug 同款）
+    q.push_str("data_sources { config { name: \"android.packages_list\" target_buffer: 1 } }\n");
+    q.push_str("data_sources { config { name: \"android.gpu.memory\" } }\n");
+    q.push_str(concat!(
+        "data_sources { config { name: \"linux.process_stats\" target_buffer: 1\n",
+        "  process_stats_config { scan_all_processes_on_start: true } } }\n",
+    ));
+    q.push_str(concat!(
+        "data_sources { config { name: \"android.log\"\n",
+        "  android_log_config { log_ids: LID_KERNEL log_ids: LID_DEFAULT log_ids: LID_SYSTEM } } }\n",
+    ));
+    q.push_str("data_sources { config { name: \"android.surfaceflinger.frametimeline\" } }\n");
+    // ftrace + atrace（事件与类目对齐团队 general_debug.pbtxt）
+    q.push_str(concat!(
+        "data_sources { config { name: \"linux.ftrace\" target_buffer: 0\n",
+        "  ftrace_config {\n",
+        "    ftrace_events: \"ext4/*\"\n",
+        "    ftrace_events: \"f2fs/*\"\n",
+        "    ftrace_events: \"kmem/*\"\n",
+        "    ftrace_events: \"memory_bus/*\"\n",
+        "    ftrace_events: \"mmc/*\"\n",
+        "    ftrace_events: \"sched/sched_switch\"\n",
+        "    ftrace_events: \"power/suspend_resume\"\n",
+        "    ftrace_events: \"sched/sched_wakeup\"\n",
+        "    ftrace_events: \"sched/sched_wakeup_new\"\n",
+        "    ftrace_events: \"sched/sched_waking\"\n",
+        "    ftrace_events: \"sched/sched_blocked_reason\"\n",
+        "    ftrace_events: \"power/cpu_frequency\"\n",
+        "    ftrace_events: \"power/cpu_idle\"\n",
+        "    ftrace_events: \"power/gpu_frequency\"\n",
+        "    ftrace_events: \"gpu_mem/gpu_mem_total\"\n",
+        "    ftrace_events: \"sched/sched_process_exit\"\n",
+        "    ftrace_events: \"sched/sched_process_free\"\n",
+        "    ftrace_events: \"task/task_newtask\"\n",
+        "    ftrace_events: \"task/task_rename\"\n",
+        "    ftrace_events: \"ftrace/print\"\n",
+    ));
+    for cat in [
+        "am", "aidl", "binder_driver", "gfx", "input", "pm", "power", "rs", "res", "rro",
+        "sm", "ss", "vibrator", "video", "view", "webview",
+    ] {
+        q.push_str(&format!("    atrace_categories: \"{cat}\"\n"));
+    }
+    q.push_str(concat!(
+        "    atrace_apps: \"*\"\n",
+        "    buffer_size_kb: 32768\n",
+        "    drain_period_ms: 2\n",
+        "  } } }\n",
+    ));
+    q.push_str("write_into_file: true\nfile_write_period_ms: 2000\nflush_period_ms: 2000\n");
+    q.replace("{ms}", &format!("{}", seconds * 1000))
 }
 
 /// 录制 N 秒 trace 并拉回 out_dir（如 `log/<pkg>/<会话时间戳>/trace/`，自动创建）。
@@ -1028,10 +1079,26 @@ mod tests {
     fn test_trace_config_fields() {
         let c = trace_config(10);
         assert!(c.contains("duration_ms: 10000"));
-        assert!(c.contains("sched_switch"));
-        assert!(c.contains("cpu_frequency"));
+        // ftrace 全事件（对齐团队 general_debug.pbtxt）
+        assert!(c.contains("\"sched/sched_switch\""));
+        assert!(c.contains("\"power/cpu_frequency\""));
+        assert!(c.contains("\"power/cpu_idle\""));
+        assert!(c.contains("\"ext4/*\""));
+        assert!(c.contains("\"ftrace/print\""));
+        // atrace 类目 + 全应用
+        assert!(c.contains("atrace_categories: \"gfx\""));
+        assert!(c.contains("atrace_apps: \"*\""));
+        // 元数据源
         assert!(c.contains("linux.process_stats"));
+        assert!(c.contains("scan_all_processes_on_start: true"));
+        assert!(c.contains("android.log"));
+        assert!(c.contains("android.packages_list"));
+        assert!(c.contains("android.gpu.memory"));
         assert!(c.contains("android.surfaceflinger.frametimeline"));
+        // 双 buffer + 流式落盘
+        assert!(c.contains("size_kb: 131072"));
+        assert!(c.contains("target_buffer: 0"));
+        assert!(c.contains("target_buffer: 1"));
         assert!(c.contains("write_into_file: true"));
     }
 
