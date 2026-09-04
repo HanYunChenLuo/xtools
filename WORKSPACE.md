@@ -61,7 +61,7 @@
 
 ## 已完成
 
-- ✅ GUI 多设备改版 + 应用操作/冷启动（2026-09-04 晚）：core serial 参数化（`adb_for`/`run_adb_command_for`/`resolve_serial`，各入口 `serial: Option<&str>`——None 回退全局 CLI 零变化）+ GUI 多会话（HashMap<serial, DeviceSession> + 命令/事件全带 serial）+ 前端设备 tab（template 克隆 DeviceSession 类 + 热插拔灰显/恢复）+ 冷启动模块下沉 core（resolve-activity 自动解析 + force-stop + GUI 打开/重启应用带测量进面板 + 重定向警示）；trace/stack 目录 `<pkg>/<ts>-<serial>` 防撞。真机 SS3+SS2MAX 双机并行全链路（commit 见 SESSION.md 当日条目）
+- ✅ GUI 多设备改版 + 应用操作/冷启动（2026-09-04 晚，01b28ce）：core serial 参数化（`adb_for`/`run_adb_command_for`/`resolve_serial`，各入口 `serial: Option<&str>`——None 回退全局 CLI 零变化）+ GUI 多会话（HashMap<serial, DeviceSession> + 命令/事件全带 serial）+ 前端设备 tab（template 克隆 DeviceSession 类 + 热插拔灰显/恢复）+ 冷启动模块下沉 core（resolve-activity 自动解析 + force-stop + GUI 打开/重启应用带测量进面板 + 重定向警示）；trace/stack 目录 `<pkg>/<ts>-<serial>` 防撞。真机 SS3+SS2MAX 双机并行全链路
 - ✅ 基线对比 C-6（46bd161）：core baseline 模块 + CLI 两 flag + GUI 按钮/面板 + 真机全链路（保存→对比→回归触发→无基线提示）
 - ✅ 多设备 adb 全局 `-s`（46bd161，E 节候补转正）：utils 注入 + CLI `--device` + GUI 设备下拉 + 平台检测表头 bug 修复 + 真机双连回归
 - ✅ perfetto `--trace N` 深挖模式（ca01aa6）：trace.rs 录制（stdin 喂配置 + write_into_file 流式落盘）+ trace_processor SQL 归因（包线程 CPU/抢占/系统 top/每核/频率/帧时间线）；独立与并行两模式，Ctrl-C 语义明确；SS3 真机 6 场景验证（commit 见 SESSION.md 当日条目）
