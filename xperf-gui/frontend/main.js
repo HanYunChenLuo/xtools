@@ -979,6 +979,10 @@ document.getElementById('refreshPkgs').addEventListener('click', loadPackages);
 // 再加载包列表（list_packages 依赖目标设备已选定——多台同连不带 -s 会失败）
 loadDevices().then(() => loadPackages());
 
+// ---- 默认窗口大小按屏幕动态设置（后端 resize_default：setup 阶段 webview 未就绪
+// 直接 set_size 会渲染空白，故等前端加载完成后调用）----
+invoke('resize_default').catch((e) => _diag('resize_default ERROR: ' + e));
+
 // ---- 初始化同步按钮状态（自动启动时开始按钮应禁用）----
 // --package 自动启动与手动「开始监控」走同一流程：回填包名/间隔/勾选、
 // 隐藏 idle 引导、按钮状态与状态文案一致
