@@ -78,7 +78,7 @@ pub struct PidStats {
     pub memory_time: Option<DateTime<Local>>,
     /// 该 PID 的 FPS 时序
     pub fps_data: FpsTimeSeriesData,
-    /// 该 PID 的启动时间
+    /// 该 PID 的启动时间（历史字段：agent 协议不带，恒为空）
     pub start_time: String,
     /// 是否仍在运行（动态跟随：消失的 PID 置 false 但保留数据）
     pub active: bool,
