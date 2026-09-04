@@ -7,14 +7,15 @@
 
 ---
 
-## 2026-09-04（四）下午二 — 基线对比 C-6 收官 + 多设备 adb 全局 `-s`（46bd161）
+## 2026-09-04（四）下午二 — 基线对比 C-6 收官 + 多设备 adb 全局 `-s`（46bd161）+ 设备动态检测（951c0ab）
 
-**任务线**：WORKSPACE C 类最后一项（基线对比）+ 会话中途手机接入实测触发 E 节候补（多设备 adb 不带 `-s` 全链路失效），同会话两项落地。
+**任务线**：WORKSPACE C 类最后一项（基线对比）+ 会话中途手机接入实测触发 E 节候补（多设备 adb 不带 `-s` 全链路失效），同会话三项落地；末轮按用户要求补设备热插拔动态检测。
 
 ### Commits
 
 | commit | 内容 |
 |--------|------|
+| 951c0ab | feat：GUI 设备动态检测——`diff_devices` 纯函数（core/utils，单测）+ `spawn_device_monitor` 线程（3s 轮询快照 diff，首轮只建快照；adb 暂不可用跳过）+ `devices-changed` 事件 + 前端下拉增量重建/断开占位/接入提示。真机 SS2MAX 物理插拔两轮验证事件对全捕捉 |
 | 46bd161 | feat：①基线对比——xperf-core/src/baseline.rs（SessionSummary 汇总 + SummaryBuilder + 保存/读取 + compare 报告，单测 11 个）+ CLI `--save-baseline`/`--compare-baseline`（互斥，报告落盘 `<ts>/baseline_report.txt`，--cold-start 结果进汇总）+ GUI 侧栏「保存基线/对比基线」按钮 + 峰值区基线对比面板（collectSessionData 与导出 CSV 同源）+ GUI 命令级测试 2 个。②多设备 adb——utils TARGET_SERIAL 全局 + adb() 构造器 + run_adb_command 自动注入 `-s`（16 处调用点收敛）+ parse/list/pick_device + CLI `--device/-d` + GUI 设备下拉（list_devices/select_device）+ `--package` 自动启动设备前置解析（多台未指定确定性跳过，消除与前端下拉的竞态；--device 无效不静默换台）+ sampling-error 事件（构建/部署/启动失败前端可见）+ detect_platform_live 按 serial 过滤（**修表头 bug**）+ device_online 只认目标设备。13 文件 +1396/-69 |
 
 ### 完成内容
@@ -24,7 +25,8 @@
 - **基线存放**：`~/.local/share/xperf/baselines/<pkg>.json`（XDG 数据目录，用户数据语义，--clean-cache 不清理）；包名拼路径前校验；CLI/GUI 同一文件互通（GUI 保存的基线 CLI 可对比，反之亦然）
 - **真机验证（SS3 svm，`--device` 全程指定）**：保存（20s，CPU 30.3 均值/PSS 462MB/FPS 29.7/Jank 5.98 次分/GPU 15.3%）→ 对比（同场景二次运行，持平 9 项 + 单侧 5 项，GPU 15.4 vs 15.3 不误报）→ 篡改基线制造回归（CPU 基线压到 10% → ⚠ 回归 4 项 + 指标名列表）→ 无基线包（"未找到基线（先用 --save-baseline 保存一次）"）→ 篡改后真数据重存恢复
 - **多设备真机验证（SS3 + Redmi 1280da60 双连）**：CLI 不指定 → 报错列设备清单；`--device 6eb792dfb0f` → 平台 SS3 + QNX GPU 通道正常（15.3% busy 同单设备场景）；`--device 1280da60` → Android 平台 + com.miui.home 采样正常（pid 7424）；GUI `--package --device` 自动启动全链路（平台 SS3、CPU/Mem/GPU 事件流）；单台连接自动选择；`--device deadbeef` → "指定设备不在线"跳过自动启动
-- **验证门槛**：96 测试全绿（agent 24 + core 58+2 ignored + xperformance 8 + GUI 4；新增 18：baseline 11 + platform 过滤 1 + utils 设备 2 + GUI 基线 4），clippy 零警告，cargo doc 零 warning（默认 lint 集 + 3 crate missing_docs）
+- **设备动态检测（951c0ab，用户要求）**：监视线程 3s 轮询 diff（core `diff_devices` 纯函数 + 单测）；首轮只建快照不通知（首屏 loadDevices 已填）；目标设备移除不清后端 serial（断连重连插回即恢复），下拉占位"（已断开）"+ 状态提示。**真机验证方法论**：kill-server/reconnect/wait-for-disconnect 均制造不出 diff（server 重启后设备枚举快于 3s 轮询窗、transport_id 变但 serial 不变）——热插拔验证必须物理插拔（SS2MAX d1f39648c1f 两轮插拔，接入/移除事件对全捕捉）
+- **验证门槛**：99 测试全绿（agent 24 + core 59+2 ignored + xperformance 8 + GUI 4 + xrm 2；本会话新增 21：baseline 11 + platform 过滤 1 + utils 设备 3 + GUI 基线 4 + 既有回归），clippy 零警告，cargo doc 零 warning（默认 lint 集 + 3 crate missing_docs）
 
 ### 关键结论与基线
 
@@ -40,6 +42,7 @@
 - GUI 基线按钮/设备下拉的点击渲染为人工目验项（后端命令级测试已锁定链路）
 - GUI 侧基线对比不含 restarts/cold-start（前端序列无这两路数据，如实单侧标注）
 - 手机（1280da60）为标准 Android 平台——kgsl/thermalservice 真数据路径未完整采样验证（仅 CPU/平台检测），后续可在手机上验证 Android 平台 GPU/温度通道
+- 设备热插拔的前端下拉/提示渲染为人工目验项（后端事件链路真机插拔验证通过：日志 `[devices] 热插拔` 四条 + devices-changed emit）
 
 ---
 
