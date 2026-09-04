@@ -160,7 +160,7 @@ CLI 退出图表用通用 helper `generate_multi_line_chart`（xperformance/util
 - **解析**：report 为 header 定宽对齐文本（Symbol 列按最长符号名 padding，可达数百列宽），行解析按「首/尾 token 锚定」而非列位置切片（线程名/符号名可含空格，dso 恒无空格）；报告文件落盘前空格压缩（实测 4.9MB → 566KB）
 - **产物**：`log/<pkg>/<ts>/stack/{stack_<ts>.data, simpleperf_report.txt}`；`.data` 可 `adb push` 回设备换参数复跑 report（如 `--full-callgraph`）
 - **浏览器火焰图**（`open_stack_in_browser`，GUI「函数热点」tab 按钮）：AOSP 官方 `report_html.py` 把 `.data` 渲染成单文件 HTML（火焰图/Chart/Sample Table，3.3MB→7.8MB ~1.2s）后 xdg-open。脚本集首次从 gitiles blob `?format=TEXT` 逐文件引导下载（`~/.cache/xperf/simpleperf_scripts/`，~10MB 后离线；**+archive 不支持多级子路径（实测 INVALID_ARGUMENT）、整仓 tarball 80MB 太重**故逐文件；含 `report_html.js` 内联 JS 与 `etm_types.py` 两个易漏依赖）；依赖闭包：report_html.py/js + simpleperf_report_lib/utils + etm_types + `bin/<os>/<arch>/libsimpleperf_report.so`（linux-x86_64 `.so` / darwin-x86_64 `.dylib`，上游仅这两种主机预编译库）。失败清半截 HTML（防 reuse 误判）；HTML 新于 `.data` 复用不重渲染；需 python3
-- **录制进度**：core `record` 带 `progress: Option<&dyn Fn(u64)>` 回调（等待循环每到整秒触发 elapsed 1..=N）；GUI 传闭包 emit `stage:'progress'`（message 如 `调用栈录制中 3/8s`），前端 progress 分支只更新 status 不覆盖报告文本；CLI 传 None（打印会刷屏）
+- **录制进度**：core `record` 带 `progress: Option<&dyn Fn(u64)>` 回调（等待循环每到整秒触发 elapsed 1..=N）；GUI 传闭包 emit `stage:'progress'`（message 如 `调用栈录制中 3/8s`），前端 status 栏以**绿色进度条**呈现（`#status.progress` 类，linear-gradient 按 elapsed/N 百分比铺开；完成/失败自动退回普通样式），CLI 传 None（打印会刷屏）
 - **实测基线（SS3，simpleperf 1.build.47）**：svm 空闲态 8s ≈ 8500 样本 / 0 丢失 / 3.3MB（样本率随 CPU 活动浮动）；设备端应用 so 多为 stripped（函数名显示 `libxxx.so[+偏移]`，偏移可用未剥离 so 离线符号化），系统库与 `[kernel.kallsyms]` 有符号；非 root 设备上非 debuggable 应用被 run-as 路径拒绝（错误由 simpleperf 透传）
 
 ### 平台抽象（xperf-core/src/platform/）
