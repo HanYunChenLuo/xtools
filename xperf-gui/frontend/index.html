@@ -10,7 +10,7 @@
   <div id="sidebar">
     <h2>XPerformance</h2>
     <label>Package:
-      <input id="package" list="pkgList" placeholder="输入或选择包名" autocomplete="off" />
+      <input id="package" type="text" list="pkgList" placeholder="输入或选择包名" autocomplete="off" />
       <datalist id="pkgList"></datalist>
       <button id="refreshPkgs" class="small">刷新包列表</button>
     </label>
@@ -44,12 +44,12 @@
     </label>
     <button id="startBtn">开始监控</button>
     <button id="stopBtn" disabled>停止</button>
-    <div style="display:flex;gap:4px;margin:4px 0">
+    <div class="sidebar-row">
       <input id="markerLabel" type="text" placeholder="打点标签" class="inline-input" />
-      <button id="markerBtn" class="small" style="width:auto;padding:4px 8px;flex-shrink:0">打点</button>
+      <button id="markerBtn" class="small">打点</button>
     </div>
-    <div style="display:flex;gap:4px;margin:4px 0;align-items:center">
-      <select id="recordSeconds" title="录制时长（1-600 秒）" style="flex:1">
+    <label>录制时长:
+      <select id="recordSeconds" title="录制时长（秒）：Perfetto / simpleperf 分析共用">
         <option value="5">5 秒</option>
         <option value="10" selected>10 秒</option>
         <option value="15">15 秒</option>
@@ -57,11 +57,11 @@
         <option value="60">60 秒</option>
         <option value="120">120 秒</option>
       </select>
-    </div>
-    <div class="record-hint">录制时长（秒）：Perfetto / simpleperf 分析共用，录制期间观察实时曲线</div>
-    <div style="display:flex;gap:4px;margin:4px 0">
-      <button id="traceBtn" class="small" style="width:auto;padding:4px 8px;flex-shrink:0">Perfetto 分析</button>
-      <button id="stackBtn" class="small" style="width:auto;padding:4px 8px;flex-shrink:0">simpleperf 分析</button>
+    </label>
+    <div class="record-hint">Perfetto / simpleperf 分析共用，录制期间可观察实时曲线</div>
+    <div class="sidebar-row">
+      <button id="traceBtn" class="small">Perfetto 分析</button>
+      <button id="stackBtn" class="small">simpleperf 分析</button>
     </div>
     <button id="exportBtn" class="small">导出 CSV</button>
     <button id="cleanBtn" class="small">清理缓存与数据</button>

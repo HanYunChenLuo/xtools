@@ -362,7 +362,10 @@ listen('sample', (e) => {
     setLive('fps_jank', '  └ Jank', jank_count, '', 'dim');
     try { fpsChart.draw(); } catch (err) { _diag('fpsChart.draw ERROR: ' + err.message); }
   } else if (ev.NoProcess) {
-    setStatus('无进程: ' + ev.NoProcess.error);
+    // 被测进程死亡重扫期间与录制并行时，不要抹掉录制进度条（等下一秒 progress 事件会恢复，
+    // 但期间空白更差）；录制态只更新右侧 PID 列表相关状态，status 保持
+    const st = document.getElementById('status');
+    if (!st.classList.contains('progress')) setStatus('无进程: ' + ev.NoProcess.error);
   } else if (ev.AgentHello) {
     maxkhz = ev.AgentHello.maxkhz || [];
   } else if (ev.FreqUpdate) {
@@ -528,6 +531,10 @@ listen('trace', (e) => {
   if (stage === 'recording') {
     // 命令行自动启动（--trace）时无 click handler 禁用，收到 recording 事件统一禁用
     document.getElementById('traceBtn').disabled = true;
+    setStatus(message);
+  } else if (stage === 'recorded') {
+    // 录制完成进入分析阶段：退出进度态，避免进度条冻结在 100%"录制中"
+    setStatus('Perfetto trace 已拉回，分析中…');
   } else if (stage === 'done') {
     document.getElementById('traceBtn').disabled = false;
     setStatus('Perfetto 分析完成');
@@ -595,6 +602,10 @@ listen('stack', (e) => {
   if (stage === 'recording') {
     // 命令行自动启动（--stack）时无 click handler 禁用，收到 recording 事件统一禁用
     document.getElementById('stackBtn').disabled = true;
+    setStatus(message);
+  } else if (stage === 'recorded') {
+    // 录制完成进入报告生成阶段：退出进度态，避免进度条冻结在 100%"录制中"
+    setStatus('调用栈已拉回，生成报告中…');
   } else if (stage === 'done') {
     document.getElementById('stackBtn').disabled = false;
     setStatus('函数热点分析完成');
