@@ -24,7 +24,7 @@
 - **基线存放**：`~/.local/share/xperf/baselines/<pkg>.json`（XDG 数据目录，用户数据语义，--clean-cache 不清理）；包名拼路径前校验；CLI/GUI 同一文件互通（GUI 保存的基线 CLI 可对比，反之亦然）
 - **真机验证（SS3 svm，`--device` 全程指定）**：保存（20s，CPU 30.3 均值/PSS 462MB/FPS 29.7/Jank 5.98 次分/GPU 15.3%）→ 对比（同场景二次运行，持平 9 项 + 单侧 5 项，GPU 15.4 vs 15.3 不误报）→ 篡改基线制造回归（CPU 基线压到 10% → ⚠ 回归 4 项 + 指标名列表）→ 无基线包（"未找到基线（先用 --save-baseline 保存一次）"）→ 篡改后真数据重存恢复
 - **多设备真机验证（SS3 + Redmi 1280da60 双连）**：CLI 不指定 → 报错列设备清单；`--device 6eb792dfb0f` → 平台 SS3 + QNX GPU 通道正常（15.3% busy 同单设备场景）；`--device 1280da60` → Android 平台 + com.miui.home 采样正常（pid 7424）；GUI `--package --device` 自动启动全链路（平台 SS3、CPU/Mem/GPU 事件流）；单台连接自动选择；`--device deadbeef` → "指定设备不在线"跳过自动启动
-- **验证门槛**：96 测试全绿（+18：baseline 11 + platform 过滤 1 + utils 设备 2 + GUI 基线命令级/汇总 3 + 既有回归）、clippy 零警告、cargo doc 零 warning（默认 lint 集 + 3 crate missing_docs）
+- **验证门槛**：96 测试全绿（agent 24 + core 58+2 ignored + xperformance 8 + GUI 4；新增 18：baseline 11 + platform 过滤 1 + utils 设备 2 + GUI 基线 4），clippy 零警告，cargo doc 零 warning（默认 lint 集 + 3 crate missing_docs）
 
 ### 关键结论与基线
 
