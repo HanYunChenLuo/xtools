@@ -45,15 +45,14 @@
     <button id="startBtn">开始监控</button>
     <button id="stopBtn" disabled>停止</button>
     <div style="display:flex;gap:4px;margin:4px 0">
-      <input id="markerLabel" type="text" placeholder="打点标签" style="flex:1;padding:4px;background:#313244;color:#cdd6f4;border:1px solid #45475a;border-radius:3px;font-size:12px" />
+      <input id="markerLabel" type="text" placeholder="打点标签" class="inline-input" />
       <button id="markerBtn" class="small" style="width:auto;padding:4px 8px;flex-shrink:0">打点</button>
     </div>
     <div style="display:flex;gap:4px;margin:4px 0">
-      <input id="traceSeconds" type="number" min="1" max="600" value="10" title="录制秒数（1-600）" style="width:52px;padding:4px;background:#313244;color:#cdd6f4;border:1px solid #45475a;border-radius:3px;font-size:12px" />
+      <input id="traceSeconds" type="number" min="1" max="600" value="10" title="录制秒数（1-600）" class="inline-input" style="width:52px;flex:none" />
       <button id="traceBtn" class="small" style="width:auto;padding:4px 8px;flex-shrink:0">Perfetto 分析</button>
     </div>
     <button id="exportBtn" class="small">导出 CSV</button>
-    <div id="status">未开始</div>
     <h3>PIDs</h3>
     <ul id="pidList"></ul>
   </div>
@@ -61,6 +60,8 @@
     <div id="tabBar">
       <button id="tabPerfBtn" class="tab active">性能指标</button>
       <button id="tabTraceBtn" class="tab">Perfetto 分析</button>
+      <div id="status">未开始</div>
+      <button id="themeBtn" title="切换暗色/亮色主题">☾ 亮色</button>
     </div>
     <div id="perfContent" style="display:flex;flex-direction:column;gap:12px;flex:1;min-height:0">
     <div id="cpuChartBox" class="chart"><canvas id="cpuChart"></canvas></div>
@@ -88,12 +89,12 @@
     </div>
     </div>
     <div id="traceContent" class="hidden" style="flex:1;min-height:0;display:flex;flex-direction:column;gap:8px">
-      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-        <button id="openPerfBtn" class="small" style="width:auto;padding:5px 10px" disabled>在浏览器打开 Perfetto UI</button>
-        <span id="traceFileLabel" style="font-size:12px;color:#a6adc8;word-break:break-all"></span>
+      <div class="trace-toolbar">
+        <button id="openPerfBtn" class="small" disabled>在浏览器打开 Perfetto UI</button>
+        <span id="traceFileLabel" class="trace-file-label"></span>
       </div>
-      <div style="flex:1;min-height:0;background:#1e1e2e;border-radius:6px;padding:10px 14px;overflow:auto">
-        <pre id="traceReport" style="white-space:pre-wrap;font-size:12px;line-height:1.5;margin:0;color:#cdd6f4"></pre>
+      <div class="trace-report-box">
+        <pre id="traceReport"></pre>
       </div>
     </div>
   </div>

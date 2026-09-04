@@ -8,7 +8,24 @@ const { invoke } = window.__TAURI__.core;
 _diag('__TAURI__ ok');
 
 // ---------- 轻量 Canvas 折线图（替代 ECharts，无外部依赖） ----------
-const COLORS = ['#89b4fa','#a6e3a1','#f9e2af','#f38ba8','#cba6f7','#94e2d5','#fab387','#74c7ec','#f5c2e7','#a6adc8'];
+// 主题色从 CSS 变量动态读取（data-theme 切换后 draw/redraw 自动跟随）
+function uiColors() {
+  const cs = getComputedStyle(document.documentElement);
+  const v = (n) => cs.getPropertyValue(n).trim();
+  const light = document.documentElement.dataset.theme === 'light';
+  return {
+    bg: v('--bg-card'),
+    text: v('--text'),
+    dim: v('--text-dim'),
+    grid: v('--bg-input'),
+    border: v('--border'),
+    err: v('--err'),
+    // series 色板：暗色 mocha / 亮色 latte
+    series: light
+      ? ['#1e66f5', '#40a02b', '#df8e1d', '#d20f39', '#8839ef', '#179299', '#fe640b', '#209fb5', '#ea76cb', '#7c7f93']
+      : ['#89b4fa', '#a6e3a1', '#f9e2af', '#f38ba8', '#cba6f7', '#94e2d5', '#fab387', '#74c7ec', '#f5c2e7', '#a6adc8'],
+  };
+}
 
 class LineChart {
   constructor(canvasId, title, unit, maxValue) {
@@ -41,14 +58,15 @@ class LineChart {
   }
   draw() {
     const { ctx } = this;
+    const C = uiColors();
     const W = this.cssW, H = this.cssH;
     const L = 70, R = 20, T = 30, B = 30;
     ctx.clearRect(0, 0, W, H);
     // 背景
-    ctx.fillStyle = '#1e1e2e';
+    ctx.fillStyle = C.bg;
     ctx.fillRect(0, 0, W, H);
     // 标题
-    ctx.fillStyle = '#cdd6f4';
+    ctx.fillStyle = C.text;
     ctx.font = '500 14px system-ui, sans-serif';
     ctx.fillText(this.title, 12, 20);
     // 计算范围（tMax 永远取全量最新；tMin 按窗口模式：follow=最新往前 followMs，all=全量最早）
@@ -81,8 +99,8 @@ class LineChart {
     // 刻度标签精度：按 yMax 大小选位数，避免 toFixed(0) 四舍五入导致重复
     const labelPrec = yMax >= 100 ? 0 : (yMax >= 10 ? 1 : 2);
     // 网格 + Y 轴刻度
-    ctx.strokeStyle = '#313244';
-    ctx.fillStyle = '#6c7086';
+    ctx.strokeStyle = C.grid;
+    ctx.fillStyle = C.dim;
     ctx.font = '12px system-ui, sans-serif';
     for (let i = 0; i <= 4; i++) {
       const y = T + (H - B - T) * i / 4;
@@ -109,7 +127,7 @@ class LineChart {
       if (lo >= all.length) return;
       const visLen = all.length - lo;
       const stride = Math.max(1, Math.ceil(visLen / (plotW * 2)));
-      ctx.strokeStyle = COLORS[i % COLORS.length];
+      ctx.strokeStyle = C.series[i % C.series.length];
       ctx.lineWidth = 2;
       ctx.beginPath();
       // 从窗口前一个点开始画，保证折线在左边界处连续（不截断出缺口）
@@ -130,7 +148,7 @@ class LineChart {
       ctx.stroke();
       // 图例（key 即展示名：CPU/内存用 "PID xxx"，FPS 用图层短名）；
       // 从右往左按文字实际宽度排布，长图层名不截断不重叠
-      ctx.fillStyle = COLORS[i % COLORS.length];
+      ctx.fillStyle = C.series[i % C.series.length];
       legendX -= ctx.measureText(pid).width;
       ctx.fillText(pid, legendX, 20);
       legendX -= 14;
@@ -144,7 +162,7 @@ class LineChart {
         const mt = m.timestamp;
         if (mt < tMin || mt > tMax) continue;
         const x = L + plotW * (mt - tMin) / span;
-        ctx.strokeStyle = '#f38ba8';
+        ctx.strokeStyle = C.err;
         ctx.lineWidth = 1.5;
         ctx.setLineDash([4, 4]);
         ctx.beginPath();
@@ -153,7 +171,7 @@ class LineChart {
         ctx.stroke();
         ctx.setLineDash([]);
         // 标签（右对齐，避免越界）
-        ctx.fillStyle = '#f38ba8';
+        ctx.fillStyle = C.err;
         ctx.font = '11px system-ui, sans-serif';
         const tw = ctx.measureText(m.label).width;
         ctx.fillText(m.label, Math.min(x + 4, W - R - tw), T - 4);
@@ -162,7 +180,7 @@ class LineChart {
   }
   drawAxes(l, t, r, b) {
     const { ctx } = this;
-    ctx.strokeStyle = '#45475a';
+    ctx.strokeStyle = uiColors().border;
     ctx.lineWidth = 1;
     ctx.beginPath();
     ctx.moveTo(l, t); ctx.lineTo(l, b); ctx.lineTo(r, b);
@@ -200,13 +218,13 @@ let maxkhz = [];     // AgentHello 带的每核最大频率（KHz）
 window.markers = []; // 打点事件（{label, timestamp}），LineChart.draw() 画竖线
 
 // ---- 实时数值面板：各指标最新值，500ms 节流渲染 ----
-const liveData = {}; // key -> { label, value, unit, color }
+const liveData = {}; // key -> { label, value, unit, color（语义名，映射 CSS 变量） }
 function setLive(key, label, value, unit, color) {
-  liveData[key] = { label, value, unit, color: color || '#cdd6f4' };
+  liveData[key] = { label, value, unit, color: color || 'text' };
 }
 function renderLive() {
   const rows = Object.entries(liveData).map(([key, d]) =>
-    `<tr><td>${d.label}</td><td style="color:${d.color}">${d.value}${d.unit}</td></tr>`);
+    `<tr><td>${d.label}</td><td style="color:var(--${d.color})">${d.value}${d.unit}</td></tr>`);
   document.getElementById('liveTable').innerHTML =
     '<tr><th>指标</th><th>当前值</th></tr>' + rows.join('');
 }
@@ -293,11 +311,11 @@ listen('sample', (e) => {
     cpuChart.push('PID ' + pid, t, +process_cpu.toFixed(2));
     trackPeak(pid, 'cpu', process_cpu, t);
     latestThreads[pid] = threads;
-    setLive('cpu', 'CPU (pid ' + pid + ')', process_cpu.toFixed(1), '%', '#89b4fa');
+    setLive('cpu', 'CPU (pid ' + pid + ')', process_cpu.toFixed(1), '%', 'accent');
     // 线程 top1
     if (threads.length > 0) {
       const top1 = threads.reduce((a, b) => a.cpu_usage > b.cpu_usage ? a : b);
-      setLive('cpu_top', '  └ ' + top1.name, top1.cpu_usage.toFixed(1), '%', '#6c7086');
+      setLive('cpu_top', '  └ ' + top1.name, top1.cpu_usage.toFixed(1), '%', 'dim');
     }
     try { cpuChart.draw(); } catch (err) { _diag('cpuChart.draw ERROR: ' + err.message); }
   } else if (ev.MemoryUpdate) {
@@ -306,11 +324,11 @@ listen('sample', (e) => {
     const t = new Date(timestamp).getTime();
     memChart.push('PID ' + pid, t, total_pss);
     trackPeak(pid, 'mem', total_pss, t);
-    setLive('mem', '内存 PSS (pid ' + pid + ')', (total_pss / 1024).toFixed(1), ' MB', '#a6e3a1');
+    setLive('mem', '内存 PSS (pid ' + pid + ')', (total_pss / 1024).toFixed(1), ' MB', 'ok');
     if (details) {
-      setLive('mem_native', '  └ Native', (details.native_heap / 1024).toFixed(1), ' MB', '#6c7086');
-      setLive('mem_java', '  └ Java', (details.java_heap / 1024).toFixed(1), ' MB', '#6c7086');
-      setLive('mem_code', '  └ Code', (details.code / 1024).toFixed(1), ' MB', '#6c7086');
+      setLive('mem_native', '  └ Native', (details.native_heap / 1024).toFixed(1), ' MB', 'dim');
+      setLive('mem_java', '  └ Java', (details.java_heap / 1024).toFixed(1), ' MB', 'dim');
+      setLive('mem_code', '  └ Code', (details.code / 1024).toFixed(1), ' MB', 'dim');
     }
     try { memChart.draw(); } catch (err) { _diag('memChart.draw ERROR: ' + err.message); }
   } else if (ev.FpsUpdate) {
@@ -326,8 +344,8 @@ listen('sample', (e) => {
     fpsChart.push(shortLayer, t, +fps.toFixed(1));
     if (!fpsHist[shortLayer]) fpsHist[shortLayer] = [];
     fpsHist[shortLayer].push({ t, fps, jank: jank_count });
-    setLive('fps', 'FPS (' + shortLayer + ')', fps.toFixed(1), '', '#f38ba8');
-    setLive('fps_jank', '  └ Jank', jank_count, '', '#6c7086');
+    setLive('fps', 'FPS (' + shortLayer + ')', fps.toFixed(1), '', 'err');
+    setLive('fps_jank', '  └ Jank', jank_count, '', 'dim');
     try { fpsChart.draw(); } catch (err) { _diag('fpsChart.draw ERROR: ' + err.message); }
   } else if (ev.NoProcess) {
     document.getElementById('status').textContent = '无进程: ' + ev.NoProcess.error;
@@ -342,8 +360,8 @@ listen('sample', (e) => {
     // 频率展示：平均 + 最高核
     const mhz = khz.map(k => k / 1000);
     const avg = mhz.reduce((a, b) => a + b, 0) / mhz.length;
-    setLive('freq', 'CPU 频率', avg.toFixed(0), ' MHz', '#f9e2af');
-    setLive('freq_max', '  └ 最高核', Math.max(...mhz).toFixed(0), ' MHz', '#6c7086');
+    setLive('freq', 'CPU 频率', avg.toFixed(0), ' MHz', 'warn');
+    setLive('freq_max', '  └ 最高核', Math.max(...mhz).toFixed(0), ' MHz', 'dim');
     try { freqChart.draw(); } catch (err) { _diag('freqChart.draw ERROR: ' + err.message); }
   } else if (ev.TempUpdate) {
     const { timestamp, status, sensors } = ev.TempUpdate;
@@ -354,9 +372,9 @@ listen('sample', (e) => {
       tempChart.push(name, t, value);
       if (!tempHist[name]) tempHist[name] = [];
       tempHist[name].push({ t, v: value, status });
-      setLive('temp_' + name, '温度 ' + name, value.toFixed(1), ' °C', '#fab387');
+      setLive('temp_' + name, '温度 ' + name, value.toFixed(1), ' °C', 'orange');
     }
-    setLive('temp_status', '  └ 热状态', status >= 0 ? status : '?', '', '#6c7086');
+    setLive('temp_status', '  └ 热状态', status >= 0 ? status : '?', '', 'dim');
     try { tempChart.draw(); } catch (err) { _diag('tempChart.draw ERROR: ' + err.message); }
   } else if (ev.GpuUpdate) {
     const { timestamp, busy, util, mhz, maxmhz } = ev.GpuUpdate;
@@ -367,9 +385,9 @@ listen('sample', (e) => {
     gpuChart.push('busy', t, +busy.toFixed(2));
     if (util > 0 || maxmhz > 0) gpuChart.push('util', t, +util.toFixed(2));
     gpuHist.push({ t, busy, util, mhz });
-    setLive('gpu_busy', 'GPU busy', busy.toFixed(1), '%', '#cba6f7');
-    if (maxmhz > 0) setLive('gpu_freq', '  └ 频率', mhz + '/' + maxmhz, ' MHz', '#6c7086');
-    if (util > 0) setLive('gpu_util', '  └ util', util.toFixed(1), '%', '#6c7086');
+    setLive('gpu_busy', 'GPU busy', busy.toFixed(1), '%', 'purple');
+    if (maxmhz > 0) setLive('gpu_freq', '  └ 频率', mhz + '/' + maxmhz, ' MHz', 'dim');
+    if (util > 0) setLive('gpu_util', '  └ util', util.toFixed(1), '%', 'dim');
     try { gpuChart.draw(); } catch (err) { _diag('gpuChart.draw ERROR: ' + err.message); }
   } else if (ev.GpuProcUpdate) {
     // QNX 路径：每进程 GPU busy%
@@ -380,7 +398,7 @@ listen('sample', (e) => {
     gpuChart.push('PID ' + pid, t, +busy.toFixed(2));
     if (!gpuprocHist[pid]) gpuprocHist[pid] = [];
     gpuprocHist[pid].push({ t, busy });
-    setLive('gpu_proc_' + pid, 'GPU busy (pid ' + pid + ')', busy.toFixed(1), '%', '#cba6f7');
+    setLive('gpu_proc_' + pid, 'GPU busy (pid ' + pid + ')', busy.toFixed(1), '%', 'purple');
     try { gpuChart.draw(); } catch (err) { _diag('gpuChart.draw ERROR: ' + err.message); }
   } else if (ev.GpuMemUpdate) {
     // --gpu 降级路径（hypervisor 平台）：每 PID GPU 显存
@@ -393,8 +411,8 @@ listen('sample', (e) => {
     gpumemChart.push('global', t, Math.round(global / 1e6));
     if (!gpumemHist[pid]) gpumemHist[pid] = [];
     gpumemHist[pid].push({ t, mb, gmb: global / 1e6 });
-    setLive('gpumem_' + pid, 'GPU 显存 (pid ' + pid + ')', mb.toFixed(0), ' MB', '#94e2d5');
-    setLive('gpumem_global', '  └ 整机', (global / 1e6).toFixed(0), ' MB', '#6c7086');
+    setLive('gpumem_' + pid, 'GPU 显存 (pid ' + pid + ')', mb.toFixed(0), ' MB', 'teal');
+    setLive('gpumem_global', '  └ 整机', (global / 1e6).toFixed(0), ' MB', 'dim');
     try { gpumemChart.draw(); } catch (err) { _diag('gpumemChart.draw ERROR: ' + err.message); }
   } else if (ev.IoUpdate) {
     const { pid, timestamp, r, w, dr, dw } = ev.IoUpdate;
@@ -405,7 +423,7 @@ listen('sample', (e) => {
     ioChart.push(`PID ${pid} W`, t, +w.toFixed(2));
     if (!ioHist[pid]) ioHist[pid] = [];
     ioHist[pid].push({ t, r, w, dr, dw });
-    setLive('io_' + pid, 'IO 读/写 (pid ' + pid + ')', r.toFixed(1) + ' / ' + w.toFixed(1), ' KB/s', '#fab387');
+    setLive('io_' + pid, 'IO 读/写 (pid ' + pid + ')', r.toFixed(1) + ' / ' + w.toFixed(1), ' KB/s', 'orange');
     try { ioChart.draw(); } catch (err) { _diag('ioChart.draw ERROR: ' + err.message); }
   } else if (ev.NetUpdate) {
     const { timestamp, rx, tx } = ev.NetUpdate;
@@ -413,7 +431,7 @@ listen('sample', (e) => {
     const t = new Date(timestamp).getTime();
     netChart.push('RX', t, +rx.toFixed(2));
     netChart.push('TX', t, +tx.toFixed(2));
-    setLive('net', '网络 RX/TX', rx.toFixed(1) + ' / ' + tx.toFixed(1), ' KB/s', '#74c7ec');
+    setLive('net', '网络 RX/TX', rx.toFixed(1) + ' / ' + tx.toFixed(1), ' KB/s', 'sky');
     try { netChart.draw(); } catch (err) { _diag('netChart.draw ERROR: ' + err.message); }
   }
   updateTitle();
@@ -451,11 +469,28 @@ function switchTab(which) {
   document.getElementById('traceContent').classList.toggle('hidden', perf);
   document.getElementById('tabPerfBtn').classList.toggle('active', perf);
   document.getElementById('tabTraceBtn').classList.toggle('active', !perf);
+  // Perfetto 分析页隐藏左侧采样控制栏（报告占满全宽）；性能指标页恢复
+  document.getElementById('sidebar').classList.toggle('hidden', !perf);
   // 图表容器显隐变化后尺寸需刷新
   if (perf) setTimeout(() => { for (const c of allCharts) c.resize(); }, 50);
 }
 document.getElementById('tabPerfBtn').addEventListener('click', () => switchTab('perf'));
 document.getElementById('tabTraceBtn').addEventListener('click', () => switchTab('trace'));
+
+// ---- 主题切换（暗/亮，localStorage 持久化） ----
+function applyTheme(theme) {
+  document.documentElement.dataset.theme = theme === 'light' ? 'light' : '';
+  if (theme !== 'light') delete document.documentElement.dataset.theme;
+  document.getElementById('themeBtn').textContent = theme === 'light' ? '☀ 暗色' : '☾ 亮色';
+  localStorage.setItem('xperf-theme', theme);
+  // 图表与实时面板取色跟随主题
+  for (const c of allCharts) c.draw();
+  renderLive();
+}
+document.getElementById('themeBtn').addEventListener('click', () => {
+  applyTheme(document.documentElement.dataset.theme === 'light' ? 'dark' : 'light');
+});
+applyTheme(localStorage.getItem('xperf-theme') || 'dark');
 
 listen('trace', (e) => {
   const { stage, message, trace_path } = e.payload;
