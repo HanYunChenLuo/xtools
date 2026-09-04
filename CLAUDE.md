@@ -89,7 +89,9 @@ process_cpu% = (proc_jiffies_delta / total_jiffies_delta) × 100 × num_cores
 
 **真机格式注意**：App Summary 分类行与 `TOTAL PSS:` 之间隔一个空行——空行结束区块，TOTAL 必须在区块外兜底解析。
 
-`MemoryDetails` 字段（单位 KB）：`java_heap`, `native_heap`, `code`, `stack`, `graphics`, `private_other`, `system`, `total_pss`。
+`MemoryDetails` 字段（单位 KB，agent 协议与基线 JSON 存储口径）：`java_heap`, `native_heap`, `code`, `stack`, `graphics`, `private_other`, `system`, `total_pss`。
+
+**展示单位统一（78f93a9）**：内存的终端打印/GUI 面板与图表/CSV 导出全 **MB**（协议与基线 JSON 存储仍 KB，展示层换算）——memory CSV 表头逐列标 `(MB)`；旧会话 CSV 为 KB 无标注，消费时看表头。其余指标核对无混用：GPU 显存全 MB、IO/网络全 KB/s、频率 MHz（hello 规格行 GHz）、温度 °C。
 
 ---
 
@@ -103,7 +105,10 @@ fps_sample_round(pid)                    ← agent 内每 PID 每 FPS 轮一次�
   │    │                                    发现为空也记零帧轮（进程刚重启 Surface 未建时按阈值节流重试，
   │    │                                    全量 dump ~1.5s 不能每轮试）
   │    ├─ dumpsys SurfaceFlinger（全量）  → 按 BufferStateLayer 块 metadata 的 ownerPID 归属匹配
-  │    └─ 兜底：dumpsys SurfaceFlinger --list → 按包名匹配（去掉 "<hex> " 别名前缀，去重）
+  │    └─ dumpsys SurfaceFlinger --list → 按包名匹配（去掉 "<hex> " 别名前缀，去重）
+  │    └── 两路结果取**并集**（9cfa9a5：ownerPID 非空即跳过兜底曾致 SS3 漏
+  │         SurfaceView[...](BLAST)#0 层——Android 12+ BLAST 合成 app 直提 buffer，
+  │         真实帧流在该层而 ownerPID 只拿到静止 Activity View 层 → FPS 恒 0）
   └─ 每图层每轮：dumpsys SurfaceFlinger --latency '<layer>'（设备端本地调用，无 adb 往返）
        解析最近 127 帧的 actualPresent（过滤 0=空槽、i64::MAX=已入队未上屏哨兵）
        与上轮缓冲末尾时间戳取差 → 本窗口新帧数 → FPS = 新帧数 / 窗口墙钟时长
@@ -197,10 +202,12 @@ Platform trait + `adb devices -l` product 字段自动检测（HU_SS3/HU_SS2MAXF
 多台设备同连时 adb 不带 `-s` 全部报 `more than one device`——工具链整体失效（SS3 车机 + 手机双连实测触发，2026-09-04）。
 
 - **core 注入点**：`utils::TARGET_SERIAL` 全局 + `adb()` 构造器（16 处 adb 调用点统一收敛：agent/trace/simpleperf/coldstart）+ `run_adb_command` 自动在参数前注入 `-s`（mock 注入点之前，测试不受影响）
-- **选择策略**（`pick_device`）：`--device` 显式（须在线）> 单台自动 > 多台报错（错误信息列设备清单）。CLI 在 main() 解析（冷启动/采样之前）；GUI `--package` 自动启动前做前置解析（多台未指定**确定性跳过**自动启动——避免与前端设备下拉自动选择的竞态；`--device` 无效同样跳过，不静默换台）
+- **选择策略**（`pick_device`）：`--device` 显式（须在线）> 单台自动 > 多台报错（错误信息列设备清单，含 Android 版本）。CLI 在 main() 解析（冷启动/采样之前）；GUI `--package` 自动启动前做前置解析（多台未指定**确定性跳过**自动启动——避免与前端设备下拉自动选择的竞态；`--device` 无效同样跳过，不静默换台）
+- **Android 版本检测**（9cfa9a5）：`AdbDevice.android_version`（`ro.build.version.release`，`list_adb_devices` 逐台 getprop，失败标 `?`）；CLI「目标设备」打印/多台报错清单、GUI 下拉（`serial（model，Android 14）`）均展示。采集方式与版本相关——实测印证：SS3=Android 12（帧走 `SurfaceView[...](BLAST)` 层）、SS2MAX=Android 11（帧走 `SurfaceView - ` 层，无 BLAST）
 - **GUI 侧栏设备下拉**：`list_devices`（带 `selected` 已生效项，前端不覆盖 `--device` 选择）+ `select_device`（校验在线后写全局）；页面加载先选设备再拉包列表（`list_packages` 依赖目标已选定）；切换即重选并刷新包列表；手动「开始监控」时 `spawn_sampling` 内兜底（未选择则单台自动、多台 emit `sampling-error` 事件给前端——同时构建/部署/启动失败也走该事件，前端置错误文案并复位按钮）
 - **动态检测（热插拔）**：`spawn_device_monitor` 线程每 3s 轮询 `adb devices -l`，与上次快照 diff（`diff_devices` 纯函数），变化时 emit `devices-changed {devices, selected, added, removed}` → 前端增量重建下拉（保持当前选择）；首轮只建快照不通知（首屏由 loadDevices 填充）；目标设备被移除不清后端 serial（断连重连逻辑仍指向它，插回即恢复采样），下拉占位"（已断开）"+ 状态提示；新设备接入状态提示可切换。**软件手段（kill-server/reconnect/wait-for-disconnect）制造不出 diff**——server 重启后枚举快于 3s 轮询窗且 serial 不变，验证须物理插拔
-- **默认窗口大小（7cb4b4b）**：`resize_default` 命令按屏幕逻辑尺寸动态计算（宽 72% clamp[1080,1600]、高 88% clamp[880,1280]，各留屏幕边距防超出；min 1080×720 + 侧栏 overflow 兜底），前端加载完成后调用——**坑：setup 阶段 webview 未就绪直接 `set_size` 会导致 webkit2gtk 渲染空白**（真机实测，窗口只有标题栏内容全灰），必须等前端 ready 再设；conf 固定尺寸 1400×1000 为检测失败兜底。侧栏指标勾选两列 grid + PIDs 列表限高 140px，默认窗口高度下侧栏免滚动全量显示
+- **默认窗口大小（7cb4b4b）**：`resize_default` 命令按屏幕逻辑尺寸动态计算（宽 72% clamp[1080,1600]、高 88% clamp[880,1280]，各留屏幕边距防超出；min 1080×720 + 侧栏 overflow 兜底），前端加载完成后调用；conf 固定尺寸 1400×1000 为检测失败兜底。侧栏指标勾选两列 grid + PIDs 列表限高 140px，默认窗口高度下侧栏免滚动全量显示。（曾把 webview 空白归因于 setup 阶段 `set_size` 时序——**9cfa9a5 修正为误判**，真凶见下条）
+- **webview 间歇空白（9cfa9a5 修）**：webkit2gtk 的 DMABUF 渲染路径在本机间歇性空白（窗口仅标题栏、内容全灰；浏览器等 GPU 重负载应用占用时触发，同代码两次启动一好一坏连续复现）——修复：main 最开头进程内 `set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1")`（须在任何 webview 初始化前）。**判别方法**：空白时 `WEBKIT_DISABLE_DMABUF_RENDERER=1` 手动启动对比即可确认
 - **平台检测**：`detect_platform_live` 按 serial 过滤设备行再 detect——**坑：过滤须补回表头**（`detect_platform` 按 `skip(1)` 跳表头，曾因表头被滤掉、SS3 行被当表头跳过而误判 Android，真机复现+单测锁定）
 - **重连**：`device_online` 只认目标设备（`adb -s X get-state` = "device"）——多台同连时其他设备在线不算"回来了"
 - **QNX 收尾**：`qnx_stop_stats` 的 pgrep 多会话保护/probe/停链均带 `-s`（语义不变，作用域收敛到目标设备）
