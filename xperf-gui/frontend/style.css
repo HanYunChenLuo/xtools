@@ -1,39 +1,96 @@
 * { box-sizing: border-box; margin: 0; padding: 0; }
-body { font-family: -apple-system, "Segoe UI", "Noto Sans CJK SC", "PingFang SC", sans-serif; display: flex; height: 100vh; -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility; }
+
+/* ---------- 双主题：暗色（默认）/ 亮色，html[data-theme] 切换 ---------- */
+:root {
+  color-scheme: dark; /* 原生控件（select 下拉/checkbox/number spinner/滚动条）暗色渲染 */
+  --bg-main: #181825;    /* 主区背景 */
+  --bg-card: #1e1e2e;    /* 卡片/图表/panel 背景 */
+  --bg-input: #313244;   /* 输入框/状态块背景 */
+  --bg-btn: #45475a;     /* 次级按钮背景 */
+  --border: #45475a;
+  --text: #cdd6f4;
+  --text-dim: #6c7086;
+  --text-mute: #a6adc8;
+  --accent: #89b4fa;
+  --ok: #a6e3a1;
+  --warn: #f9e2af;
+  --err: #f38ba8;
+  --purple: #cba6f7;
+  --orange: #fab387;
+  --teal: #94e2d5;
+  --sky: #74c7ec;
+  --on-ok: #1e1e2e; /* ok/err 按钮上的文字色 */
+}
+:root[data-theme="light"] {
+  color-scheme: light;
+  --bg-main: #e6e9ef;
+  --bg-card: #eff1f5;
+  --bg-input: #ccd0da;
+  --bg-btn: #bcc0cc;
+  --border: #bcc0cc;
+  --text: #4c4f69;
+  --text-dim: #6c6f85;
+  --text-mute: #8c8fa1;
+  --accent: #1e66f5;
+  --ok: #40a02b;
+  --warn: #df8e1d;
+  --err: #d20f39;
+  --purple: #8839ef;
+  --orange: #fe640b;
+  --teal: #179299;
+  --sky: #209fb5;
+  --on-ok: #eff1f5;
+}
+
+body { font-family: -apple-system, "Segoe UI", "Noto Sans CJK SC", "PingFang SC", sans-serif; display: flex; height: 100vh; -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility; background: var(--bg-main); color: var(--text); }
 .hidden { display: none !important; }
-#sidebar { width: 280px; padding: 16px; background: #1e1e2e; color: #cdd6f4; overflow-y: auto; overflow-x: hidden; }
-#sidebar h2 { margin-bottom: 16px; color: #89b4fa; }
+
+#sidebar { width: 280px; padding: 16px; background: var(--bg-card); color: var(--text); overflow-y: auto; overflow-x: hidden; }
+#sidebar h2 { margin-bottom: 16px; color: var(--accent); }
 #sidebar label { display: block; margin: 8px 0; font-size: 13px; }
-#sidebar input[type=text], #sidebar input[type=number] { width: 100%; padding: 4px; margin-top: 2px; background: #313244; color: #cdd6f4; border: 1px solid #45475a; border-radius: 3px; }
+#sidebar input[type=text], #sidebar input[type=number] { width: 100%; padding: 4px; margin-top: 2px; background: var(--bg-input); color: var(--text); border: 1px solid var(--border); border-radius: 3px; }
 .checkboxes { display: flex; flex-wrap: wrap; gap: 8px 12px; margin: 8px 0; }
 .checkboxes label { display: inline-flex; align-items: center; gap: 4px; font-size: 13px; white-space: nowrap; }
-.checkboxes input[type=checkbox] { width: 16px; height: 16px; margin: 0; flex-shrink: 0; }
+.checkboxes input[type=checkbox] { width: 16px; height: 16px; margin: 0; flex-shrink: 0; accent-color: var(--accent); }
 #sidebar button { width: 100%; padding: 8px; margin: 4px 0; border: none; border-radius: 4px; cursor: pointer; font-size: 14px; }
-#sidebar button.small { width: 100%; padding: 5px; font-size: 12px; background: #45475a; color: #cdd6f4; }
-#startBtn { background: #a6e3a1; color: #1e1e2e; }
-#stopBtn { background: #f38ba8; color: #1e1e2e; }
+#sidebar button.small { width: 100%; padding: 5px; font-size: 12px; background: var(--bg-btn); color: var(--text); }
+#startBtn { background: var(--ok); color: var(--on-ok); }
+#stopBtn { background: var(--err); color: var(--on-ok); }
 #stopBtn:disabled, #startBtn:disabled { opacity: 0.4; cursor: not-allowed; }
-#status { margin: 12px 0; padding: 6px; background: #313244; border-radius: 3px; font-size: 12px; text-align: center; }
-#sidebar h3 { margin-top: 16px; color: #89b4fa; font-size: 14px; }
+#sidebar h3 { margin-top: 16px; color: var(--accent); font-size: 14px; }
 #pidList { list-style: none; font-size: 12px; }
-#pidList li { padding: 3px 6px; background: #313244; margin: 2px 0; border-radius: 3px; }
+#pidList li { padding: 3px 6px; background: var(--bg-input); margin: 2px 0; border-radius: 3px; }
 #pidList li.new { animation: flash 1s; }
-@keyframes flash { from { background: #a6e3a1; color: #1e1e2e; } to { background: #313244; color: #cdd6f4; } }
-#main { flex: 1; padding: 12px; background: #181825; display: flex; flex-direction: column; gap: 12px; overflow-y: auto; }
-#tabBar { display: flex; gap: 6px; flex-shrink: 0; }
-#tabBar .tab { padding: 6px 16px; border: none; border-radius: 6px 6px 0 0; cursor: pointer; font-size: 13px; background: #313244; color: #a6adc8; }
-#tabBar .tab.active { background: #1e1e2e; color: #89b4fa; font-weight: 600; }
-.chart { flex: 1; min-height: 120px; background: #1e1e2e; border-radius: 6px; position: relative; overflow: hidden; }
+@keyframes flash { from { background: var(--ok); color: var(--on-ok); } to { background: var(--bg-input); color: var(--text); } }
+
+#main { flex: 1; padding: 12px; background: var(--bg-main); display: flex; flex-direction: column; gap: 12px; overflow-y: auto; }
+#tabBar { display: flex; gap: 6px; flex-shrink: 0; align-items: center; }
+#tabBar .tab { padding: 6px 16px; border: none; border-radius: 6px 6px 0 0; cursor: pointer; font-size: 13px; background: var(--bg-input); color: var(--text-mute); }
+#tabBar .tab.active { background: var(--bg-card); color: var(--accent); font-weight: 600; }
+#status { margin-left: auto; max-width: 50%; padding: 6px 10px; background: var(--bg-input); border-radius: 3px; font-size: 12px; text-align: center; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#themeBtn { margin-left: 8px; padding: 6px 12px; flex-shrink: 0; border: none; border-radius: 4px; cursor: pointer; font-size: 13px; background: var(--bg-btn); color: var(--text); }
+
+.chart { flex: 1; min-height: 120px; background: var(--bg-card); border-radius: 6px; position: relative; overflow: hidden; }
 .chart canvas { width: 100%; height: 100%; display: block; }
-#sidebar select { width: 100%; padding: 4px; margin-top: 2px; background: #313244; color: #cdd6f4; border: 1px solid #45475a; border-radius: 3px; }
-#exportBtn { background: #45475a; color: #cdd6f4; }
+#sidebar select { width: 100%; padding: 4px; margin-top: 2px; background: var(--bg-input); color: var(--text); border: 1px solid var(--border); border-radius: 3px; }
+#exportBtn { background: var(--bg-btn); color: var(--text); }
 #panels { display: flex; gap: 12px; flex-shrink: 0; flex-wrap: wrap; align-items: flex-start; }
-.panel { flex: 1 1 220px; background: #1e1e2e; border-radius: 6px; padding: 8px 12px; color: #cdd6f4; }
-.panel h3 { font-size: 13px; color: #89b4fa; margin-bottom: 6px; }
+.panel { flex: 1 1 220px; background: var(--bg-card); border-radius: 6px; padding: 8px 12px; color: var(--text); }
+.panel h3 { font-size: 13px; color: var(--accent); margin-bottom: 6px; }
 .panel table { width: 100%; border-collapse: collapse; font-size: 12px; }
-.panel th { text-align: left; color: #6c7086; font-weight: 500; padding: 2px 8px 2px 0; }
+.panel th { text-align: left; color: var(--text-dim); font-weight: 500; padding: 2px 8px 2px 0; }
 .panel td { padding: 2px 8px 2px 0; font-variant-numeric: tabular-nums; }
-.effective-rates { font-size: 11px; color: #6c7086; margin: 4px 0 8px; line-height: 1.6; }
+.effective-rates { font-size: 11px; color: var(--text-dim); margin: 4px 0 8px; line-height: 1.6; }
 .effective-rates .rate-label { font-weight: 600; }
-.effective-rates .rate-same { color: #a6e3a1; }
-.effective-rates .rate-limited { color: #f9e2af; }
+.effective-rates .rate-same { color: var(--ok); }
+.effective-rates .rate-limited { color: var(--warn); }
+
+/* ---------- Perfetto 分析 tab ---------- */
+.trace-toolbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; flex-shrink: 0; }
+.trace-toolbar .small { width: auto; padding: 5px 10px; }
+.trace-file-label { font-size: 12px; color: var(--text-mute); word-break: break-all; }
+.trace-report-box { flex: 1; min-height: 0; background: var(--bg-card); border-radius: 6px; padding: 10px 14px; overflow: auto; }
+.trace-report-box pre { white-space: pre-wrap; font-size: 12px; line-height: 1.5; margin: 0; color: var(--text); }
+/* 侧栏行内输入（打点标签 / Perfetto 秒数）：行内 flex，宽度收缩 */
+.inline-input { flex: 1; width: auto; padding: 4px; background: var(--bg-input); color: var(--text); border: 1px solid var(--border); border-radius: 3px; font-size: 12px; }
+
