@@ -110,8 +110,16 @@ fn app_has_process(package: &str) -> Result<bool> {
 /// `simpleperf record --app <pkg> -g --duration N`（主机侧超时与 Ctrl-C 兜底）→
 /// 设备端三视图 report（须在 pull 前跑，`.data` 还在设备上）→ adb pull → 清理设备端。
 ///
+/// `progress`：录制进度回调（GUI 走事件推进度用）；每到整秒以已录制秒数（1..=N）
+/// 触发一次，录制等待循环内同步调用。`None` = 不上报（CLI 打印会刷屏，默认不传）。
+///
 /// 包名校验与进度展示由调用方负责（目录路径含包名，防遍历）。
-pub fn record(seconds: u64, package: &str, out_dir: &Path) -> Result<RecordedStack> {
+pub fn record(
+    seconds: u64,
+    package: &str,
+    out_dir: &Path,
+    progress: Option<&dyn Fn(u64)>,
+) -> Result<RecordedStack> {
     validate_package(package)?;
     std::fs::create_dir_all(out_dir)?;
     let stem = Local::now().format("%Y%m%d_%H%M%S").to_string();
@@ -146,6 +154,8 @@ pub fn record(seconds: u64, package: &str, out_dir: &Path) -> Result<RecordedSta
     // 手动超时兜底（同 trace 模式）：--duration 自会退出，但 --app 在进程全部死亡后
     // 会退回等待态，须有上限；Ctrl-C 全局中断标志可提前放弃
     let deadline = Instant::now() + Duration::from_secs(seconds + 25);
+    let started = Instant::now();
+    let mut last_reported: u64 = 0;
     loop {
         match child.try_wait()? {
             Some(_) => break,
@@ -161,7 +171,17 @@ pub fn record(seconds: u64, package: &str, out_dir: &Path) -> Result<RecordedSta
                     dev_path
                 );
             }
-            None => std::thread::sleep(Duration::from_millis(100)),
+            None => {
+                // 进度回调：每到整秒触发（elapsed 1..=N；超时兜底窗口内也可能 >N）
+                if let Some(cb) = progress {
+                    let elapsed = started.elapsed().as_secs();
+                    if elapsed > last_reported {
+                        last_reported = elapsed;
+                        cb(elapsed);
+                    }
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
         }
     }
     let out = child.wait_with_output()?;
@@ -297,6 +317,195 @@ fn squeeze_spaces(text: &str) -> String {
         }
     }
     out
+}
+
+// ==================== 浏览器火焰图（report_html.py） ====================
+
+/// AOSP 官方脚本缓存目录（`~/.cache/xperf/simpleperf_scripts`）：`report_html.py` 及其
+/// 依赖 + 主机平台 report 库。布局对齐上游 `get_script_dir()`/`get_host_binary_path()`
+/// 的相对定位规则（`bin/<os>/<arch>/<lib>`）。
+const SCRIPTS_CACHE_SUBDIR: &str = ".cache/xperf/simpleperf_scripts";
+/// gitiles blob 下载基址。**+archive 不支持多级子路径**（实测 `+archive/main/simpleperf/
+/// scripts/simpleperf.tar.gz` 返回 INVALID_ARGUMENT；整仓 tarball 80MB 太重）→ 逐文件
+/// blob `?format=TEXT`（base64 文本）下载，合计 ~10MB。
+const AOSP_SCRIPTS_BASE: &str =
+    "https://android.googlesource.com/platform/system/extras/+/main/simpleperf/scripts";
+/// 进程内互斥：首次引导下载期间并发调用必须等待而非交错写缓存文件（同 perfetto UI
+/// 镜像锁模式）
+static SCRIPTS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// 主机平台的 report 库相对目录与文件名（对齐上游 `get_host_binary_path`：linux-x86_64
+/// 用 `.so`，darwin-x86_64 用 `.dylib`；上游未发布其他主机预编译库）。
+/// 不支持的主机返回 Err（附支持列表）。
+fn host_report_lib() -> Result<(&'static str, &'static str)> {
+    match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("linux", "x86_64") => Ok(("bin/linux/x86_64", "libsimpleperf_report.so")),
+        ("macos", "x86_64") => Ok(("bin/darwin/x86_64", "libsimpleperf_report.dylib")),
+        (os, arch) => bail!(
+            "主机 {}/{} 无 simpleperf report 库预编译版本（上游仅提供 linux-x86_64 / darwin-x86_64）",
+            os,
+            arch
+        ),
+    }
+}
+
+/// 从 gitiles blob API 下载一个文件（`?format=TEXT` 为 base64 文本，经
+/// `python3 -m base64 -d` 解码；python3 是本功能的硬依赖，此处不回避）。
+/// URL 与路径均为固定字符集常量/推导值，无注入面。
+fn fetch_aosp_blob(rel_path: &str, dest: &Path) -> Result<()> {
+    let url = format!("{}/{}?format=TEXT", AOSP_SCRIPTS_BASE, rel_path);
+    let dest_str = dest.to_string_lossy();
+    let script = format!(
+        "curl -sL -m 60 '{url}' | python3 -m base64 -d > '{dest_str}' && test -s '{dest_str}'"
+    );
+    let st = Command::new("sh")
+        .arg("-c")
+        .arg(&script)
+        .status()
+        .with_context(|| format!("下载 {} 失败", rel_path))?;
+    if !st.success() {
+        bail!("下载 {} 失败（网络不通或 AOSP 源不可达）", rel_path);
+    }
+    Ok(())
+}
+
+/// 确保 `report_html.py` 脚本集可用（首次使用从 AOSP 引导下载 ~10MB，之后离线）。
+/// 返回脚本目录。完整性检查逐文件进行：半截缓存下次补齐缺项。
+fn ensure_simpleperf_scripts() -> Result<PathBuf> {
+    let _guard = SCRIPTS_LOCK.lock().expect("脚本缓存锁失败");
+    let (lib_rel, lib_name) = host_report_lib()?;
+    let dir = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_default()
+        .join(SCRIPTS_CACHE_SUBDIR);
+    let lib_path = dir.join(lib_rel).join(lib_name);
+    let mut needed: Vec<(String, PathBuf)> = [
+        "report_html.py",
+        // write_script 内嵌的前端脚本（add_file('report_html.js')，缺则生成半截 HTML 后失败）
+        "report_html.js",
+        "simpleperf_report_lib.py",
+        "simpleperf_utils.py",
+        // report_lib 的 ETM 解析依赖（import etm_types）；该文件自身无本地依赖，闭包到此为止
+        "etm_types.py",
+    ]
+    .iter()
+    .map(|f| (f.to_string(), dir.join(f)))
+    .collect();
+    needed.push((format!("{}/{}", lib_rel, lib_name), lib_path.clone()));
+    let complete = needed
+        .iter()
+        .all(|(_, p)| p.is_file() && std::fs::metadata(p).map(|m| m.len() > 0).unwrap_or(false));
+    if complete {
+        return Ok(dir);
+    }
+    eprintln!("[simpleperf] 首次使用：从 AOSP 下载 report_html.py 脚本与主机 report 库（~10MB）…");
+    for (rel, dest) in &needed {
+        if dest.is_file() && std::fs::metadata(dest).map(|m| m.len() > 0).unwrap_or(false) {
+            continue; // 半截缓存：只补缺项
+        }
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        fetch_aosp_blob(rel, dest)?;
+    }
+    Ok(dir)
+}
+
+/// 数据文件对应的火焰图 HTML 输出路径（同目录同名换扩展：`stack_x.data` → `stack_x.html`）
+fn html_path_for(data_path: &Path) -> PathBuf {
+    data_path.with_extension("html")
+}
+
+/// 在浏览器中查看 simpleperf 数据（GUI「函数热点」tab 的查看入口）：
+/// 用 AOSP 官方 `report_html.py` 把 `.data` 渲染成**单文件 HTML**（含火焰图/Chart/
+/// Sample Table，实测 3.3MB data → 7.8MB html ~1.2s），再 xdg-open 打开。
+///
+/// - 首次使用自动从 AOSP 引导下载脚本集到 `~/.cache/xperf/simpleperf_scripts/`
+///   （~10MB，之后离线可用）；需要 `python3`
+/// - HTML 已存在且新于 `.data` 时直接复用（同一份数据反复查看不重渲染）
+/// - 生成带手动超时上限（300s，超大 `.data` 防挂死）与 Ctrl-C 中断响应
+///
+/// 生成失败时 `.data` 不受影响（报告文本/三视图不受影响）。
+pub fn open_stack_in_browser(data_path: &Path) -> Result<String> {
+    if !data_path.is_file() {
+        bail!("数据文件不存在: {}", data_path.display());
+    }
+    // python3 前置（脚本运行与 blob 解码引导都依赖）
+    let py = Command::new("sh")
+        .args(["-c", "command -v python3"])
+        .output()
+        .context("检测 python3 失败")?;
+    if String::from_utf8_lossy(&py.stdout).trim().is_empty() {
+        bail!("需要 python3（report_html.py 渲染依赖），未在 PATH 中检测到");
+    }
+    let scripts_dir = ensure_simpleperf_scripts()?;
+    let html = html_path_for(data_path);
+    // 复用：HTML 已存在且新于 data（同一份数据的查看不重渲染）
+    let reuse = html.is_file()
+        && match (std::fs::metadata(data_path), std::fs::metadata(&html)) {
+            (Ok(d), Ok(h)) => d.modified().ok().zip(h.modified().ok()).is_some_and(|(d, h)| h > d),
+            _ => false,
+        };
+    if !reuse {
+        let mut child = Command::new("python3")
+            .arg(scripts_dir.join("report_html.py"))
+            .arg("-i")
+            .arg(data_path)
+            .arg("-o")
+            .arg(&html)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .context("启动 python3 report_html.py 失败")?;
+        let deadline = Instant::now() + Duration::from_secs(300);
+        loop {
+            match child.try_wait()? {
+                Some(_) => break,
+                None if crate::utils::is_interrupted() => {
+                    let _ = child.kill();
+                    bail!("火焰图生成被中断");
+                }
+                None if Instant::now() > deadline => {
+                    let _ = child.kill();
+                    bail!("火焰图生成超时（>300s，数据过大？）");
+                }
+                None => std::thread::sleep(Duration::from_millis(200)),
+            }
+        }
+        let out = child.wait_with_output()?;
+        if !out.status.success() {
+            // 失败清理：python 崩溃可能已写出半截 HTML，不清会让下次 reuse 误判复用
+            let _ = std::fs::remove_file(&html);
+            // stderr 取末尾若干行（report 日志可能很长，含符号查找警告）
+            let tail: String = String::from_utf8_lossy(&out.stderr)
+                .lines()
+                .rev()
+                .take(5)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect::<Vec<_>>()
+                .join("\n");
+            bail!("report_html.py 生成失败: {}", tail);
+        }
+    }
+    // 打开本地 HTML（无 CSP/网络限制，同 reveal_trace_and_open_ui 的可靠性）
+    #[cfg(target_os = "macos")]
+    let open = "open";
+    #[cfg(not(target_os = "macos"))]
+    let open = "xdg-open";
+    Command::new(open)
+        .arg(&html)
+        .spawn()
+        .with_context(|| format!("打开浏览器失败（{}）", open))?;
+    Ok(if reuse {
+        format!(
+            "火焰图已生成过，直接打开: {}",
+            html.display()
+        )
+    } else {
+        format!("火焰图已生成并打开: {}", html.display())
+    })
 }
 
 // ==================== 报告解析与渲染 ====================
@@ -597,6 +806,65 @@ mod tests {
         assert!(filtered.ends_with('\n'));
         // 全日志输入 → 全部过滤为空串
         assert_eq!(filter_simpleperf_logs("simpleperf W x\n"), "");
+    }
+
+    #[test]
+    fn test_html_path_for() {
+        // 同目录同名换扩展：.data → .html（open_stack_in_browser 的输出路径推导）
+        assert_eq!(
+            html_path_for(Path::new("/a/b/stack_x.data")),
+            PathBuf::from("/a/b/stack_x.html")
+        );
+        assert_eq!(
+            html_path_for(Path::new("no_ext")),
+            PathBuf::from("no_ext.html")
+        );
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    #[test]
+    fn test_host_report_lib() {
+        // 本机为 linux-x86_64：库路径对齐上游 get_host_binary_path 规则
+        let (dir, name) = host_report_lib().expect("linux-x86_64 应有预编译库");
+        assert_eq!(dir, "bin/linux/x86_64");
+        assert_eq!(name, "libsimpleperf_report.so");
+    }
+
+    /// 真实链路手动测试：取 `log/` 下最新 `.data` 走完整 open_stack_in_browser
+    /// （首次会从 AOSP 下载脚本 ~10MB；会 xdg-open 弹浏览器——需要桌面环境）。
+    /// 跑法：`cargo test -p xperf-core test_open_stack_in_browser_real -- --ignored --nocapture`
+    #[test]
+    #[ignore = "真实链路：需要 log/ 下有 .data 且有桌面环境（会弹浏览器）"]
+    fn test_open_stack_in_browser_real() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        // 找 log/<pkg>/<会话时间戳>/stack/ 下最新的 .data
+        let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
+        let stack_root = root.join("log");
+        if let Ok(rd) = std::fs::read_dir(&stack_root) {
+            for pkg in rd.flatten() {
+                // 每个包名下是多个会话时间戳目录，每个会话里才有 stack/
+                let Ok(sessions) = std::fs::read_dir(pkg.path()) else { continue };
+                for s in sessions.flatten() {
+                    let Ok(files) = std::fs::read_dir(s.path().join("stack")) else { continue };
+                    for f in files.flatten() {
+                        let p = f.path();
+                        if p.extension().and_then(|e| e.to_str()) != Some("data") {
+                            continue;
+                        }
+                        let m = std::fs::metadata(&p)
+                            .and_then(|m| m.modified())
+                            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+                        if best.as_ref().is_none_or(|(bm, _)| m > *bm) {
+                            best = Some((m, p));
+                        }
+                    }
+                }
+            }
+        }
+        let (_, data) = best.expect("log/ 下无 .data，先跑一次 --stack 采集");
+        println!("测试数据: {}", data.display());
+        let msg = open_stack_in_browser(&data).expect("打开失败");
+        assert!(msg.contains("火焰图"), "返回消息异常: {}", msg);
     }
 
     #[test]

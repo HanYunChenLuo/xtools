@@ -285,8 +285,9 @@ fn stop_sampling(state: State<'_, AppState>) -> Result<(), String> {
 
 /// 后台深挖线程（start_trace 命令与 --trace 自动启动共用）：
 /// 录制 → 拉回 → trace_processor SQL 分析，全程 emit("trace") 推进度。
-/// stage: recording / recorded（已拉回，分析中）/ done（message=完整报告文本）/ error；
-/// recorded/done 附 trace_path（前端"在浏览器打开 Perfetto UI"按钮用）。
+/// stage: recording / progress（每秒，message 含已录制秒数）/ recorded（已拉回，
+/// 分析中）/ done（message=完整报告文本）/ error；recorded/done 附 trace_path
+/// （前端"在浏览器打开 Perfetto UI"按钮用）。
 /// 与采样会话互不干扰（可并行；GUI 采样不限时，窗口对照靠报告与图表的时间戳）。
 fn spawn_trace(app: tauri::AppHandle, package: String, seconds: u64, running: Arc<Mutex<bool>>) {
     eprintln!("[trace] 启动: package={} seconds={}", package, seconds);
@@ -302,7 +303,18 @@ fn spawn_trace(app: tauri::AppHandle, package: String, seconds: u64, running: Ar
             .join(Local::now().format("%Y%m%d_%H%M%S").to_string())
             .join("trace");
         emit_stage("recording", format!("录制 {}s perfetto trace…（窗口内操作被测应用）", seconds), None);
-        let rec = match xperf_core::trace::record(seconds, &dir) {
+        let progress = |elapsed: u64| {
+            eprintln!("[trace] progress: {}s", elapsed);
+            let _ = app.emit(
+                "trace",
+                serde_json::json!({
+                    "stage": "progress",
+                    "message": format!("perfetto 录制中 {}/{}s", elapsed.min(seconds), seconds),
+                    "trace_path": null
+                }),
+            );
+        };
+        let rec = match xperf_core::trace::record(seconds, &dir, Some(&progress)) {
             Ok(r) => r,
             Err(e) => {
                 eprintln!("[trace] 录制失败: {}", e);
@@ -354,9 +366,10 @@ async fn start_trace(
 }
 
 /// 后台函数热点线程（start_stack 命令与 --stack 自动启动共用）：
-/// 录制 → 设备端两视图报告 → 拉回 → 渲染热点报告，全程 emit("stack") 推进度。
-/// stage: recording / recorded（已拉回，渲染报告中）/ done（message=完整报告文本）/ error；
-/// recorded/done/error 附 data_path（`.data` 文件路径，展示于报告页）。
+/// 录制 → 设备端三视图报告 → 拉回 → 渲染热点报告，全程 emit("stack") 推进度。
+/// stage: recording / progress（每秒，message 含已录制秒数）/ recorded（已拉回，
+/// 渲染报告中）/ done（message=完整报告文本）/ error；recorded/done/error 附
+/// data_path（`.data` 文件路径，前端"在浏览器打开火焰图"按钮用）。
 /// 与采样/trace 会话互不干扰（可并行；GUI 采样不限时，窗口对照靠报告与图表的时间戳）。
 fn spawn_stack(app: tauri::AppHandle, package: String, seconds: u64, running: Arc<Mutex<bool>>) {
     eprintln!("[stack] 启动: package={} seconds={}", package, seconds);
@@ -372,7 +385,18 @@ fn spawn_stack(app: tauri::AppHandle, package: String, seconds: u64, running: Ar
             .join(Local::now().format("%Y%m%d_%H%M%S").to_string())
             .join("stack");
         emit_stage("recording", format!("录制 {}s 调用栈…（窗口内操作被测应用）", seconds), None);
-        let rec = match xperf_core::simpleperf::record(seconds, &package, &dir) {
+        let progress = |elapsed: u64| {
+            eprintln!("[stack] progress: {}s", elapsed);
+            let _ = app.emit(
+                "stack",
+                serde_json::json!({
+                    "stage": "progress",
+                    "message": format!("调用栈录制中 {}/{}s", elapsed.min(seconds), seconds),
+                    "data_path": null
+                }),
+            );
+        };
+        let rec = match xperf_core::simpleperf::record(seconds, &package, &dir, Some(&progress)) {
             Ok(r) => r,
             Err(e) => {
                 eprintln!("[stack] 录制失败: {}", e);
@@ -426,6 +450,19 @@ async fn start_stack(
     let seconds = seconds.clamp(1, 600);
     spawn_stack(app, package, seconds, state.stack_running.clone());
     Ok(())
+}
+
+/// 在浏览器查看 simpleperf 调用栈火焰图。
+/// 用 AOSP 官方 report_html.py 把 `.data` 渲染成单文件 HTML（含火焰图/Chart/Sample
+/// Table）后打开；首次使用自动从 AOSP 下载脚本集（~10MB，缓存后离线），需要 python3。
+/// 阻塞数秒（渲染），async 命令不卡 UI 主线程。
+#[tauri::command]
+async fn open_stack_html(data_path: String) -> Result<String, String> {
+    let path = std::path::PathBuf::from(&data_path);
+    if !path.is_file() {
+        return Err(format!("数据文件不存在: {}", data_path));
+    }
+    xperf_core::simpleperf::open_stack_in_browser(&path).map_err(|e| e.to_string())
 }
 
 /// 在浏览器打开 Perfetto UI 并自动加载 trace。
@@ -749,6 +786,7 @@ fn main() {
             start_trace,
             start_stack,
             open_perfetto_ui,
+            open_stack_html,
             diag_log,
             list_packages,
             is_running,

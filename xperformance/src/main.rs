@@ -136,7 +136,7 @@ async fn monitor_process(args: &Args) -> Result<(), Box<dyn std::error::Error>> 
             let pkg = args.package.clone();
             std::thread::spawn(move || {
                 let dir = cli_utils::create_timestamp_subdir(&pkg)?.join("trace");
-                trace::record(n, &dir)
+                trace::record(n, &dir, None)
             })
         });
         let stack_handle = args.stack.map(|n| {
@@ -144,7 +144,7 @@ async fn monitor_process(args: &Args) -> Result<(), Box<dyn std::error::Error>> 
             let pkg = args.package.clone();
             std::thread::spawn(move || {
                 let dir = cli_utils::create_timestamp_subdir(&pkg)?.join("stack");
-                simpleperf::record(n, &pkg, &dir)
+                simpleperf::record(n, &pkg, &dir, None)
             })
         });
         let mut failed: Vec<&str> = Vec::new();
@@ -311,7 +311,7 @@ async fn monitor_process_agent(
         let pkg = args.package.clone();
         std::thread::spawn(move || {
             let dir = cli_utils::create_timestamp_subdir(&pkg)?.join("trace");
-            trace::record(n, &dir)
+            trace::record(n, &dir, None)
         })
     });
     // simpleperf 函数热点（--stack N）：后台线程录制，与采样/trace 同窗口
@@ -320,7 +320,7 @@ async fn monitor_process_agent(
         let pkg = args.package.clone();
         std::thread::spawn(move || {
             let dir = cli_utils::create_timestamp_subdir(&pkg)?.join("stack");
-            simpleperf::record(n, &pkg, &dir)
+            simpleperf::record(n, &pkg, &dir, None)
         })
     });
     let deadline = stop_after.map(|d| Instant::now() + d);
