@@ -1,1 +1,2 @@
+example/apk/*.apk filter=lfs diff=lfs merge=lfs -text
 xperf-core/simpleperf_scripts/bin/** filter=lfs diff=lfs merge=lfs -text
