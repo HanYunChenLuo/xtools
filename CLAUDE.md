@@ -65,7 +65,7 @@ GUI:  start_sampling / 自动启动 → spawn_sampling()（std::thread 阻塞读
 - **设备端**：xperf-agent 常驻，直接读 /proc（CPU/线程）、smaps_rollup 或 dumpsys meminfo（内存）、本地 dumpsys SurfaceFlinger（FPS），按绝对节拍（start + round×interval，防漂移）逐轮输出 JSON 行
 - **主机侧**：只是表现层（CLI 打印/流式 CSV/图表；GUI emit 给前端）。ADB 断开 → exec-out EOF → `reconnect_agent` 每 500ms 轮询等设备回来，重新部署+启动 agent，主机侧状态（时序/峰值/CSV）保留；Ctrl-C → 关闭连接 → agent 写 stdout 失败自行退出
 - **xperf-core 已无轮询实现**（原 Sampler/cpu/memory/fps 参考实现已删除，225d89b）；core 只保留协议类型（ThreadCpuInfo/MemoryDetails/FpsTimeSeriesData/PidStats/SampleEvent）+ agent 传输层 + platform/marker + trace（perfetto 深挖，CLI/GUI 共用）；采样全在 agent（零依赖独立发布，解析逻辑与 core 类型对应）
-- **GUI 前端**：CPU/内存/FPS 折线（series 保留完整会话历史，窗口跟随 10min / 全部历史切换，绘制时二分裁剪 + stride 抽稀防卡顿）、Top 线程表（500ms 节流渲染）、峰值面板（新峰值才更新 DOM）、导出 CSV（`export_csv` 命令写 `log/<pkg>/<导出时刻>/`）、perfetto 深挖（侧栏秒数+按钮 → `start_trace` 命令 → `trace` 事件推进度 → 报告面板展示，与采样并行互不干扰；`--trace N` 命令行自动启动可脚本化验证）
+- **GUI 前端**：CPU/内存/FPS 折线（series 保留完整会话历史，窗口跟随 10min / 全部历史切换，绘制时二分裁剪 + stride 抽稀防卡顿）、Top 线程表（500ms 节流渲染）、峰值面板（新峰值才更新 DOM）、导出 CSV（`export_csv` 命令写 `/tmp/xperf/<pkg>/<导出时刻>/`）、perfetto 深挖（侧栏秒数+按钮 → `start_trace` 命令 → `trace` 事件推进度 → 报告面板展示，与采样并行互不干扰；`--trace N` 命令行自动启动可脚本化验证）
 
 ### CPU 采样口径（agent）
 
@@ -122,7 +122,7 @@ fps_sample_round(pid)                    ← agent 内每 PID 每 FPS 轮一次�
 - **jank 不按 vsync 阈值**（30fps 相机流在 60Hz 屏上帧间隔 33ms 会被误判全卡）：用间隔 > 2×窗口中位间隔，<3 帧不计；FPS 窗口限频 ≥500ms 后帧数足够，jank 统计有效
 - 静止界面 FPS=0 如实上报（事件照常发，GUI 折线落底）
 
-`--fps` 流式写入 `log/<pkg>/<ts>/fps/<pkg>_fps_data_pid<pid>.csv`（Timestamp,FPS,Jank,Layer）。GUI 有 FPS 勾选框 + 折线图（自适应纵轴，多图层逐层一条线，图层短名作图例）。
+`--fps` 流式写入 `/tmp/xperf/<pkg>/<ts>/fps/<pkg>_fps_data_pid<pid>.csv`（Timestamp,FPS,Jank,Layer）。GUI 有 FPS 勾选框 + 折线图（自适应纵轴，多图层逐层一条线，图层短名作图例）。
 
 ---
 
@@ -158,7 +158,7 @@ CLI 退出图表用通用 helper `generate_multi_line_chart`（xperformance/util
 - **录制链路**：`adb shell simpleperf record --app <pkg> -g --duration N -o /data/local/tmp/xperf_stack_<ts>.data`（cpu-cycles 默认 4000Hz + dwarf 调用栈；`--app` 覆盖该应用全部进程并容忍进程重启，root 下非 debuggable 也可采）。**坑：`--app` 对未运行应用输出 `Waiting for process of app …` 无限等待，`--duration` 拦不住**（等待发生在采样开始前）→ 录制前 `pidof` 前置拦截 + 主机侧超时兜底（N+25s，Ctrl-C 中断标志可提前放弃，同 trace 模式）
 - **三视图报告**（设备端 `simpleperf report`，须在 pull 前跑——`.data` 还在设备上；单个视图失败不中断，错误嵌入报告文本）：线程 CPU 分布（`--sort comm,pid,tid`）/ 函数热点 self（`--sort symbol,dso`，**"CPU 高在哪个函数"的直接回答**）/ 函数热点 children（`--children --sort symbol,dso`，调用链累计热点路径）；均 `--percent-limit 1` 去噪
 - **解析**：report 为 header 定宽对齐文本（Symbol 列按最长符号名 padding，可达数百列宽），行解析按「首/尾 token 锚定」而非列位置切片（线程名/符号名可含空格，dso 恒无空格）；报告文件落盘前空格压缩（实测 4.9MB → 566KB）
-- **产物**：`log/<pkg>/<ts>/stack/{stack_<ts>.data, simpleperf_report.txt}`；`.data` 可 `adb push` 回设备换参数复跑 report（如 `--full-callgraph`）
+- **产物**：`/tmp/xperf/<pkg>/<ts>/stack/{stack_<ts>.data, simpleperf_report.txt}`；`.data` 可 `adb push` 回设备换参数复跑 report（如 `--full-callgraph`）
 - **浏览器火焰图**（`open_stack_in_browser`，GUI「函数热点」tab 按钮）：AOSP 官方 `report_html.py` 把 `.data` 渲染成单文件 HTML（火焰图/Chart/Sample Table，3.3MB→7.8MB ~1.2s）后 xdg-open。脚本集首次从 gitiles blob `?format=TEXT` 逐文件引导下载（`~/.cache/xperf/simpleperf_scripts/`，~10MB 后离线；**+archive 不支持多级子路径（实测 INVALID_ARGUMENT）、整仓 tarball 80MB 太重**故逐文件；含 `report_html.js` 内联 JS 与 `etm_types.py` 两个易漏依赖）；依赖闭包：report_html.py/js + simpleperf_report_lib/utils + etm_types + `bin/<os>/<arch>/libsimpleperf_report.so`（linux-x86_64 `.so` / darwin-x86_64 `.dylib`，上游仅这两种主机预编译库）。失败清半截 HTML（防 reuse 误判）；HTML 新于 `.data` 复用不重渲染；需 python3
 - **录制进度**：core `record` 带 `progress: Option<&dyn Fn(u64)>` 回调（等待循环**循环头**每整秒触发 elapsed 1..=N——放 None 分支会漏报：adb 启动开销 ~0.5s 推迟首秒 + try_wait=Some 轮次跳过最后上报，曾致 10s 只显示 6s）；GUI 传闭包 emit `stage:'progress'`（message 如 `调用栈录制中 3/8s`），前端 status 栏以**绿色进度条**呈现（`#status.progress` 类，linear-gradient 按 elapsed/N 百分比铺开；完成/失败自动退回普通样式），CLI 传 None（打印会刷屏）。GUI 侧栏录制时长为共享下拉（`recordSeconds` 5/10/15/30/60/120s，Perfetto/simpleperf 分析两按钮共用）
 - **实测基线（SS3，simpleperf 1.build.47）**：svm 空闲态 8s ≈ 8500 样本 / 0 丢失 / 3.3MB（样本率随 CPU 活动浮动）；设备端应用 so 多为 stripped（函数名显示 `libxxx.so[+偏移]`，偏移可用未剥离 so 离线符号化），系统库与 `[kernel.kallsyms]` 有符号；非 root 设备上非 debuggable 应用被 run-as 路径拒绝（错误由 simpleperf 透传）
@@ -184,7 +184,7 @@ Platform trait + `adb devices -l` product 字段自动检测（HU_SS3/HU_SS2MAXF
 
 「录制-分析」模式，与实时采样互补：采样回答"什么时候高"，trace 回答"为什么高"。CLI 侧可与采样指标并行（`--cpu --trace 10`：后台线程录制 + 采样限时同窗口，到点自动结束）或单独使用（无指标 flag 时只录 trace）；GUI 侧深挖按钮与采样会话并行（采样不限时，窗口对照靠时间戳）。core 模块不打印不建目录：输出目录由调用方传入，报告以文本返回（CLI println / GUI 走 Tauri `trace` 事件 `{stage: recording|progress|recorded|done|error, message}`——progress 为每秒录制进度（elapsed/Ns，core `record` 的 `progress` 回调），done 的 message 即完整报告）。
 
-- **录制链路**：`adb shell perfetto -c - --txt -o /data/misc/perfetto-traces/xperf_<ts>.pftrace`，配置经 stdin 喂入（text proto，**对齐团队 Performance_Tools general_debug.pbtxt 口径**：ftrace 全事件 sched/power/gpu_mem/ext4/f2fs/kmem/mmc + atrace 17 类目 + `atrace_apps "*"` + android.log/packages_list/gpu.memory/process_stats(scan_all_on_start) + frametimeline；buffer0 128MB ftrace + buffer1 32MB stats/log，`write_into_file: true` + 2s 刷盘长录制内存有界）；10s ≈ 46MB（~4.6MB/s，600s ≈ 2.8GB）。不存在的 ftrace 事件（memory_bus/\*、SS3 的 cpu_frequency）perfetto 静默忽略。录完 adb pull 到 `log/<pkg>/<ts>/trace/` 并清理设备端文件。SS3 实测：atrace slice 17 万/10s（surfaceflinger 等系统进程有 app 层轨道）、log 3425 条、cpuidle counter 生效、cpufreq 仍无（GVM）。
+- **录制链路**：`adb shell perfetto -c - --txt -o /data/misc/perfetto-traces/xperf_<ts>.pftrace`，配置经 stdin 喂入（text proto，**对齐团队 Performance_Tools general_debug.pbtxt 口径**：ftrace 全事件 sched/power/gpu_mem/ext4/f2fs/kmem/mmc + atrace 17 类目 + `atrace_apps "*"` + android.log/packages_list/gpu.memory/process_stats(scan_all_on_start) + frametimeline；buffer0 128MB ftrace + buffer1 32MB stats/log，`write_into_file: true` + 2s 刷盘长录制内存有界）；10s ≈ 46MB（~4.6MB/s，600s ≈ 2.8GB）。不存在的 ftrace 事件（memory_bus/\*、SS3 的 cpu_frequency）perfetto 静默忽略。录完 adb pull 到 `/tmp/xperf/<pkg>/<ts>/trace/` 并清理设备端文件。SS3 实测：atrace slice 17 万/10s（surfaceflinger 等系统进程有 app 层轨道）、log 3425 条、cpuidle counter 生效、cpufreq 仍无（GVM）。
 - **trace_processor 定位链**：`~/.local/share/perfetto/prebuilts/trace_processor_shell*`（get.perfetto.dev 官方脚本缓存）→ PATH → `/tmp/trace_processor`（自举脚本）→ 均无则从 get.perfetto.dev 下载引导。分析失败不致命（trace 文件已保存，提示 ui.perfetto.dev 手动分析）。
 - **SQL 分析**：全部查询写一个文件单次执行（trace 只加载一次），marker 查询 `select '===段名===' as m;` 分段，结尾 `===END===` 哨兵判断执行完整性。**查询出错会中止整个文件后续语句**，故按"表必然存在 → 可能缺失"排序，帧时间线表殿后。输出为"表头+数据行+空行"的 CSV 结果集序列，[NULL] 值需按空处理。
 - **报告段**（trace_analysis.txt + trace_queries.sql 同目录留存）：trace 窗口/boot 基线、包 CPU 总量（单核口径 % 窗口）、包线程 CPU 时间 top15、抢占/调度延迟（thread_state R/R+：唤醒→上核的 runnable 时间）、系统 CPU top 与每核 busy/切换次数（**均须排除 idle：swapper 切片 utid=0 挂 upid=0 无名进程，不排除则空闲机器每核"busy"恒 ~100%、(内核线程) 桶被 idle 淹没 80%+**；排除后 (内核线程) 桶 = 真 kthreads）、CPU 频率（**SS3 GVM 无 cpufreq ftrace 事件，如实标注**，实时值用 --freq）、帧时间线全局统计+最差 5 帧（与 agent 图层 FPS 互补；按图层/进程归属深入分析用浏览器 Perfetto UI）。
@@ -229,16 +229,18 @@ Platform trait + `adb devices -l` product 字段自动检测（HU_SS3/HU_SS2MAXF
 
 ### 输出文件触发时机
 
+**数据根目录为 `/tmp/xperf`**（CLI 与 GUI 共用同一根，替代旧的 `./log`；`/tmp` 重启自清）。**清理**：CLI `xperformance --clean-cache`（无需 --package）或 GUI 侧栏「清理缓存与数据」按钮——清 `~/.cache/xperf`（perfetto UI 镜像 + simpleperf 脚本集，首次使用重新引导下载）与 `/tmp/xperf`（全部采集数据）；`~/.local/share/perfetto`（trace_processor 官方缓存）不动。采样/录制进行中清理会丢当前会话产物（GUI 有 confirm 确认）。
+
 | 场景 | 触发条件 | 输出位置 |
 |------|---------|---------|
-| CPU/内存/FPS/线程/B类指标 CSV | **采样时流式追加**（每个样本到达即写并 flush，崩溃只丢尾部） | `log/<pkg>/<ts>/{cpu,memory,fps,thread,freq,thermal,gpu,io,net}/` |
-| CPU 图表（每 PID + 汇总） | 程序退出，数据点 > 1 | `log/<pkg>/<ts>/cpu/` |
-| 内存图表（每 PID + 汇总） | 同上 | `log/<pkg>/<ts>/memory/` |
-| 线程时序图 | `--thread --cpu`，退出时有数据 | `log/<pkg>/<ts>/thread/` |
-| B 类图表（freq 每核/temp 每传感器/io 每 PID/net/gpu） | 退出时对应序列 > 1 点 | `log/<pkg>/<ts>/{freq,thermal,io,net,gpu}/` |
-| perfetto 深挖（--trace N） | 录制完成即拉回；分析随即落盘 | `log/<pkg>/<ts>/trace/{*.pftrace, trace_analysis.txt, trace_queries.sql}` |
-| simpleperf 函数热点（--stack N） | 录制完成即在设备端生成三视图并拉回 | `log/<pkg>/<ts>/stack/{*.data, simpleperf_report.txt}` |
-| simpleperf 浏览器火焰图（GUI 按钮） | 首次点击时渲染生成（复用不重渲染） | `log/<pkg>/<ts>/stack/*.html`（同目录同名） |
+| CPU/内存/FPS/线程/B类指标 CSV | **采样时流式追加**（每个样本到达即写并 flush，崩溃只丢尾部） | `/tmp/xperf/<pkg>/<ts>/{cpu,memory,fps,thread,freq,thermal,gpu,io,net}/` |
+| CPU 图表（每 PID + 汇总） | 程序退出，数据点 > 1 | `/tmp/xperf/<pkg>/<ts>/cpu/` |
+| 内存图表（每 PID + 汇总） | 同上 | `/tmp/xperf/<pkg>/<ts>/memory/` |
+| 线程时序图 | `--thread --cpu`，退出时有数据 | `/tmp/xperf/<pkg>/<ts>/thread/` |
+| B 类图表（freq 每核/temp 每传感器/io 每 PID/net/gpu） | 退出时对应序列 > 1 点 | `/tmp/xperf/<pkg>/<ts>/{freq,thermal,io,net,gpu}/` |
+| perfetto 深挖（--trace N） | 录制完成即拉回；分析随即落盘 | `/tmp/xperf/<pkg>/<ts>/trace/{*.pftrace, trace_analysis.txt, trace_queries.sql}` |
+| simpleperf 函数热点（--stack N） | 录制完成即在设备端生成三视图并拉回 | `/tmp/xperf/<pkg>/<ts>/stack/{*.data, simpleperf_report.txt}` |
+| simpleperf 浏览器火焰图（GUI 按钮） | 首次点击时渲染生成（复用不重渲染） | `/tmp/xperf/<pkg>/<ts>/stack/*.html`（同目录同名） |
 
 - 内存中的时序序列只服务退出图表：超过 2×30k 点时每 2 取 1 原地抽稀（`CHART_SERIES_CAP`，保完整时间范围、分辨率随运行时长自适应降级）；CSV 始终全量。
 - `CpuTimeSeriesData.top_threads` 已无读者，CLI agent 路径不再写入（线程明细走 thread_time_series + 流式 CSV）。
