@@ -175,6 +175,22 @@ pub fn pick_device(preferred: Option<&str>, devices: &[AdbDevice]) -> Result<Adb
     }
 }
 
+/// 两份设备快照的差异（热插拔检测用）：`(接入, 移除)` 各自为 serial 列表。
+/// 顺序保持新/旧快照中的出现顺序。
+pub fn diff_devices(old: &[AdbDevice], new: &[AdbDevice]) -> (Vec<String>, Vec<String>) {
+    let added = new
+        .iter()
+        .filter(|d| !old.iter().any(|o| o.serial == d.serial))
+        .map(|d| d.serial.clone())
+        .collect();
+    let removed = old
+        .iter()
+        .filter(|o| !new.iter().any(|d| d.serial == o.serial))
+        .map(|o| o.serial.clone())
+        .collect();
+    (added, removed)
+}
+
 fn clean_control_chars(input: &str) -> String {
     let mut result = String::with_capacity(input.len());
     let mut chars = input.chars().peekable();
@@ -302,5 +318,35 @@ mod tests {
         assert_eq!(pick_device(None, &single).unwrap().serial, "abc");
         // 无设备报错
         assert!(pick_device(None, &[]).is_err());
+    }
+
+    // ---- 热插拔 diff ----
+
+    fn dev(serial: &str) -> AdbDevice {
+        AdbDevice { serial: serial.into(), product: String::new(), model: String::new() }
+    }
+
+    #[test]
+    fn test_diff_devices() {
+        // 无变化
+        let a = vec![dev("x"), dev("y")];
+        assert_eq!(diff_devices(&a, &a), (vec![], vec![]));
+        // 接入
+        assert_eq!(
+            diff_devices(&[dev("x")], &[dev("x"), dev("y")]),
+            (vec!["y".to_string()], vec![])
+        );
+        // 移除
+        assert_eq!(
+            diff_devices(&[dev("x"), dev("y")], &[dev("y")]),
+            (vec![], vec!["x".to_string()])
+        );
+        // 同时接入+移除
+        assert_eq!(
+            diff_devices(&[dev("x")], &[dev("y")]),
+            (vec!["y".to_string()], vec!["x".to_string()])
+        );
+        // 空 ↔ 空
+        assert_eq!(diff_devices(&[], &[]), (vec![], vec![]));
     }
 }
