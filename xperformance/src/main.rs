@@ -545,13 +545,14 @@ async fn monitor_process_agent(
                 };
                 if verbose {
                     println!(
-                        "[{}] Memory Usage: {} KB (Java: {}, Native: {}, Code: {}, Graphics: {}) [pid {}]",
+                        "[{}] Memory Usage: {:.1} MB (Java: {:.1}, Native: {:.1}, Code: {:.1}, Graphics: {:.1}, RSS: {:.1}) [pid {}]",
                         t.format("%H:%M:%S"),
-                        pss.to_string().blue(),
-                        java,
-                        native,
-                        code,
-                        gfx,
+                        pss as f64 / 1024.0,
+                        java as f64 / 1024.0,
+                        native as f64 / 1024.0,
+                        code as f64 / 1024.0,
+                        gfx as f64 / 1024.0,
+                        rss as f64 / 1024.0,
                         pid.to_string().yellow()
                     );
                 }
@@ -769,7 +770,8 @@ async fn monitor_process_agent(
                     ));
                 }
                 if a.has_mem {
-                    parts.push(format!("PSS {} KB (RSS {})", a.pss.to_string().blue(), a.rss));
+                    let pss_mb = format!("{:.1}", a.pss as f32 / 1024.0);
+                    parts.push(format!("PSS {} MB (RSS {:.1} MB)", pss_mb.blue(), a.rss as f32 / 1024.0));
                 }
                 if let Some((layer, fps, jank)) = &a.fps {
                     parts.push(format!("FPS {} (jank {}, {})", format!("{:.1}", fps).blue(), jank, layer.green()));
@@ -1176,7 +1178,7 @@ fn generate_final_outputs(
                 println!(
                     "Peak Memory Usage (pid {}): {} at {}",
                     pid.yellow(),
-                    format!("{} KB", s.memory_usage).red(),
+                    format!("{:.1} MB", s.memory_usage as f64 / 1024.0).red(),
                     s.memory_time.map(|t| t.format("%Y-%m-%d %H:%M:%S").to_string()).unwrap_or_else(|| "N/A".to_string())
                 );
                 match generate_memory_charts(&memory_dir, &package, pid, &s.memory_data) {
@@ -1227,16 +1229,18 @@ fn generate_memory_charts(
     let (title_area, rest_area) = root.split_vertically(50);
     title_area.titled(&title, ("sans-serif", 20))?;
 
+    // 单位统一：内存图表纵轴/数据全 MB（协议 MemoryDetails 为 KB，此处换算）
+    let to_mb = |kb: u64| kb as f32 / 1024.0;
     let mut max_memory = 0.1f32;
     for detail in &memory_data.memory_details {
-        max_memory = max_memory.max(detail.total_pss as f32);
-        max_memory = max_memory.max(detail.java_heap as f32);
-        max_memory = max_memory.max(detail.native_heap as f32);
-        max_memory = max_memory.max(detail.code as f32);
-        max_memory = max_memory.max(detail.stack as f32);
-        max_memory = max_memory.max(detail.graphics as f32);
-        max_memory = max_memory.max(detail.private_other as f32);
-        max_memory = max_memory.max(detail.system as f32);
+        max_memory = max_memory.max(to_mb(detail.total_pss));
+        max_memory = max_memory.max(to_mb(detail.java_heap));
+        max_memory = max_memory.max(to_mb(detail.native_heap));
+        max_memory = max_memory.max(to_mb(detail.code));
+        max_memory = max_memory.max(to_mb(detail.stack));
+        max_memory = max_memory.max(to_mb(detail.graphics));
+        max_memory = max_memory.max(to_mb(detail.private_other));
+        max_memory = max_memory.max(to_mb(detail.system));
     }
     max_memory *= 1.1;
 
@@ -1256,7 +1260,7 @@ fn generate_memory_charts(
     chart.configure_mesh()
         .x_labels(8)
         .x_label_formatter(&|x| x.format("%H:%M:%S").to_string())
-        .y_desc("Memory Usage (KB)")
+        .y_desc("Memory Usage (MB)")
         .x_desc("Time")
         .draw()?;
 
@@ -1268,14 +1272,14 @@ fn generate_memory_charts(
             .zip(memory_data.memory_details.iter())
             .map(|(t, d)| {
                 let value = match i {
-                    0 => d.total_pss as f32,
-                    1 => d.java_heap as f32,
-                    2 => d.native_heap as f32,
-                    3 => d.code as f32,
-                    4 => d.stack as f32,
-                    5 => d.graphics as f32,
-                    6 => d.private_other as f32,
-                    7 => d.system as f32,
+                    0 => to_mb(d.total_pss),
+                    1 => to_mb(d.java_heap),
+                    2 => to_mb(d.native_heap),
+                    3 => to_mb(d.code),
+                    4 => to_mb(d.stack),
+                    5 => to_mb(d.graphics),
+                    6 => to_mb(d.private_other),
+                    7 => to_mb(d.system),
                     _ => 0.0,
                 };
                 (*t, value)
@@ -1325,7 +1329,8 @@ fn generate_memory_summary_chart(
             max_time = Some(max_time.map_or(tn, |m: chrono::DateTime<Local>| m.max(tn)));
         }
         for d in &md.memory_details {
-            if d.total_pss as f32 > max_mem { max_mem = d.total_pss as f32; }
+            let mb = d.total_pss as f32 / 1024.0;
+            if mb > max_mem { max_mem = mb; }
         }
     }
     let min_time = min_time.ok_or_else(|| anyhow::format_err!("No memory data for summary"))?;
@@ -1339,7 +1344,7 @@ fn generate_memory_summary_chart(
         .build_cartesian_2d(min_time..max_time, 0f32..max_mem)?;
 
     chart.configure_mesh()
-        .y_desc("Total PSS (KB)")
+        .y_desc("Total PSS (MB)")
         .x_desc("Time")
         .x_labels(8)
         .x_label_formatter(&|x| x.format("%H:%M:%S").to_string())
@@ -1356,7 +1361,7 @@ fn generate_memory_summary_chart(
         let color = colors[i % colors.len()];
         let pts: Vec<(chrono::DateTime<Local>, f32)> = md.timestamps.iter()
             .zip(md.memory_details.iter())
-            .map(|(t, d)| (*t, d.total_pss as f32))
+            .map(|(t, d)| (*t, d.total_pss as f32 / 1024.0))
             .collect();
         chart.draw_series(LineSeries::new(pts, color.stroke_width(2)))?
             .label(format!("PID {}", pid))

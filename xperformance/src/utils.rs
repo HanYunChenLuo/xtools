@@ -370,16 +370,24 @@ impl CsvStream {
         );
     }
 
+    /// 内存 CSV 行（MB，单位统一口径：展示/图表/CSV 全 MB；协议与基线 JSON 存储仍 KB）
     pub fn mem_row(&mut self, pkg: &str, pid: u32, t: DateTime<Local>, d: &xperf_core::MemoryDetails) {
         let row = format!(
-            "{},{},{},{},{},{},{},{},{}",
-            t.format(CSV_TS_FMT), d.total_pss, d.java_heap, d.native_heap,
-            d.code, d.stack, d.graphics, d.private_other, d.system
+            "{},{:.1},{:.1},{:.1},{:.1},{:.1},{:.1},{:.1},{:.1}",
+            t.format(CSV_TS_FMT),
+            d.total_pss as f64 / 1024.0,
+            d.java_heap as f64 / 1024.0,
+            d.native_heap as f64 / 1024.0,
+            d.code as f64 / 1024.0,
+            d.stack as f64 / 1024.0,
+            d.graphics as f64 / 1024.0,
+            d.private_other as f64 / 1024.0,
+            d.system as f64 / 1024.0
         );
         stream_write(
             &mut self.broken, &mut self.root, pkg, &mut self.mem, pid,
             "memory", format!("memory_{}_data.csv", pid),
-            "Timestamp,Total PSS,Java Heap,Native Heap,Code,Stack,Graphics,Private Other,System", &row,
+            "Timestamp,Total PSS (MB),Java Heap (MB),Native Heap (MB),Code (MB),Stack (MB),Graphics (MB),Private Other (MB),System (MB)", &row,
         );
     }
 
