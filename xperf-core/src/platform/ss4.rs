@@ -6,6 +6,7 @@
 
 use super::{Platform, PlatformId};
 
+/// SS4 平台
 pub struct Ss4;
 
 impl Platform for Ss4 {

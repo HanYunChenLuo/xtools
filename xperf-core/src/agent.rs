@@ -17,17 +17,26 @@ const DEVICE_AGENT_PATH: &str = "/data/local/tmp/xperf-agent";
 /// 设备无关指标（freq/thermal/net/gpu）不区分 PID；io 为每 PID。
 #[derive(Debug, Clone, Copy, Default)]
 pub struct MetricFlags {
+    /// CPU（进程 + 线程）
     pub cpu: bool,
+    /// 内存（PSS + 分类明细）
     pub memory: bool,
+    /// FPS（SurfaceFlinger 图层帧时间戳）
     pub fps: bool,
+    /// 每核 CPU 频率（sysfs）
     pub freq: bool,
+    /// 温度与热降频状态
     pub thermal: bool,
+    /// GPU busy%（按平台选路：kgsl/QNX/topgpu/ligfx/显存保底）
     pub gpu: bool,
+    /// 每 PID IO 速率
     pub io: bool,
+    /// 整机网络速率
     pub net: bool,
 }
 
 impl MetricFlags {
+    /// 是否至少开启一项
     pub fn any(&self) -> bool {
         self.cpu || self.memory || self.fps || self.freq || self.thermal || self.gpu || self.io || self.net
     }
@@ -48,47 +57,167 @@ impl MetricFlags {
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "t", rename_all = "lowercase")]
+/// 设备端 agent 的 NDJSON 事件（每行一个 JSON 对象，`t` 字段为类型标签）。
+/// 详见 xperf-agent/src/main.rs 头部的协议注释。
 pub enum AgentEvent {
     /// maxkhz: 每核最大频率（KHz），旧版 agent 无此字段时为空
-    Hello { ncores: u32, #[serde(default)] maxkhz: Vec<u64> },
+    Hello {
+        /// 设备核数
+        ncores: u32,
+        /// 每核最大频率（KHz）
+        #[serde(default)]
+        maxkhz: Vec<u64>,
+    },
     /// ts: 墙钟毫秒；cpu: 单核口径 %；th: [tid, 线程名, cpu%]（仅 >0.05% 的线程）
-    Cpu { ts: u64, pid: u32, cpu: f32, th: Vec<(u32, String, f32)> },
+    Cpu {
+        /// 墙钟毫秒
+        ts: u64,
+        /// 进程 PID
+        pid: u32,
+        /// 进程 CPU %（单核口径）
+        cpu: f32,
+        /// 线程明细：(tid, 线程名, cpu%)
+        th: Vec<(u32, String, f32)>,
+    },
     /// pss/rss 及分类明细，单位 KB；分类字段仅 interval≥500ms（dumpsys meminfo 路径）有值
     Mem {
+        /// 墙钟毫秒
         ts: u64,
+        /// 进程 PID
         pid: u32,
+        /// 总 PSS（KB）
         pss: u64,
+        /// RSS（KB）
         rss: u64,
-        #[serde(default)] java: u64,
-        #[serde(default)] native: u64,
-        #[serde(default)] code: u64,
-        #[serde(default)] stack: u64,
-        #[serde(default)] gfx: u64,
-        #[serde(default)] other: u64,
-        #[serde(default)] sys: u64,
+        /// Java 堆（KB）
+        #[serde(default)]
+        java: u64,
+        /// Native 堆（KB）
+        #[serde(default)]
+        native: u64,
+        /// 代码段（KB）
+        #[serde(default)]
+        code: u64,
+        /// 栈（KB）
+        #[serde(default)]
+        stack: u64,
+        /// 图形缓冲（KB）
+        #[serde(default)]
+        gfx: u64,
+        /// 其他私有（KB）
+        #[serde(default)]
+        other: u64,
+        /// 系统分摊（KB）
+        #[serde(default)]
+        sys: u64,
     },
     /// 每个活跃图层一条；全静止时一条零帧样本
-    Fps { ts: u64, pid: u32, layer: String, fps: f32, frames: u32, jank: u32 },
+    Fps {
+        /// 墙钟毫秒
+        ts: u64,
+        /// 进程 PID
+        pid: u32,
+        /// 图层名
+        layer: String,
+        /// 帧率
+        fps: f32,
+        /// 窗口内新帧数
+        frames: u32,
+        /// 窗口内 jank 帧数
+        jank: u32,
+    },
     /// 每核当前频率（KHz），下标与 Hello 的 maxkhz 对应；0 = 该核离线/读失败
-    Freq { ts: u64, khz: Vec<u64> },
+    Freq {
+        /// 墙钟毫秒
+        ts: u64,
+        /// 每核当前频率（KHz）
+        khz: Vec<u64>,
+    },
     /// 每 PID IO 速率 KB/s：r/w=rchar/wchar 逻辑读写，dr/dw=read_bytes/write_bytes 磁盘读写
-    Io { ts: u64, pid: u32, r: f32, w: f32, dr: f32, dw: f32 },
+    Io {
+        /// 墙钟毫秒
+        ts: u64,
+        /// 进程 PID
+        pid: u32,
+        /// 逻辑读速率（KB/s）
+        r: f32,
+        /// 逻辑写速率（KB/s）
+        w: f32,
+        /// 磁盘读速率（KB/s）
+        dr: f32,
+        /// 磁盘写速率（KB/s）
+        dw: f32,
+    },
     /// 整机网络速率 KB/s（聚合物理口，排除回环/隧道；per-app 无数据源）
-    Net { ts: u64, rx: f32, tx: f32 },
+    Net {
+        /// 墙钟毫秒
+        ts: u64,
+        /// 下行速率（KB/s）
+        rx: f32,
+        /// 上行速率（KB/s）
+        tx: f32,
+    },
     /// GPU：busy 为窗口内 busy 占比 %；mhz 为当前时钟（0 = 无时钟源）；
     /// util/maxmhz 仅 QNX 路径有值（util = busy 按频率折算的利用率，kgsl 路径为 0）
-    Gpu { ts: u64, busy: f32, #[serde(default)] util: f32, mhz: u32, #[serde(default)] maxmhz: u32 },
+    Gpu {
+        /// 墙钟毫秒
+        ts: u64,
+        /// GPU busy %
+        busy: f32,
+        /// GPU util %（QNX 路径）
+        #[serde(default)]
+        util: f32,
+        /// 当前时钟 MHz（0 = 无时钟源）
+        mhz: u32,
+        /// 最大时钟 MHz（QNX 路径）
+        #[serde(default)]
+        maxmhz: u32,
+    },
     /// QNX 路径：每进程 GPU busy %（按 comm 名归因到 Android PID）
-    GpuProc { ts: u64, pid: u32, busy: f32 },
+    GpuProc {
+        /// 墙钟毫秒
+        ts: u64,
+        /// 进程 PID
+        pid: u32,
+        /// 该进程 GPU busy %
+        busy: f32,
+    },
     /// --gpu 降级路径（GPU 在 hypervisor 后的平台）：每 PID GPU 显存字节 + 整机 global
-    GpuMem { ts: u64, pid: u32, bytes: u64, global: u64 },
+    GpuMem {
+        /// 墙钟毫秒
+        ts: u64,
+        /// 进程 PID
+        pid: u32,
+        /// 进程 GPU 显存（字节）
+        bytes: u64,
+        /// 整机 GPU 显存（字节）
+        global: u64,
+    },
     /// 温度与热降频：status 为 Android ThermalStatus（-1=未知）；sensors 为 [名称, 类型, °C]
-    Temp { ts: u64, status: i32, #[serde(default)] sensors: Vec<(String, i32, f32)> },
-    Exit { pid: u32 },
+    Temp {
+        /// 墙钟毫秒
+        ts: u64,
+        /// Android ThermalStatus（-1 = 未知）
+        status: i32,
+        /// 传感器读数：(名称, 类型, °C)
+        #[serde(default)]
+        sensors: Vec<(String, i32, f32)>,
+    },
+    /// 进程退出（agent 检测到后重扫包名进程）
+    Exit {
+        /// 退出的进程 PID
+        pid: u32,
+    },
+    /// 包名下无进程（agent 每秒上报一次直至进程出现）
     Noproc,
-    Err { msg: String },
+    /// agent 侧非致命错误（如单轮 overrun）
+    Err {
+        /// 错误描述
+        msg: String,
+    },
 }
 
+/// 与设备端 agent 的 exec-out 长连接流（阻塞逐行读 NDJSON 事件）
 pub struct AgentStream {
     child: Child,
     reader: BufReader<std::process::ChildStdout>,
@@ -112,6 +241,7 @@ impl AgentStream {
         ))
     }
 
+    /// 杀掉设备端 agent 连接（kill adb 子进程并收尸；agent 侧因 stdout 写失败自行退出）
     pub fn kill(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();

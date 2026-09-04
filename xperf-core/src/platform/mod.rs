@@ -10,17 +10,23 @@ pub mod ss2pro;
 pub mod ss3;
 pub mod ss4;
 
-/// 平台标识（与 agent --platform 参数一致）
+/// 平台标识（adb devices -l 的 product 字段映射）
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PlatformId {
+    /// SS2 MAX（SA8155）
     Ss2Max,
+    /// SS2 PRO
     Ss2Pro,
+    /// SS3（SA8295P，GPU 由 QNX host 管理）
     Ss3,
+    /// SS4
     Ss4,
+    /// 标准 Android（未识别的 product 一律归此）
     Android,
 }
 
 impl PlatformId {
+    /// 小写标识字符串（agent --platform 参数值）
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Ss2Max => "ss2max",
@@ -31,6 +37,7 @@ impl PlatformId {
         }
     }
 
+    /// 标识字符串解析（agent --platform 参数与 from_str 互逆）
     #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Option<Self> {
         match s {
@@ -46,7 +53,9 @@ impl PlatformId {
 
 /// 平台 trait：封装各平台性能数据采集差异。
 pub trait Platform: Send + Sync {
+    /// 平台标识
     fn id(&self) -> PlatformId;
+    /// 展示名（含关键特性提示）
     fn name(&self) -> &'static str;
     /// GPU 采集方式提示
     fn gpu_hint(&self) -> &'static str;
@@ -96,6 +105,7 @@ pub fn detect_platform_live() -> Box<dyn Platform> {
     detect_platform(&output)
 }
 
+/// 按平台标识构造实现（from_id(PlatformId::Ss3) → Ss3 实例）
 pub fn from_id(id: PlatformId) -> Box<dyn Platform> {
     match id {
         PlatformId::Ss2Max => Box::new(ss2max::Ss2Max),

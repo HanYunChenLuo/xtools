@@ -6,6 +6,7 @@ use std::sync::Mutex;
 // 全局静态变量，用于跟踪中断状态
 static INTERRUPT_FLAG: AtomicBool = AtomicBool::new(false);
 
+/// 子进程输出包装
 pub struct ProcOutput {
     /// 子进程 stdout（已清洗 ANSI 控制字符）。
     pub stdout: String,
@@ -88,6 +89,7 @@ fn clean_control_chars(input: &str) -> String {
     result
 }
 
+/// 置位全局 Ctrl-C 中断标志（ctrlc handler 调用；长阻塞循环轮询 is_interrupted 提前退出）
 pub fn set_interrupt_flag() {
     INTERRUPT_FLAG.store(true, AtomicOrdering::SeqCst);
 }

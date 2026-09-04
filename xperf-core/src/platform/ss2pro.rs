@@ -4,6 +4,7 @@
 
 use super::{Platform, PlatformId};
 
+/// SS2 PRO 平台
 pub struct Ss2Pro;
 
 impl Platform for Ss2Pro {

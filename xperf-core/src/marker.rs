@@ -12,7 +12,9 @@ use std::sync::mpsc::{channel, Receiver};
 /// 打点事件
 #[derive(Debug, Clone)]
 pub struct Marker {
+    /// 打点标签
     pub label: String,
+    /// 打点时刻（Unix 毫秒）
     pub timestamp_ms: u64,
 }
 

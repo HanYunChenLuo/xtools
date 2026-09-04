@@ -7,6 +7,7 @@
 
 use super::{Platform, PlatformId};
 
+/// SS3 平台（SA8295P，GPU 由 QNX host 管理）
 pub struct Ss3;
 
 impl Platform for Ss3 {
