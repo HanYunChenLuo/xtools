@@ -7,127 +7,148 @@
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
-  <div id="sidebar">
-    <h2>XPerformance</h2>
-    <label>设备:
-      <select id="deviceSelect" title="目标设备（多台同连时在此选择；单台自动选中）"></select>
-    </label>
-    <label>Package:
-      <input id="package" type="text" list="pkgList" placeholder="输入或选择包名" autocomplete="off" />
-      <datalist id="pkgList"></datalist>
-      <button id="refreshPkgs" class="small">刷新包列表</button>
-    </label>
-    <label>采样间隔:
-      <select id="interval">
-        <option value="50">50ms（极限，高采样开销）</option>
-        <option value="100">100ms（高频）</option>
-        <option value="200">200ms</option>
-        <option value="500">500ms</option>
-        <option value="1000" selected>1000ms（默认）</option>
-        <option value="2000">2000ms</option>
-        <option value="5000">5000ms（长测低扰动）</option>
-      </select>
-    </label>
-    <div class="checkboxes">
-      <label><input id="cpu" type="checkbox" checked /> CPU</label>
-      <label><input id="memory" type="checkbox" checked /> Memory</label>
-      <label><input id="fps" type="checkbox" /> FPS</label>
-      <label><input id="freq" type="checkbox" /> 频率</label>
-      <label><input id="thermal" type="checkbox" /> 温度</label>
-      <label><input id="gpu" type="checkbox" /> GPU</label>
-      <label><input id="io" type="checkbox" /> IO</label>
-      <label><input id="net" type="checkbox" /> 网络</label>
+  <header id="topbar">
+    <span id="brand">XPerformance</span>
+    <nav id="deviceTabs"></nav>
+    <div id="status">未开始</div>
+    <button id="themeBtn" title="切换暗色/亮色主题">☾ 亮色</button>
+  </header>
+  <main id="content">
+    <div id="noDeviceHint" class="idle-hint">
+      未检测到 adb 设备——接入后设备页自动出现（已连接设备拔插实时更新）。
     </div>
-    <div id="effectiveRates" class="effective-rates"></div>
-    <label>窗口:
-      <select id="timeWindow">
-        <option value="follow" selected>跟随最新（10 分钟）</option>
-        <option value="all">全部历史</option>
-      </select>
-    </label>
-    <button id="startBtn">开始监控</button>
-    <button id="stopBtn" disabled>停止</button>
-    <h3>深挖录制</h3>
-    <label>录制时长:
-      <select id="recordSeconds" title="录制时长（秒）：Perfetto / simpleperf 分析共用">
-        <option value="5">5 秒</option>
-        <option value="10" selected>10 秒</option>
-        <option value="15">15 秒</option>
-        <option value="30">30 秒</option>
-        <option value="60">60 秒</option>
-        <option value="120">120 秒</option>
-      </select>
-    </label>
-    <div class="record-hint">Perfetto / simpleperf 分析共用，录制期间可观察实时曲线</div>
-    <div class="sidebar-row">
-      <button id="traceBtn" class="small flex-fill">Perfetto 分析</button>
-      <button id="stackBtn" class="small flex-fill">simpleperf 分析</button>
+  </main>
+
+  <!-- 单设备页模板（每台在线设备克隆一份，serial 唯一化 datalist id）：
+       侧栏 = 该设备的采样控制；主区 = 性能指标 / Perfetto / Simpleperf 三个子 tab -->
+  <template id="devicePageTpl">
+    <div class="device-page">
+      <aside class="sidebar">
+        <label>Package:
+          <input class="package-input" type="text" placeholder="输入或选择包名" autocomplete="off" />
+          <datalist class="pkg-list"></datalist>
+          <div class="sidebar-row">
+            <button class="small flex-fill refresh-pkgs">刷新包列表</button>
+            <button class="small flex-fill launch-btn" title="am start -W 启动应用并测量冷启动">打开应用</button>
+            <button class="small flex-fill restart-btn" title="force-stop 后 am start -W，测真冷启动">重启应用</button>
+          </div>
+          <input class="activity-input" type="text" placeholder="Activity（留空自动解析主入口）" autocomplete="off" />
+        </label>
+        <label>采样间隔:
+          <select class="interval-select">
+            <option value="50">50ms（极限，高采样开销）</option>
+            <option value="100">100ms（高频）</option>
+            <option value="200">200ms</option>
+            <option value="500">500ms</option>
+            <option value="1000" selected>1000ms（默认）</option>
+            <option value="2000">2000ms</option>
+            <option value="5000">5000ms（长测低扰动）</option>
+          </select>
+        </label>
+        <div class="checkboxes">
+          <label><input class="metric-cpu" type="checkbox" checked /> CPU</label>
+          <label><input class="metric-memory" type="checkbox" checked /> Memory</label>
+          <label><input class="metric-fps" type="checkbox" /> FPS</label>
+          <label><input class="metric-freq" type="checkbox" /> 频率</label>
+          <label><input class="metric-thermal" type="checkbox" /> 温度</label>
+          <label><input class="metric-gpu" type="checkbox" /> GPU</label>
+          <label><input class="metric-io" type="checkbox" /> IO</label>
+          <label><input class="metric-net" type="checkbox" /> 网络</label>
+        </div>
+        <div class="effective-rates"></div>
+        <label>窗口:
+          <select class="time-window">
+            <option value="follow" selected>跟随最新（10 分钟）</option>
+            <option value="all">全部历史</option>
+          </select>
+        </label>
+        <button class="start-btn">开始监控</button>
+        <button class="stop-btn" disabled>停止</button>
+        <h3>深挖录制</h3>
+        <label>录制时长:
+          <select class="record-seconds" title="录制时长（秒）：Perfetto / simpleperf 分析共用">
+            <option value="5">5 秒</option>
+            <option value="10" selected>10 秒</option>
+            <option value="15">15 秒</option>
+            <option value="30">30 秒</option>
+            <option value="60">60 秒</option>
+            <option value="120">120 秒</option>
+          </select>
+        </label>
+        <div class="record-hint">Perfetto / simpleperf 分析共用，录制期间可观察实时曲线</div>
+        <div class="sidebar-row">
+          <button class="small flex-fill trace-btn">Perfetto 分析</button>
+          <button class="small flex-fill stack-btn">simpleperf 分析</button>
+        </div>
+        <h3>数据管理</h3>
+        <button class="small export-btn">导出 CSV</button>
+        <div class="sidebar-row">
+          <button class="small flex-fill save-baseline-btn" title="把当前会话统计存为该包的基线（覆盖旧基线）">保存基线</button>
+          <button class="small flex-fill compare-baseline-btn" title="当前会话与已存基线逐指标对比（回归/改善/持平）">对比基线</button>
+        </div>
+        <button class="small clean-btn">清理缓存与数据</button>
+      </aside>
+      <section class="main-area">
+        <div class="tab-bar">
+          <button class="tab subtab active" data-tab="perf">性能指标</button>
+          <button class="tab subtab" data-tab="trace">Perfetto 分析</button>
+          <button class="tab subtab" data-tab="stack">Simpleperf 分析</button>
+        </div>
+        <div class="tab-content perf-content">
+          <div class="idle-hint session-idle-hint">填包名 → 勾指标 → 「开始监控」。采集数据落 `/tmp/xperf/<包名>/`；深挖用「Perfetto 分析」/「simpleperf 分析」。</div>
+          <div class="chart chart-cpu-box"><canvas class="chart-cpu"></canvas></div>
+          <div class="chart chart-mem-box"><canvas class="chart-mem"></canvas></div>
+          <div class="chart chart-fps-box hidden"><canvas class="chart-fps"></canvas></div>
+          <div class="chart chart-freq-box hidden"><canvas class="chart-freq"></canvas></div>
+          <div class="chart chart-temp-box hidden"><canvas class="chart-temp"></canvas></div>
+          <div class="chart chart-gpu-box hidden"><canvas class="chart-gpu"></canvas></div>
+          <div class="chart chart-gpumem-box hidden"><canvas class="chart-gpumem"></canvas></div>
+          <div class="chart chart-io-box hidden"><canvas class="chart-io"></canvas></div>
+          <div class="chart chart-net-box hidden"><canvas class="chart-net"></canvas></div>
+          <div class="panels">
+            <div class="panel panel-live">
+              <h3>实时数值</h3>
+              <table class="live-table"><tr><th>指标</th><th>当前值</th></tr></table>
+            </div>
+            <div class="panel panel-thread">
+              <h3>Top 线程（CPU%）</h3>
+              <table class="thread-table"><tr><th>线程</th><th>TID</th><th>PID</th><th>CPU%</th></tr></table>
+            </div>
+            <div class="panel panel-peak">
+              <h3>峰值</h3>
+              <table class="peak-table"><tr><th>PID</th><th>峰值 CPU%</th><th>时间</th><th>峰值 PSS(MB)</th><th>时间</th></tr></table>
+            </div>
+            <div class="panel panel-coldstart">
+              <h3>冷启动</h3>
+              <table class="coldstart-table"><tr><th>时间</th><th>操作</th><th>TotalTime(ms)</th><th>WaitTime(ms)</th></tr></table>
+            </div>
+            <div class="panel panel-baseline hidden">
+              <h3>基线对比</h3>
+              <pre class="baseline-report"></pre>
+            </div>
+          </div>
+        </div>
+        <div class="tab-content trace-content hidden">
+          <div class="trace-toolbar">
+            <button class="small open-perf-btn" disabled>在浏览器打开 Perfetto UI</button>
+            <span class="trace-file-label"></span>
+          </div>
+          <div class="trace-report-box">
+            <pre class="trace-report"></pre>
+          </div>
+        </div>
+        <div class="tab-content stack-content hidden">
+          <div class="trace-toolbar">
+            <button class="small open-stack-btn" disabled>在浏览器打开火焰图</button>
+            <span class="trace-file-label"></span>
+          </div>
+          <div class="trace-report-box">
+            <pre class="stack-report"></pre>
+          </div>
+        </div>
+      </section>
     </div>
-    <h3>数据管理</h3>
-    <button id="exportBtn" class="small">导出 CSV</button>
-    <div class="sidebar-row">
-      <button id="saveBaselineBtn" class="small flex-fill" title="把当前会话统计存为该包的基线（覆盖旧基线）">保存基线</button>
-      <button id="compareBaselineBtn" class="small flex-fill" title="当前会话与已存基线逐指标对比（回归/改善/持平）">对比基线</button>
-    </div>
-    <button id="cleanBtn" class="small clean-btn">清理缓存与数据</button>
-  </div>
-  <div id="main">
-    <div id="tabBar">
-      <button id="tabPerfBtn" class="tab active">性能指标</button>
-      <button id="tabTraceBtn" class="tab">Perfetto 分析</button>
-      <button id="tabStackBtn" class="tab">Simpleperf 分析</button>
-      <div id="status">未开始</div>
-      <button id="themeBtn" title="切换暗色/亮色主题">☾ 亮色</button>
-    </div>
-    <div id="perfContent" class="tab-content">
-    <div id="idleHint" class="idle-hint">填包名 → 勾指标 → 「开始监控」。采集数据落 `/tmp/xperf/<包名>/`；深挖用「Perfetto 分析」/「simpleperf 分析」。</div>
-    <div id="cpuChartBox" class="chart"><canvas id="cpuChart"></canvas></div>
-    <div id="memChartBox" class="chart"><canvas id="memChart"></canvas></div>
-    <div id="fpsChartBox" class="chart hidden"><canvas id="fpsChart"></canvas></div>
-    <div id="freqChartBox" class="chart hidden"><canvas id="freqChart"></canvas></div>
-    <div id="tempChartBox" class="chart hidden"><canvas id="tempChart"></canvas></div>
-    <div id="gpuChartBox" class="chart hidden"><canvas id="gpuChart"></canvas></div>
-    <div id="gpumemChartBox" class="chart hidden"><canvas id="gpumemChart"></canvas></div>
-    <div id="ioChartBox" class="chart hidden"><canvas id="ioChart"></canvas></div>
-    <div id="netChartBox" class="chart hidden"><canvas id="netChart"></canvas></div>
-    <div id="panels">
-      <div id="livePanel" class="panel">
-        <h3>实时数值</h3>
-        <table id="liveTable"><tr><th>指标</th><th>当前值</th></tr></table>
-      </div>
-      <div id="threadPanel" class="panel">
-        <h3>Top 线程（CPU%）</h3>
-        <table id="threadTable"><tr><th>线程</th><th>TID</th><th>PID</th><th>CPU%</th></tr></table>
-      </div>
-      <div id="peakPanel" class="panel">
-        <h3>峰值</h3>
-        <table id="peakTable"><tr><th>PID</th><th>峰值 CPU%</th><th>时间</th><th>峰值 PSS(MB)</th><th>时间</th></tr></table>
-      </div>
-      <div id="baselinePanel" class="panel hidden">
-        <h3>基线对比</h3>
-        <pre id="baselineReport"></pre>
-      </div>
-    </div>
-    </div>
-    <div id="traceContent" class="tab-content hidden">
-      <div class="trace-toolbar">
-        <button id="openPerfBtn" class="small" disabled>在浏览器打开 Perfetto UI</button>
-        <span id="traceFileLabel" class="trace-file-label"></span>
-      </div>
-      <div class="trace-report-box">
-        <pre id="traceReport"></pre>
-      </div>
-    </div>
-    <div id="stackContent" class="tab-content hidden">
-      <div class="trace-toolbar">
-        <button id="openStackBtn" class="small" disabled>在浏览器打开火焰图</button>
-        <span id="stackFileLabel" class="trace-file-label"></span>
-      </div>
-      <div class="trace-report-box">
-        <pre id="stackReport"></pre>
-      </div>
-    </div>
-  </div>
+  </template>
   <script src="main.js"></script>
 </body>
 </html>

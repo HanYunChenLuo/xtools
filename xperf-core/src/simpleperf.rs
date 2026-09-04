@@ -95,8 +95,8 @@ fn parse_sample_stats(output: &str) -> (u64, u64) {
 
 /// 应用是否有运行中的进程（主进程名 = 包名）。simpleperf `--app` 对未启动应用会
 /// 无限等待（实测 `--duration` 拦不住），录制前必须前置检查。
-fn app_has_process(package: &str) -> Result<bool> {
-    let out = crate::utils::adb()
+fn app_has_process(package: &str, serial: Option<&str>) -> Result<bool> {
+    let out = crate::utils::adb_for(serial)
         .args(["shell", "pidof", package])
         .output()
         .context("执行 adb shell pidof 失败")?;
@@ -114,11 +114,13 @@ fn app_has_process(package: &str) -> Result<bool> {
 /// 触发一次，录制等待循环内同步调用。`None` = 不上报（CLI 打印会刷屏，默认不传）。
 ///
 /// 包名校验与进度展示由调用方负责（目录路径含包名，防遍历）。
+/// `serial`：目标设备（多设备并行会话用，`None` 回退全局选择）。
 pub fn record(
     seconds: u64,
     package: &str,
     out_dir: &Path,
     progress: Option<&dyn Fn(u64)>,
+    serial: Option<&str>,
 ) -> Result<RecordedStack> {
     validate_package(package)?;
     std::fs::create_dir_all(out_dir)?;
@@ -128,7 +130,7 @@ pub fn record(
     let dev_path = format!("/data/local/tmp/xperf_stack_{}.data", stem);
 
     // 设备端 simpleperf 存在性检查（错误信息直接可读，避免 record 报 "not found"）
-    let probe = crate::utils::adb()
+    let probe = crate::utils::adb_for(serial)
         .args(["shell", "which", "simpleperf"])
         .output()
         .context("执行 adb shell which 失败")?;
@@ -136,13 +138,13 @@ pub fn record(
         bail!("设备端无 simpleperf（/system/bin/simpleperf 不存在）");
     }
     // --app 对未运行应用无限等待，前置拦截（--duration 拦不住，等待在采样开始前）
-    if !app_has_process(package)? {
+    if !app_has_process(package, serial)? {
         bail!("应用 {} 无运行中的进程，请先启动应用再采样", package);
     }
 
     let wall_start = Local::now();
     // stderr 合并进 stdout（设备端 2>&1）：simpleperf 的样本统计与报错都走日志行
-    let mut child = crate::utils::adb()
+    let mut child = crate::utils::adb_for(serial)
         .args([
             "shell", "simpleperf", "record", "--app", package, "-g",
             "--duration", &seconds.to_string(), "-o", &dev_path, "2>&1",
@@ -212,13 +214,13 @@ pub fn record(
     // 设备端三视图 report（pull 前执行：.data 尚在设备上；警告走 /dev/null 不污染视图）
     let thread_view = device_report(&dev_path, &[
         "--sort", "comm,pid,tid", "--percent-limit", "1",
-    ]);
+    ], serial);
     let self_view = device_report(&dev_path, &[
         "--sort", "symbol,dso", "--percent-limit", "1",
-    ]);
+    ], serial);
     let symbol_view = device_report(&dev_path, &[
         "--children", "--sort", "symbol,dso", "--percent-limit", "1",
-    ]);
+    ], serial);
     let mut report_text = String::new();
     report_text.push_str("================ 线程 CPU 分布（--sort comm,pid,tid） ================\n");
     match &thread_view {
@@ -238,7 +240,7 @@ pub fn record(
     std::fs::write(&report_path, &report_text).context("写入 simpleperf_report.txt 失败")?;
 
     // pull + 清理（清理失败不致命：文件名含时间戳，不影响下次录制）
-    let pull = crate::utils::adb()
+    let pull = crate::utils::adb_for(serial)
         .arg("pull")
         .arg(&dev_path)
         .arg(&local_path)
@@ -251,7 +253,7 @@ pub fn record(
             dev_path
         );
     }
-    let _ = crate::utils::adb().args(["shell", "rm", "-f", &dev_path]).output();
+    let _ = crate::utils::adb_for(serial).args(["shell", "rm", "-f", &dev_path]).output();
     let bytes = std::fs::metadata(&local_path)?.len();
 
     Ok(RecordedStack {
@@ -272,8 +274,8 @@ pub fn record(
 /// 对齐（Symbol 列可达数百列宽），原样落盘会让报告文件膨胀到数倍于 `.data`
 /// （实测 4.9MB vs 2.7MB），压缩后语义不变（符号名内出现连续空格的概率≈0，单空格保留）。
 /// 失败返回 Err，不中断整体流程（另两个视图仍可生成，`.data` 仍会被 pull 回）。
-fn device_report(dev_path: &str, extra_args: &[&str]) -> Result<String> {
-    let mut cmd = crate::utils::adb();
+fn device_report(dev_path: &str, extra_args: &[&str], serial: Option<&str>) -> Result<String> {
+    let mut cmd = crate::utils::adb_for(serial);
     cmd.args(["shell", "simpleperf", "report", "-i", dev_path]);
     for a in extra_args {
         cmd.arg(a);

@@ -7,6 +7,43 @@
 
 ---
 
+## 2026-09-04（四）晚 — GUI 多设备改版（设备 tab 并行）+ 应用操作/冷启动
+
+**任务线**：用户需求——「根据 devices 增加页面，实现完整的性能调试功能」（每设备独立 tab：性能分析 / Perfetto / Simpleperf）+「支持打开指定包名应用、重启应用，顺带监控冷启动性能」。
+
+### Commits
+
+| commit | 内容 |
+|--------|------|
+| （本轮） | feat：①core serial 参数化——`utils::{adb_for, run_adb_command_for, resolve_serial}`（`Some` 显式路由/空串视同 `None`/`None` 回退全局）；`spawn_agent`/`deploy_agent`/`reconnect_agent`/`qnx_stop_stats`/`trace::record`/`simpleperf::record`/`detect_platform_live` 全部加 `serial: Option<&str>`（CLI 调用点传 None 零行为变化）②GUI 多会话——`AppState.sessions: HashMap<serial, DeviceSession>`（running/trace_running/stack_running/package/startup_extra 设备内隔离）；命令全带 serial（start/stop_sampling、start_trace/stack、list_packages、is_running、launch_app/restart_app——前置 `ensure_device_online`+包名校验，失败回滚 running）；事件 payload 带 serial（sample={serial,event}、trace/stack/sampling-error）；`startup_args`→`startup_sessions`（回查全部活跃会话）；关窗遍历停全部；`select_device` 删除（GUI 脱离全局 serial）③前端设备页——`<template id="devicePageTpl">` 克隆 + `DeviceSession` 类（charts/pidData/peaks/liveData/hists/状态全设备内隔离；datalist id 按 serial 唯一化）+ App 管理器（serial 分发/顶栏 status 显示激活设备/主题遍历）；顶栏设备 tab（断开灰显「已断开」保留数据、插回 reconnect 自动恢复）；CSS 全 class 化（#sidebar→.sidebar 等）④冷启动下沉 `xperf-core/src/coldstart.rs`（CLI coldstart.rs 删除改用 core）——`resolve_activity`（留空自动解析主入口）、`force_stop`、`measure(package, activity, serial)`（activity 空自动 resolve；ColdStartResult derive Serialize）；GUI 侧栏「应用操作」（刷新包列表/打开应用/重启应用三按钮 + Activity 输入）+ 指标页「冷启动」面板（最近 5 次 TotalTime/WaitTime）；**启动被系统重定向（Activity 不属于目标包）状态栏警示**⑤GUI 深挖目录 `<pkg>/<ts>-<serial>/`（防双设备同秒撞目录）；`--package --device` 自动启动回填后**切到对应设备页**（修复：原先停留第一台 idle 页）。测试 101 全绿（+GUI 多会话隔离 1 + coldstart 迁移 3 归 core） |
+
+### 完成内容
+
+- **设计**：core 全局 `TARGET_SERIAL` 保留给 CLI（单会话语义不变）；GUI 用会话级参数——每台设备独立 adb 长连接，双机并行采样/深挖互不干扰（QNX 停链 pgrep 保护在目标设备执行，多设备天然隔离）
+- **真机验证（SS3 6eb792dfb0f + SS2MAX d1f39648c1f 双车机同连）**：
+  - `--package --device 6eb792dfb0f` 自动启动：SS3 平台检测（QNX 通道）/FPS 60/GPU busy 15%/PSS 650MB 全正常；截图确认双设备 tab（HU_SS3 激活+HU_SS2MAXF）、5 图表 + 面板
+  - 用户 release 实例手动操作全链路（diag 日志实证）：手动开始（带 serial）→ 两次勾选切换重启会话（flags 序列化正确）→ Perfetto 10s 录制每秒进度 → recorded → done；产物落 `<pkg>/20260904_184020-6eb792dfb0f/trace/`（三件套齐全）
+  - 双机并行：用户实例采 SS3 + 我的实例 `--device d1f39648c1f` 采 SS2MAX 同时进行（SS2MAX 平台检测正确走 serial 过滤路径；filament CPU ~50%/PSS 644MB）
+  - 冷启动：CLI（走 core 新模块）SS2MAX `--cold-start .MainActivity`——COLD TotalTime 874ms（手动 am start -W 对照一致）；进程存活时热启动 0ms 如实上报；`resolve-activity --brief` 输出末行格式与解析逻辑实测匹配
+- **发现并修复**：①`applyStartupArgs` 不切激活页（回填了 SS2MAX 页但显示 SS3 idle 页）→ 回填后 `switchDevice(serial)`；②车机熄屏状态 `am start -W` 被系统重定向到激活引导页（`Activity: com.lixiang.provision/...`、TotalTime 0）——解析如实上报 + 前端重定向警示（避免误导性 0ms）
+- **验证门槛**：101 测试全绿（agent 24 + core 65+2 ignored（coldstart 3 迁入）+ xperformance 5 + GUI 5（新增多会话隔离）+ xrm 2），clippy 零警告（修 2 处 `Iterator::last` on DoubleEndedIterator），cargo doc + rustdoc missing_docs 三 crate 零 warning
+
+### 关键结论与基线
+
+- **终端复制伪影在本轮极重**（cargo 输出整块重复 3+ 遍、grep 计数行重复）——判据一律改走文件中转（`> /tmp/x.log` 后 cat），单跑命令逐条确认
+- **xdotool 点击 webkit2gtk 按钮多次未命中**（坐标换算物理/逻辑 + 标题栏偏移叠出来误差大；tab 切换/按钮均未触发）——GUI 交互验证优先靠用户实际操作 + diag 日志（本轮用户操作日志完整替代点击验证）；后端链路用 CLI/adb 直测
+- **`resolve-activity --brief` 输出两行**（包名 + 完整组件），取末行 split('/').next_back()——SS2MAX 实测 `com.google.android.filament.gltf/.MainActivity`
+- **force-stop 后立即 am start 会测到残留路径**：GUI restart_app 固定 800ms 缓冲（进程死透再测真 COLD）
+- am start -W 语义：进程已运行时 ThisTime/TotalTime=0（热启动无新 Activity 开销），**不是 bug**——冷启动测量须先 force-stop（GUI「重启应用」语义）或进程确实未起（COLD）
+
+### 遗留问题
+
+- GUI「打开/重启应用」按钮的点击渲染为人工目验项（后端链路 CLI 真机全通：resolve/force-stop/measure/serial 路由；按钮→invoke 绑定代码 review 无误，diag 无用户点击记录待补）
+- 设备热插拔的 tab 灰显/恢复为逻辑验证（devices-changed 事件链路 951c0ab 已真机验证；本轮前端新增灰显逻辑未物理插拔复现——与上轮同因：验证窗口内未动线缆）
+- 双设备并行 trace/stack 同时录制未双机实测（目录隔离已按 serial 后缀设计；单机录制双机采样的并行组合已验证）
+
+---
+
 ## 2026-09-04（四）下午二~四 — 基线对比 C-6 + 多设备 `-s` + 动态检测 + 窗口动态尺寸 + FPS BLAST 修复 + Android 版本检测
 
 **任务线**：C 类收官（基线对比）+ 多设备 adb 全链路修复（E 节候补）+ 用户连续反馈迭代（热插拔动态检测 / 窗口尺寸 / 测试对象换 Filament demo / SS2 FPS 质疑引出 BLAST 图层 bug / Android 版本检测）。

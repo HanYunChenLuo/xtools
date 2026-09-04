@@ -101,11 +101,12 @@ pub fn detect_platform(adb_devices_output: &str) -> Box<dyn Platform> {
 
 /// 通过 adb devices -l 实时检测平台。
 ///
-/// 已选择目标设备（`utils::set_target_serial`）时只取该设备行检测——多台设备
-/// 同连（如车机 + 手机）时，平台属性（QNX GPU 通道等）必须取自目标设备。
-pub fn detect_platform_live() -> Box<dyn Platform> {
-    let output = crate::run_adb_command(&["devices", "-l"]).map(|o| o.stdout).unwrap_or_default();
-    detect_platform(&filter_device_line(&output, crate::utils::target_serial().as_deref()))
+/// 已指定目标设备时只取该设备行检测——多台设备同连（如车机 + 手机）时，
+/// 平台属性（QNX GPU 通道等）必须取自目标设备。
+/// `serial`：目标设备（多设备并行会话用，`None` 回退全局选择）。
+pub fn detect_platform_live(serial: Option<&str>) -> Box<dyn Platform> {
+    let output = crate::run_adb_command_for(serial, &["devices", "-l"]).map(|o| o.stdout).unwrap_or_default();
+    detect_platform(&filter_device_line(&output, crate::utils::resolve_serial(serial).as_deref()))
 }
 
 /// 从 `adb devices -l` 输出中只保留目标 serial 的行（补回表头——

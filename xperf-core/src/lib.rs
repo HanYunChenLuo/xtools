@@ -10,6 +10,8 @@
 pub mod agent;
 /// 基线对比：会话汇总统计的保存/读取与两次运行 diff 报告（性能回归验证）。
 pub mod baseline;
+/// 冷启动时间测量与应用操作（am start -W / resolve-activity / force-stop）。
+pub mod coldstart;
 /// CPU 采样协议类型（线程级 CPU 信息）。
 pub mod cpu;
 /// FPS 采样协议类型（时序数据结构）。
@@ -34,8 +36,9 @@ pub use marker::{send_marker, start_marker_listener, Marker};
 pub use memory::{MemoryDetails, MemoryTimeSeriesData};
 pub use platform::{detect_platform, detect_platform_live, from_id, Platform, PlatformId};
 pub use utils::{
-    adb, diff_devices, list_adb_devices, parse_adb_devices, pick_device, run_adb_command,
-    set_target_serial, target_serial, AdbDevice, ProcOutput,
+    adb, adb_for, diff_devices, list_adb_devices, parse_adb_devices, pick_device,
+    resolve_serial, run_adb_command, run_adb_command_for, set_target_serial, target_serial,
+    AdbDevice, ProcOutput,
 };
 
 use chrono::{DateTime, Local};

@@ -120,10 +120,12 @@ fn trace_config(seconds: u64) -> String {
 /// 触发一次，录制等待循环内同步调用。`None` = 不上报（CLI 打印会刷屏，默认不传）。
 ///
 /// 包名校验与进度展示由调用方负责（目录路径含包名，防遍历）。
+/// `serial`：目标设备（多设备并行会话用，`None` 回退全局选择）。
 pub fn record(
     seconds: u64,
     out_dir: &Path,
     progress: Option<&dyn Fn(u64)>,
+    serial: Option<&str>,
 ) -> Result<RecordedTrace> {
     std::fs::create_dir_all(out_dir)?;
     let stem = Local::now().format("%Y%m%d_%H%M%S").to_string();
@@ -131,7 +133,7 @@ pub fn record(
     let dev_path = format!("/data/misc/perfetto-traces/xperf_{}.pftrace", stem);
 
     let wall_start = Local::now();
-    let mut child = crate::utils::adb()
+    let mut child = crate::utils::adb_for(serial)
         .args(["shell", "perfetto", "-c", "-", "--txt", "-o", &dev_path])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -199,7 +201,7 @@ pub fn record(
             String::from_utf8_lossy(&out.stderr).trim()
         );
     }
-    let pull = crate::utils::adb()
+    let pull = crate::utils::adb_for(serial)
         .arg("pull")
         .arg(&dev_path)
         .arg(&local_path)
@@ -213,7 +215,7 @@ pub fn record(
         );
     }
     // 清理设备端文件（失败不致命：文件名含时间戳，不影响下次录制）
-    let _ = crate::utils::adb().args(["shell", "rm", "-f", &dev_path]).output();
+    let _ = crate::utils::adb_for(serial).args(["shell", "rm", "-f", &dev_path]).output();
     let bytes = std::fs::metadata(&local_path)?.len();
     if bytes == 0 {
         bail!("trace 文件为空（perfetto 未写出数据）");

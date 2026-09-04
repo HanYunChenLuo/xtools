@@ -34,12 +34,20 @@ pub fn run_command(program: &str, args: &[&str]) -> Result<ProcOutput> {
 /// 测试可通过 `set_adb_runner_for_test` 注入 mock 实现，避免真实拉起 adb 子进程
 /// （mock 收到的是注入后的完整参数序列，未选择设备时与调用方原始参数一致）。
 pub fn run_adb_command(args: &[&str]) -> Result<ProcOutput> {
+    run_adb_command_for(None, args)
+}
+
+/// 执行 adb 命令，显式指定目标设备（多设备并行会话用）。
+///
+/// `serial`：`Some(s)` 注入 `-s s`（空串视同 `None`）；`None` 回退全局选择
+/// （[`target_serial`]）。其余语义与 [`run_adb_command`] 一致。
+pub fn run_adb_command_for(serial: Option<&str>, args: &[&str]) -> Result<ProcOutput> {
     if let Ok(guard) = ADB_RUNNER_OVERRIDE.lock() {
         if let Some(runner) = *guard {
             return runner(args);
         }
     }
-    match target_serial() {
+    match resolve_serial(serial) {
         Some(serial) => {
             let full: Vec<String> = std::iter::once("-s".to_string())
                 .chain(std::iter::once(serial))
@@ -103,11 +111,29 @@ pub fn target_serial() -> Option<String> {
 /// 构造已注入 `-s <serial>` 的 adb 命令（未选择设备时不注入）。
 /// 所有 adb 调用统一经此构造，保证多设备场景命令路由到目标设备。
 pub fn adb() -> Command {
+    adb_for(None)
+}
+
+/// 构造已注入 `-s <serial>` 的 adb 命令，显式指定目标设备（多设备并行会话用）。
+///
+/// `serial`：`Some(s)` 注入 `-s s`（空串视同 `None`）；`None` 回退全局选择
+/// （[`target_serial`]）。所有 adb 调用统一经此类构造，保证多设备场景命令路由到目标设备。
+pub fn adb_for(serial: Option<&str>) -> Command {
     let mut c = Command::new("adb");
-    if let Some(s) = target_serial() {
+    if let Some(s) = resolve_serial(serial) {
         c.args(["-s", &s]);
     }
     c
+}
+
+/// 解析会话 serial：`Some(非空)` 原样返回（owned）；`None`/空串回退全局选择
+/// （[`target_serial`]）。core 各多设备入口（`spawn_agent`/`trace::record` 等）
+/// 的 `serial: Option<&str>` 参数统一经此归一。
+pub fn resolve_serial(serial: Option<&str>) -> Option<String> {
+    match serial {
+        Some(s) if !s.is_empty() => Some(s.to_string()),
+        _ => target_serial(),
+    }
 }
 
 /// `adb devices -l` 解析出的一台在线设备
