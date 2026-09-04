@@ -17,7 +17,7 @@
 |--------|------|
 | 9ee99ad | feat：xperf-core/src/simpleperf.rs（录制 + 设备端三视图报告 + 解析渲染，单测 8 个）+ CLI `--stack N`（独立/并行两模式，与 --trace 可同给）+ GUI 函数热点独立 tab + `--stack N` 自动启动 |
 | bd4d5a9 | review: ①device_report `2>/dev/null` 连真实报错一起吞（失败时错误信息为空）→ `2>&1` 带回报错 + 成功路径过滤 simpleperf W/I 日志行（filter_simpleperf_logs，真机验证报告 0 条日志行）②validate_package 补 `-`（与 CLI/GUI 校验口径一致）③三处 doc"两视图"残留改三视图④前端 trace/stack recording 事件统一禁用按钮（命令行自动启动时按钮此前保持可点）。测试 42+1 全绿 |
-| 41ae32a | feat：simpleperf 浏览器火焰图（open_stack_in_browser：AOSP report_html.py 渲染 `.data` → 单文件 HTML，gitiles blob 逐文件引导脚本集 ~10MB 缓存离线，失败清半截/HTML 新于 data 复用）+ GUI 按钮 + trace/stack 录制进度（core record progress 回调每整秒触发 → GUI emit progress 事件 → 前端 status 更新）。真机全链路验证 |
+| 41ae32a + c652da8 | feat：simpleperf 浏览器火焰图（open_stack_in_browser：AOSP report_html.py 渲染 `.data` → 单文件 HTML，gitiles blob 逐文件引导脚本集 ~10MB 缓存离线，失败清半截/HTML 新于 data 复用）+ GUI 按钮 + trace/stack 录制进度（core record progress 回调每整秒触发 → GUI emit progress 事件 → 前端 status 绿色进度条 c652da8）。真机全链路验证 |
 | （docs） | CLAUDE.md（新代码规则 + simpleperf 章节 + 输出文件表）/ WORKSPACE / SESSION 更新 |
 
 ### 完成内容
@@ -32,7 +32,7 @@
 - **验证**（SS3 全场景）：独立 8s（三视图全出、self 视图热点函数命中）/ 并行 `--cpu --stack 6 --interval 500`（agent 采样同窗口限时结束 + stack 报告）/ 未运行包拦截（"应用无运行中的进程，请先启动"，exit=1，无 adb 挂起）/ 正常 exit=0 / GUI `--stack 5`（[stack] 启动→拉回 6458 样本→产物齐全）
 - **验证关卡**：75 测试全绿（simpleperf 8 个）+ 1 ignored、clippy 零警告、`cargo doc` 零 warning（默认 lint 集 + 4 crate missing_docs 归零）
 - **浏览器火焰图（41ae32a，先实测后编码）**：官方链路选定 AOSP `report_html.py`（本地手跑验证 3.3MB data → 7.8MB 单文件 HTML，含 flamegraph/Chart/Sample Table，~1.2s）。**AOSP 源获取坑**：gitiles `+archive` 不支持多级子路径（`+archive/main/simpleperf/scripts/xxx.tar.gz` 返回 INVALID_ARGUMENT；整仓 tarball 80MB 太重）；main 分支脚本已从 `scripts/simpleperf` 迁到根级 `simpleperf/scripts`（master 分支已不存在）；最终走 blob `?format=TEXT` base64 逐文件下载（~10MB，`python3 -m base64 -d` 解码跨平台）。**依赖闭包踩坑**：`etm_types.py`（report_lib 的 ETM 解析 import）与 `report_html.js`（write_script 内联的前端脚本，缺则生成半截 HTML 后失败）两个易漏件，靠真跑报错逐个补齐；主机 report 库仅 linux-x86_64（`.so`）/darwin-x86_64（`.dylib`）两种预编译（上游 get_host_binary_path 规则）。**半截 HTML 复用 bug**：python 崩溃会留下 1.2KB 残骸且 mtime 新于 `.data`，reuse 判定会误复用——生成失败时删除残留。ignored 真实链路测试锁定（首次引导下载 + 渲染 + xdg-open 全通；二次跑 0.00s 复用）
-- **录制进度（41ae32a）**：core `record` 加 `progress: Option<&dyn Fn(u64)>`（等待循环每整秒触发，trace/stack 对称；CLI 传 None 防刷屏）；GUI 闭包 emit `stage:'progress'`，前端 progress 分支只更新 status 不覆盖报告文本（**_diag 放 return 前才留日志**，调试时踩过）。真机 `--trace 6 --stack 6` 双路验证：diag log 逐秒记录 `perfetto 录制中 N/6s` / `调用栈录制中 N/6s` 全到达
+- **录制进度（41ae32a + c652da8）**：core `record` 加 `progress: Option<&dyn Fn(u64)>`（等待循环每整秒触发，trace/stack 对称；CLI 传 None 防刷屏）；GUI 闭包 emit `stage:'progress'`，前端 status 栏**绿色进度条**（`#status.progress` 类 gradient 按 N/M 百分比铺开，setStatus/setStatusProgress 三态 helper、21 处赋值统一收口，完成/失败自动退出进度态；**_diag 放 return 前才留日志**，调试时踩过）。真机 `--trace 6 --stack 6` 双路验证：diag log 逐秒记录 + `[progress-bar on]` DOM 断言确认样式生效（**Tauri debug 前端资源编译期内嵌，改前端必须重 cargo build，否则跑的是旧 JS**——验证踩过）
 
 ### 关键结论与基线
 
