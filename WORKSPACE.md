@@ -14,7 +14,7 @@
 - 落盘：CLI 流式 CSV（csv_escape 转义）+ 退出图表；GUI 完整历史 + CSV 导出
 - GUI：9 张折线图 + 实时数值面板 + Top 线程 + 峰值 + 间隔档位下拉 + 实际周期标注 + 勾选即时生效（自动重启会话）+ 打点竖线 + Perfetto 分析（独立 tab 报告 + 浏览器自动加载）+ **函数热点**（独立 tab）+ 暗/亮双主题（CSS 变量 + color-scheme；checkbox 自绘兼容 webkit2gtk；localStorage 持久化）
 - agent 部署：自动尝试 adb root（IO 等需 root）；src 树内任一 .rs mtime 变化自动重建
-- 测试：**75 全绿**（agent 24 个：解析 + watchdog_step 决策；core 41+1 ignored：协议/trace/simpleperf——simpleperf 8 个：解析 + 渲染 + 空格压缩），clippy 零警告，**cargo doc 零 warning**（4 crate missing_docs 归零；xperf-core `#![warn(missing_docs)]` 常开）
+- 测试：**76 全绿**（agent 24 个：解析 + watchdog_step 决策；core 42+1 ignored：协议/trace/simpleperf——simpleperf 9 个：解析 + 渲染 + 空格压缩 + 日志过滤），clippy 零警告，**cargo doc 零 warning**（4 crate missing_docs 归零；xperf-core `#![warn(missing_docs)]` 常开）
 - 设备：SS3 6eb792dfb0f（adbd root，QNX GPU 通道**已真机回归**，见 D-2）；SS2MAX d1f39648c1f（adb root 可用，IO/kgsl/44 温度传感器已验证；gpubusy 计数器停走属数据源限制）
 
 ---
