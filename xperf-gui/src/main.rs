@@ -1084,6 +1084,11 @@ fn main() {
     // 进程内禁用 DMABUF renderer 实测恢复。须在任何 webview 初始化前设置，
     // 故放在 main 最开头（此时单线程，set_var 安全）。
     std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
+    // 加速合成路径在窗口失焦（Alt+Tab 切走，常为切到浏览器等 GPU 重负载应用）
+    // 再切回时也有概率内容空白（2026-09-07 用户反馈，与本机无法稳定复现的
+    // DMABUF 场景同源）——禁用合成模式回退非合成渲染；本工具 UI 无 CSS 动画/
+    // 变换，禁用的性能影响可忽略。
+    std::env::set_var("WEBKIT_DISABLE_COMPOSITING_MODE", "1");
     // 支持命令行自动启动：xperf-gui --package <pkg> [--interval 1000] [--cpu] [--memory] [--fps] [--freq] [--io] [--net] [--gpu] [--thermal] [--trace N] [--stack N]
     // （便于脚本化/验证；不传参数则手动在前端操作）
     let args: Vec<String> = std::env::args().collect();
