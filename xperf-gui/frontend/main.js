@@ -403,10 +403,11 @@ class DeviceSession {
       const r = await invoke(kind === '打开' ? 'launch_app' : 'restart_app',
         { serial: this.serial, package: pkg, activity });
       this.recordColdStart(kind, r);
-      _diag(`[${this.serial}] ${kind}应用: ${r.summary()}`);
+      // r 是 serde 序列化的数据对象（无 Rust 方法）；摘要前端自拼
+      _diag(`[${this.serial}] ${kind}应用: ${r.activity} TotalTime=${r.total_time_ms}ms WaitTime=${r.wait_time_ms}ms`);
     } catch (e) {
-      this.setStatus(`${kind}应用失败: ${e}`);
-      _diag(`[${this.serial}] ${kind}应用 ERROR: ${JSON.stringify(e)}`);
+      this.setStatus(`${kind}应用失败: ${e && e.message ? e.message : e}`);
+      _diag(`[${this.serial}] ${kind}应用 ERROR: ` + (e && e.message ? e.message : JSON.stringify(e)));
     } finally {
       btn.disabled = false;
     }
@@ -1112,3 +1113,4 @@ window.addEventListener('resize', () => {
   invoke('resize_default').catch((e) => _diag('resize_default ERROR: ' + e));
   _diag('init done');
 })();
+
