@@ -15,6 +15,7 @@
 
 | commit | 内容 |
 |--------|------|
+| 9bcb8ee | fix：打开/重启应用按钮报错——前端成功路径调 Rust 方法 `r.summary()`（serde 到 JS 只剩数据字段，`TypeError: r.summary is not a function` 进 catch，`JSON.stringify(TypeError)={}` 掩盖真实错误）；摘要前端自拼 + catch 打 `e.message`。release 构建走按钮同路径 SS2MAX 真机验证通过 |
 | （本轮） | feat（01b28ce）：①core serial 参数化——`utils::{adb_for, run_adb_command_for, resolve_serial}`（`Some` 显式路由/空串视同 `None`/`None` 回退全局）；`spawn_agent`/`deploy_agent`/`reconnect_agent`/`qnx_stop_stats`/`trace::record`/`simpleperf::record`/`detect_platform_live` 全部加 `serial: Option<&str>`（CLI 调用点传 None 零行为变化）②GUI 多会话——`AppState.sessions: HashMap<serial, DeviceSession>`（running/trace_running/stack_running/package/startup_extra 设备内隔离）；命令全带 serial（start/stop_sampling、start_trace/stack、list_packages、is_running、launch_app/restart_app——前置 `ensure_device_online`+包名校验，失败回滚 running）；事件 payload 带 serial（sample={serial,event}、trace/stack/sampling-error）；`startup_args`→`startup_sessions`（回查全部活跃会话）；关窗遍历停全部；`select_device` 删除（GUI 脱离全局 serial）③前端设备页——`<template id="devicePageTpl">` 克隆 + `DeviceSession` 类（charts/pidData/peaks/liveData/hists/状态全设备内隔离；datalist id 按 serial 唯一化）+ App 管理器（serial 分发/顶栏 status 显示激活设备/主题遍历）；顶栏设备 tab（断开灰显「已断开」保留数据、插回 reconnect 自动恢复）；CSS 全 class 化（#sidebar→.sidebar 等）④冷启动下沉 `xperf-core/src/coldstart.rs`（CLI coldstart.rs 删除改用 core）——`resolve_activity`（留空自动解析主入口）、`force_stop`、`measure(package, activity, serial)`（activity 空自动 resolve；ColdStartResult derive Serialize）；GUI 侧栏「应用操作」（刷新包列表/打开应用/重启应用三按钮 + Activity 输入）+ 指标页「冷启动」面板（最近 5 次 TotalTime/WaitTime）；**启动被系统重定向（Activity 不属于目标包）状态栏警示**⑤GUI 深挖目录 `<pkg>/<ts>-<serial>/`（防双设备同秒撞目录）；`--package --device` 自动启动回填后**切到对应设备页**（修复：原先停留第一台 idle 页）。测试 101 全绿（+GUI 多会话隔离 1 + coldstart 迁移 3 归 core） |
 
 ### 完成内容
@@ -25,7 +26,7 @@
   - 用户 release 实例手动操作全链路（diag 日志实证）：手动开始（带 serial）→ 两次勾选切换重启会话（flags 序列化正确）→ Perfetto 10s 录制每秒进度 → recorded → done；产物落 `<pkg>/20260904_184020-6eb792dfb0f/trace/`（三件套齐全）
   - 双机并行：用户实例采 SS3 + 我的实例 `--device d1f39648c1f` 采 SS2MAX 同时进行（SS2MAX 平台检测正确走 serial 过滤路径；filament CPU ~50%/PSS 644MB）
   - 冷启动：CLI（走 core 新模块）SS2MAX `--cold-start .MainActivity`——COLD TotalTime 874ms（手动 am start -W 对照一致）；进程存活时热启动 0ms 如实上报；`resolve-activity --brief` 输出末行格式与解析逻辑实测匹配
-- **发现并修复**：①`applyStartupArgs` 不切激活页（回填了 SS2MAX 页但显示 SS3 idle 页）→ 回填后 `switchDevice(serial)`；②车机熄屏状态 `am start -W` 被系统重定向到激活引导页（`Activity: com.lixiang.provision/...`、TotalTime 0）——解析如实上报 + 前端重定向警示（避免误导性 0ms）
+- **发现并修复**：①`applyStartupArgs` 不切激活页（回填了 SS2MAX 页但显示 SS3 idle 页）→ 回填后 `switchDevice(serial)`；②车机熄屏状态 `am start -W` 被系统重定向到激活引导页（`Activity: com.lixiang.provision/...`、TotalTime 0）——解析如实上报 + 前端重定向警示（避免误导性 0ms）；③（次日早用户真机反馈「SS2 打开应用失败」）`launchOrRestart` 成功路径调 `r.summary()`——serde 序列化到 JS 的 ColdStartResult 只有数据字段无 Rust 方法 → TypeError 进 catch → `JSON.stringify(TypeError)={}` 掩盖真实错误（invoke 本身已成功，同一实例 start_sampling 正常是关键对照）；修：摘要前端自拼 + catch 打 `e.message`。**教训：JS 侧拿到的 Rust 返回值永远是纯数据对象（方法不可跨 IPC），错误日志须打 `e.message` 而非 stringify（Error 对象 stringify 只剩 {}）**
 - **验证门槛**：101 测试全绿（agent 24 + core 65+2 ignored（coldstart 3 迁入）+ xperformance 5 + GUI 5（新增多会话隔离）+ xrm 2），clippy 零警告（修 2 处 `Iterator::last` on DoubleEndedIterator），cargo doc + rustdoc missing_docs 三 crate 零 warning
 
 ### 关键结论与基线
@@ -38,7 +39,7 @@
 
 ### 遗留问题
 
-- GUI「打开/重启应用」按钮的点击渲染为人工目验项（后端链路 CLI 真机全通：resolve/force-stop/measure/serial 路由；按钮→invoke 绑定代码 review 无误，diag 无用户点击记录待补）
+- ~~GUI「打开/重启应用」按钮的点击渲染为人工目验项~~（**9bcb8ee 已修 + release 真机验证通过**：SS2MAX 完整按钮路径 invoke→recordColdStart→成功日志；根因 `r.summary()` 前端调用 Rust 方法）
 - 设备热插拔的 tab 灰显/恢复为逻辑验证（devices-changed 事件链路 951c0ab 已真机验证；本轮前端新增灰显逻辑未物理插拔复现——与上轮同因：验证窗口内未动线缆）
 - 双设备并行 trace/stack 同时录制未双机实测（目录隔离已按 serial 后缀设计；单机录制双机采样的并行组合已验证）
 
