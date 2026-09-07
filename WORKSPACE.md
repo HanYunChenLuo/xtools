@@ -52,7 +52,7 @@
 - ~~SS2MAX gpubusy 计数器恒 `0 0` / busy% 可 >100%~~（**已修**，commit 见 SESSION 2026-09-07：根因是 SS2MAX 厂商内核的 gpubusy 为**窗口语义**——读数是上一 ~1s 窗口的 busy/total µs，total 恒 ≈1e6 非累计；按累计差值解析出 1662%。`GpuBusyCalc` 三判据自动锁定窗口语义直读 busy/total；真机对照内核 `gpu_busy_percentage` 均值 75.5 vs 74.7 一致。原"恒 0 0"即 GPU 空闲时的窗口读数，非停走）
 - SS4 ligfx Frequency 单位待真机核实（Hz vs MHz）
 - **QNX proc 链泄漏（2026-09-07 发现，未修）**：三层清理只写 `gpubusystats`（frame 链），`gpu_per_process_busy` 进程链无停止手段（实测死写入者 toggle/写 0/log_level 0 均无效）——每 --gpu 会话泄漏一条，多日累积 ~20 条锁步洪泛，疑似挤占致 frame 链无法启动（两轮会话 0 frame 事件）。恢复 = `adb reboot`（整 SoC 复位含 QNX）。待找到正确停链命令后补进 agent 退出钩子与 host qnx_stop_stats
-- ~~孤儿 adb exec-out 泄漏~~（**已修**，commit 见 SESSION 2026-09-07 第二条：三层防御——agent stdin EOF 监测（主路径，秒级）+ 停滞看门狗（max(3×interval, 30s) 兜底）+ host `cleanup_orphan_agents`（spawn 前孤儿查杀 + 设备端 pkill 兜底，单测锁定）；传输从 exec-out 改 `adb shell`（exec-out stdin 不传播 EOF，实测 cat 挂死——shell 传输 NDJSON 字节完整）。真机验证：shell EOF 退出 / 新会话零误伤 / 孤儿场景自动查杀 / 正常退出零残留
+- ~~孤儿 adb exec-out 泄漏~~（**已修**，e692d4e：三层防御——agent stdin EOF 监测（主路径，秒级）+ 停滞看门狗（max(3×interval, 30s) 兜底）+ host `cleanup_orphan_agents`（spawn 前孤儿查杀 + 设备端 pkill 兜底，单测锁定）；传输从 exec-out 改 `adb shell`（exec-out stdin 不传播 EOF，实测 cat 挂死——shell 传输 NDJSON 字节完整）。真机验证：shell EOF 退出 / 新会话零误伤 / 孤儿场景自动查杀 / 正常退出零残留
 - ~~多设备连接时所有 adb 命令不带 -s 会失败~~（**46bd161 已修**：全局 `-s` 注入 + CLI `--device` + GUI 设备下拉，SS3+手机双连真机回归；原候补转正，详见 CLAUDE.md「多设备 adb」）。GUI 多台未指定 `--device` 的自动启动跳过路径为逻辑验证 + 单测覆盖（验证时手机恰断开未双机复现，行为由 pick_device 单测锁定）
 - QNX 双会话并发交互（五轮 review 实测）：①后启动会话的 fd3 写入给先启动方一次 ~7s GPU 停走（看门狗自愈恢复）；②各方 GPU 事件密度升至 ~2×（双方写入产生非锁步多链，行级全等去重不覆盖，值为真值仅密度偏高）；③退出清理已有并发保护（pgrep 检测其他 agent 跳过停链，agent 钩子 >1 / host 兜底 ≥1+收尸等待，真机验证）——并发监控本身罕见，记录不修
 - ~~GUI add_marker 不写 markers.csv~~（已失效：GUI 打点功能整体删除，78f93a9，仅剩 CLI socket 打点）

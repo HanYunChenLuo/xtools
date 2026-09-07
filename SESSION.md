@@ -14,7 +14,7 @@
 
 | commit | 内容 |
 |--------|------|
-| （本轮） | fix：三层防御。①agent **stdin EOF 监测**（主路径）——host 死亡 → adb stdin EOF → adbd 关设备端 stdin → read 0/Err 带钩子退出（秒级）；②agent **停滞看门狗**——`max(3×interval, 30s)` 无成功写出（`LAST_EMIT_OK`）带钩子退出（兜底）；③host **`cleanup_orphan_agents`**（spawn_agent 前调用）——`ps` 快照筛 agent 流（shell/exec-out 都认），父进程非存活 xperf 即孤儿 `kill -9`（不问 serial），杀过等 2s 让 EPIPE+钩子落地；设备侧兜底：目标设备无存活 host 流时 `pkill -f 'xperf-age[n]t'`（有存活流跳过，防误杀并行会话）。**传输 exec-out → `adb shell`**（exec-out stdin 不传数据不传 EOF，实测 `cat` 挂死；shell 字节完整——NDJSON 全量 JSON 校验通过）；`AgentStream` 增 `_stdin` 句柄（从不写数据，纯 liveness 信号）；`exit_with_hooks` 统一 EPIPE/EOF/停滞三路径。单测 core 65→66（孤儿流解析+判定），workspace 105 全绿 |
+| e692d4e | fix：三层防御。①agent **stdin EOF 监测**（主路径）——host 死亡 → adb stdin EOF → adbd 关设备端 stdin → read 0/Err 带钩子退出（秒级）；②agent **停滞看门狗**——`max(3×interval, 30s)` 无成功写出（`LAST_EMIT_OK`）带钩子退出（兜底）；③host **`cleanup_orphan_agents`**（spawn_agent 前调用）——`ps` 快照筛 agent 流（shell/exec-out 都认），父进程非存活 xperf 即孤儿 `kill -9`（不问 serial），杀过等 2s 让 EPIPE+钩子落地；设备侧兜底：目标设备无存活 host 流时 `pkill -f 'xperf-age[n]t'`（有存活流跳过，防误杀并行会话）。**传输 exec-out → `adb shell`**（exec-out stdin 不传数据不传 EOF，实测 `cat` 挂死；shell 字节完整——NDJSON 全量 JSON 校验通过）；`AgentStream` 增 `_stdin` 句柄（从不写数据，纯 liveness 信号）；`exit_with_hooks` 统一 EPIPE/EOF/停滞三路径。单测 core 65→66（孤儿流解析+判定），workspace 105 全绿 |
 
 ### 完成内容与真机验证（SS2MAX d1f39648c1f）
 
