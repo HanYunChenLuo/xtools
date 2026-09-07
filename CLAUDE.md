@@ -58,12 +58,13 @@ GUI:  start_sampling(serial) / 自动启动 → spawn_sampling()（std::thread �
         │
         ├─ agent::ensure_agent_built()   ← 无二进制时自动交叉编译（NDK）
         ├─ agent::deploy_agent(bin, serial) ← push 到 /data/local/tmp（大小不一致才推）
-        ├─ agent::spawn_agent(..., serial)  ← adb -s <serial> exec-out 长连接
+        ├─ agent::cleanup_orphan_agents(serial) ← 先清孤儿（host 孤儿 exec-out 查杀 + 设备端 pkill 兜底）
+        └─ agent::spawn_agent(..., serial)  ← adb -s <serial> shell setsid 长连接（stdin piped 作 liveness）
         └─ 事件循环：next_event() 阻塞读 NDJSON 行 → 打印/emit + 累积 pid_stats
 ```
 
 - **设备端**：xperf-agent 常驻，直接读 /proc（CPU/线程）、smaps_rollup 或 dumpsys meminfo（内存）、本地 dumpsys SurfaceFlinger（FPS），按绝对节拍（start + round×interval，防漂移）逐轮输出 JSON 行
-- **主机侧**：只是表现层（CLI 打印/流式 CSV/图表；GUI emit 给前端）。ADB 断开 → exec-out EOF → `reconnect_agent` 每 500ms 轮询等设备回来，重新部署+启动 agent，主机侧状态（时序/峰值/CSV）保留；Ctrl-C → 关闭连接 → agent 写 stdout 失败自行退出
+- **主机侧**：只是表现层（CLI 打印/流式 CSV/图表；GUI emit 给前端）。ADB 断开 → 流 EOF → `reconnect_agent` 每 500ms 轮询等设备回来，重新部署+启动 agent，主机侧状态（时序/峰值/CSV）保留；Ctrl-C → 关闭连接 → agent 写 stdout 失败自行退出
 - **xperf-core 已无轮询实现**（原 Sampler/cpu/memory/fps 参考实现已删除，225d89b）；core 只保留协议类型（ThreadCpuInfo/MemoryDetails/FpsTimeSeriesData/PidStats/SampleEvent）+ agent 传输层 + platform/marker + trace（perfetto 深挖，CLI/GUI 共用）；采样全在 agent（零依赖独立发布，解析逻辑与 core 类型对应）
 - **GUI 前端**：**多设备并行（顶栏每台在线设备一个 tab，热插拔动态增删；断开设备 tab 灰显保留数据、插回自动恢复采样）**。每设备页 = 独立侧栏（包名/间隔/勾选/开始停止/深挖/数据管理 + 「应用操作」：Activity 输入（留空自动 `resolve-activity`）+「打开应用」/「重启应用」（force-stop→800ms→`am start -W`，顺带测冷启动，结果进「冷启动」面板，最近 5 次；启动被系统重定向（如车机熄屏进引导页）时状态栏警示）+ 主区三子 tab（性能指标 / Perfetto 分析 / Simpleperf 分析，分析页隐藏侧栏占满全宽）。JS 为 `DeviceSession` 类（模板 `<template id="devicePageTpl">` 克隆实例，全部状态/图表/面板设备内隔离；datalist id 须按 serial 唯一化）+ App 管理器（事件 payload 均带 `serial` 分发；顶栏 status 显示激活设备的状态，进度条语义不变）。CPU/内存/FPS 折线（series 保留完整会话历史，窗口跟随 10min / 全部历史切换，绘制时二分裁剪 + stride 抽稀防卡顿）、Top 线程表（500ms 节流渲染，仅激活页）、峰值面板（新峰值才更新 DOM）、导出 CSV（`export_csv` 命令写 `/tmp/xperf/<pkg>/<导出时刻>/`）、perfetto 深挖（共享录制时长下拉 + 按钮 → `start_trace` 命令 → `trace` 事件推进度 → 报告面板展示，与采样并行互不干扰；`--trace N` 命令行自动启动可脚本化验证）、`--package --device` 命令行自动启动与手动开始**同流程**（后端 `startup_sessions` 回查全部活跃会话回填 UI 并切到对应设备页）
 
@@ -233,13 +234,19 @@ Platform trait + `adb devices -l` product 字段自动检测（HU_SS3/HU_SS2MAXF
 
 ### agent（设备端采样器，xperf-agent）
 
-**为什么**：adb 轮询单轮固定 6+ 次调用（每次 ~13ms 起，`dumpsys meminfo` ~100ms），低间隔下开销超过间隔本身，且每次 adb 调用都扰动被测系统。agent 常驻设备直接读 /proc（微秒级），NDJSON 经 `adb exec-out` 长连接流式回传（PerfDog Agent 同构思路，但免装 APK：纯静态二进制）。当前 CLI/GUI 的**唯一**采样路径。
+**为什么**：adb 轮询单轮固定 6+ 次调用（每次 ~13ms 起，`dumpsys meminfo` ~100ms），低间隔下开销超过间隔本身，且每次 adb 调用都扰动被测系统。agent 常驻设备直接读 /proc（微秒级），NDJSON 经 `adb shell` 长连接流式回传（PerfDog Agent 同构思路，但免装 APK：纯静态二进制）。当前 CLI/GUI 的**唯一**采样路径。
 
 **部署**：
 - 本机二进制：`target/aarch64-linux-android/release/xperf-agent`（不存在时自动执行 `cargo build -p xperf-agent --target aarch64-linux-android --release`；需 NDK，链接器配置在 `.cargo/config.toml`，当前绑定 NDK 25.1.8937393 / API 26）
 - 设备端路径：`/data/local/tmp/xperf-agent`
 - 更新机制（`agent::deploy_agent`）：大小+mtime 双判（源码变更自动重建：ensure_agent_built 比较 src 树内任一 .rs 的最新 mtime vs 二进制 mtime——agent 已多模块，不能只盯 main.rs）；deploy 前自动 `try_adb_root`（IO 等需 root 的指标）
 - 手动重建推送：`cargo build -p xperf-agent --target aarch64-linux-android --release && adb push target/aarch64-linux-android/release/xperf-agent /data/local/tmp/`
+
+**传输与 liveness（2026-09-07 改版，实测锁定）**：
+- **host→agent 用 `adb shell`（非 exec-out）**：exec-out 的 stdin 既不传数据也不传 EOF（实测 `cat` 挂死），无法做 liveness；shell 传输字节完整（NDJSON 全量 JSON 校验通过）。host 侧 stdin 置 piped 由 `AgentStream._stdin` 持有，从不写数据
+- **agent 双重 liveness 监测**（main.rs 两个看门狗线程）：①**stdin EOF**——宿主死亡（含孤儿 adb 残留，其 stdin 随宿主消亡）→ adbd 关设备端 stdin → read 返回 0/Err → 带钩子退出（秒级，主路径）；②**停滞看门狗**——超 `max(3×interval, 30s)` 无任何成功写出（`LAST_EMIT_OK` 原子时间戳）→ 带钩子退出（兜底管道半开等异常；正常节拍由心跳空行保证每轮至少一次写出）。`exit_with_hooks` 统一 EPIPE/EOF/停滞三路径的钩子执行（并发只跑一次）
+- **孤儿清理（`cleanup_orphan_agents`，spawn_agent 前调用）**：GUI/CLI 非正常死亡时其 adb 流进程孤儿化挂 init、设备端 agent 永不退出（曾实测 7 组残留跑 4 天）。host 侧 `ps` 快照筛 agent 流（shell 与 exec-out 旧格式都认），父进程非存活 xperf 工具即孤儿一律 `kill -9`（不问 serial，反正无人消费），杀过等 2s 让设备端 EPIPE+钩子落地；设备侧兜底——目标设备已无存活 host 流时 `pkill -f 'xperf-age[n]t'`（`[n]` 防载体自匹配；有存活流=他人在采样则跳过）。解析+判定为纯函数单测锁定
+- 手动直跑 agent 验证：stdin 必须保持打开（`< /dev/null` 会立即 EOF 退出）；勿用 `timeout`（SIGTERM 不走钩子，QNX 链泄漏）——须杀 host 侧 adb 走 EPIPE/EOF
 
 **代码结构**（模块拆分，main.rs 只留协议/参数/节拍循环 493 行）：
 - `main.rs`：NDJSON 协议头注释、Args/parse_args、节拍主循环、公共工具（emit/json_escape/now_ms/dumpsys，crate 根私有项对所有子模块可见）
@@ -254,7 +261,7 @@ Platform trait + `adb devices -l` product 字段自动检测（HU_SS3/HU_SS2MAXF
 - CPU 窗口 = 相邻两轮差值（常驻保有状态，无 phase1/phase2 结构）
 - 需要 root（读他进程的 /proc、smaps_rollup）；内部设备 adbd 已 root
 - 终端输出：interval ≥ 500ms 逐条详细打印；< 500ms 按 ~1s 聚合（avg/max），全量明细在流式 CSV；CSV 时间戳毫秒精度（`%.3f`）
-- 主机断连（EOF）→ 自动重连恢复（见上）；Ctrl-C → exec-out 关闭 → agent 写 stdout 失败自行退出（节拍循环整轮零输出时发空行探活，一个周期内感知断连；host 侧 next_event 跳过空行，零协议影响）
+- 主机断连（EOF）→ 自动重连恢复（见上）；Ctrl-C → adb 连接关闭 → agent 写 stdout 失败自行退出（节拍循环整轮零输出时发空行探活，一个周期内感知断连；host 侧 next_event 跳过空行，零协议影响）；宿主进程死亡 → 孤儿清理 + stdin EOF/停滞看门狗兜底（见「传输与 liveness」）
 
 **验证基线**：svm @ 50ms 间隔，78 样本均值 15.03%，与 adb top 一致；50ms 窗口可见 25-47% 的瞬时毛刺（1s 采样看不到）。
 

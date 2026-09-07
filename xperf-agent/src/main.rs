@@ -50,7 +50,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::io::Write;
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -182,21 +182,34 @@ fn register_exit_hook(f: Box<dyn Fn() + Send>) {
     let _ = EXIT_HOOK.set(Mutex::new(Some(f)));
 }
 
+/// 带退出钩子的进程退出（std::process::exit 不跑 Drop，清理动作必须显式执行）。
+/// 并发触发时钩子只执行一次。触发路径：emit 写失败（EPIPE）、停滞看门狗。
+fn exit_with_hooks() -> ! {
+    if let Some(h) = EXIT_HOOK.get() {
+        if let Ok(mut g) = h.lock() {
+            if let Some(f) = g.as_ref() {
+                f();
+            }
+            *g = None; // 并发触发只执行一次
+        }
+    }
+    std::process::exit(0);
+}
+
+/// 最近一次成功写出 stdout 的时间（ms 墙钟）。停滞看门狗据此检测
+/// 「host 进程已死但孤儿 adb exec-out 保持传输」场景：无人消费时写最终阻塞，
+/// emit 的写失败自检永不触发，须靠停滞超时兜底退出（2026-09-07 实测该类
+/// 泄漏让设备端 agent 残留 4 天）。
+static LAST_EMIT_OK: AtomicU64 = AtomicU64::new(0);
+
 fn emit(line: &str) {
     ROUND_EMITTED.store(true, Ordering::Relaxed);
     let mut out = std::io::stdout().lock();
     // 对端断开（adb 连接关闭）时写失败，先跑退出钩子再退出
     if writeln!(out, "{}", line).is_err() || out.flush().is_err() {
-        if let Some(h) = EXIT_HOOK.get() {
-            if let Ok(mut g) = h.lock() {
-                if let Some(f) = g.as_ref() {
-                    f();
-                }
-                *g = None; // 并发失败只执行一次
-            }
-        }
-        std::process::exit(0);
+        exit_with_hooks();
     }
+    LAST_EMIT_OK.store(now_ms(), Ordering::Relaxed);
 }
 
 fn dumpsys(args: &[&str]) -> Option<String> {
@@ -255,6 +268,36 @@ fn main() {
         ncores,
         maxkhz.iter().map(u64::to_string).collect::<Vec<_>>().join(",")
     ));
+
+    // 停滞看门狗：host 进程非正常死亡时，孤儿 adb exec-out 可能保持传输但无人
+    // 消费——写最终阻塞、emit 的写失败自检永不触发（实测残留 4 天）。超过
+    // stall_limit 无任何成功写出判定 host 失联，带钩子退出（QNX 停链等）。
+    // 下限 30s 覆盖正常节拍（心跳保证每轮至少一次写出）；interval 极大时取 3 倍间隔。
+    let stall_limit = (args.interval_ms * 3).max(30_000);
+    LAST_EMIT_OK.store(now_ms(), Ordering::Relaxed);
+    std::thread::spawn(move || loop {
+        std::thread::sleep(Duration::from_secs(5));
+        if now_ms().saturating_sub(LAST_EMIT_OK.load(Ordering::Relaxed)) > stall_limit {
+            exit_with_hooks();
+        }
+    });
+
+    // stdin 存活性监测：host（xperf-core spawn_agent，shell 传输）在会话期间持有
+    // agent stdin 管道；host 死亡（含孤儿 adb 残留场景——adb stdin 随宿主消亡 EOF）
+    // → adbd 关闭设备端 stdin → EOF → 带钩子退出。协议不下发 stdin 数据，读到即忽略。
+    // 注意：exec-out 传输不传播 stdin EOF（实测 cat 挂死），故宿主必须走 shell 传输；
+    // 手动调试本 agent 时 stdin 须保持打开（重定向 /dev/null 会立即退出）。
+    std::thread::spawn(|| {
+        use std::io::Read;
+        let mut stdin = std::io::stdin().lock();
+        let mut buf = [0u8; 64];
+        loop {
+            match stdin.read(&mut buf) {
+                Ok(0) | Err(_) => exit_with_hooks(),
+                Ok(_) => {}
+            }
+        }
+    });
 
     // B 类指标启动探测（探测失败发 err 并禁用，不影响其余指标）
     let mut freq_enabled = args.freq;

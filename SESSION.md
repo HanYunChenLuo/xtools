@@ -6,6 +6,31 @@
 > 新会话开始时可先读本文件了解近期上下文。
 
 ---
+## 2026-09-07（日）下午 — 孤儿 exec-out 三层防御 + agent 传输改版（exec-out → shell）
+
+**任务线**：用户拍板「两者都要」——agent 侧 liveness 看门狗 + host 侧孤儿清理，根治 E 节「孤儿 adb exec-out 泄漏」（GUI/CLI 非正常死亡 → adb 流孤儿化挂 init → 设备端 agent 永不退出，曾实测 7 组残留跑 4 天）。
+
+### Commits
+
+| commit | 内容 |
+|--------|------|
+| （本轮） | fix：三层防御。①agent **stdin EOF 监测**（主路径）——host 死亡 → adb stdin EOF → adbd 关设备端 stdin → read 0/Err 带钩子退出（秒级）；②agent **停滞看门狗**——`max(3×interval, 30s)` 无成功写出（`LAST_EMIT_OK`）带钩子退出（兜底）；③host **`cleanup_orphan_agents`**（spawn_agent 前调用）——`ps` 快照筛 agent 流（shell/exec-out 都认），父进程非存活 xperf 即孤儿 `kill -9`（不问 serial），杀过等 2s 让 EPIPE+钩子落地；设备侧兜底：目标设备无存活 host 流时 `pkill -f 'xperf-age[n]t'`（有存活流跳过，防误杀并行会话）。**传输 exec-out → `adb shell`**（exec-out stdin 不传数据不传 EOF，实测 `cat` 挂死；shell 字节完整——NDJSON 全量 JSON 校验通过）；`AgentStream` 增 `_stdin` 句柄（从不写数据，纯 liveness 信号）；`exit_with_hooks` 统一 EPIPE/EOF/停滞三路径。单测 core 65→66（孤儿流解析+判定），workspace 105 全绿 |
+
+### 完成内容与真机验证（SS2MAX d1f39648c1f）
+
+- **exec-out 不传 stdin  EOF（根因确证）**：`adb exec-out cat < /dev/null` 挂死（rc=124）vs `adb shell cat` 立即回显退出；fifo 控制实验：`adb shell setsid xperf-agent < fifo` 关写端 → 5s 内 agent 退出，host adb 一并消失——shell 传输的 stdin EOF 路径成立
+- **三层各自验证**：①shell 会话关 stdin → agent 秒退（上）；②CLI 新会话（无孤儿场景）正常采样 + `timeout` 结束后零残留（cleanup 零误伤：无孤儿时只做 pkill 兜底且设备端本就干净）；③**孤儿场景**——setsid bash 起 exec-out 流 → `kill -9` 载体 bash（adb 流孤儿化挂 systemd，PPID 实拍 3579960）→ 跑 CLI 新会话 → host 孤儿流被查杀、设备端 agent 归零（`NONE`），新会话自身采样正常（CPU/内存事件流完整）→ 正常退出后零残留
+- **停滞看门狗**：kill -STOP adb 进程模拟「写阻塞」（stop 期间 stdout 管道满后 agent emit 卡住）——最终由 host 侧 kill -CONT+kill 收场；此路径为兜底防御，正常超时 30s（interval 500ms × 3 取下限 30s）
+- **验证门槛**：105 全绿 + clippy 零警告 + cargo doc/agent rustdoc missing_docs 零 warning
+
+### 关键结论
+
+- **孤儿化在 setsid bash 载体下 PPID 是 systemd --user（3579960）**，不是 pid 1——孤儿判定不能认死 pid 1，须「父进程不存在或非 xperf 工具」（is_orphan_stream 语义）
+- `kill -STOP` 一个 adb 进程不够——adb 可能多进程协作（server/transport），STOP 单个后输出仍走（另测 STOP all 后 log 仍在涨：worker 线程在写）；停滞看门狗的真实验证需 STOP 全部 adb 进程并等管道满，本轮以 kill -CONT 收场不再深挖（该路径为兜底，主路径 stdin EOF 已实测）
+- **agent 协议零变化**（stdin 不下发数据、空行心跳照旧）；GUI/CLI 调用点零改动（core 内部换传输）
+- 手动直跑 agent 的新约束：stdin 须保持打开（`< /dev/null` 立即 EOF 退出）；fifo 控制实验是最可靠的 liveness 验证手段（真机可复现）
+
+---
 
 ## 2026-09-07（日）— E 类修复：SS2MAX gpubusy 窗口语义 + 两项新发现
 

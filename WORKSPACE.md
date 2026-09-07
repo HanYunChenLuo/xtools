@@ -2,7 +2,7 @@
 
 > 本文件记录跨会话的待办事项（backlog）。每次会话的历史总结见 `SESSION.md`。
 > 完成一项就把状态改为 ✅ 并注明完成的 commit；新增想法随时追加。
-> 最后更新：2026-09-07（E 类修复：SS2MAX gpubusy 窗口语义修复 + QNX proc 链泄漏/孤儿 adb 两新发现，见 SESSION 当日条目）
+> 最后更新：2026-09-07（E 类修复两轮：SS2MAX gpubusy 窗口语义 + 孤儿 exec-out 三层防御，QNX proc 链泄漏待挖停链命令，见 SESSION 当日条目）
 
 ## 当前状态速览
 
@@ -16,7 +16,7 @@
 - 落盘：数据根 `/tmp/xperf`（CLI 流式 CSV + 退出图表；GUI 完整历史 + CSV 导出，共用同根；GUI 深挖目录 `<pkg>/<ts>-<serial>/` 防双设备撞名）；清理走 CLI `--clean-cache` / GUI 按钮（~/.cache/xperf + /tmp/xperf，2bd6bca）
 - GUI：9 张折线图 + 实时数值面板 + Top 线程 + 峰值 + 冷启动面板 + 间隔档位下拉 + 实际周期标注 + 勾选即时生效（自动重启会话）+ Perfetto 分析（独立 tab 报告 + 浏览器自动加载 + 每秒录制进度）+ **函数热点**（独立 tab + 每秒录制进度 + 浏览器火焰图）+ 暗/亮双主题
 - agent 部署：自动尝试 adb root（IO 等需 root）；src 树内任一 .rs mtime 变化自动重建
-- 测试：**104 全绿**（agent 27：解析 + watchdog_step 决策 + GpuBusyCalc 双语义；core 65+2 ignored：协议/trace/simpleperf/baseline/coldstart/设备 diff；xperformance 5：alerts；GUI 5：export_csv×2 + 基线×2 + 多会话隔离 1；xrm 2），clippy 零警告，**cargo doc 零 warning**（默认 lint 集 + missing_docs 三 crate）
+- 测试：**105 全绿**（agent 27：解析 + watchdog_step 决策 + GpuBusyCalc 双语义；core 66+2 ignored：协议/trace/simpleperf/baseline/coldstart/设备 diff/孤儿流解析与判定；xperformance 5：alerts；GUI 5：export_csv×2 + 基线×2 + 多会话隔离 1；xrm 2），clippy 零警告，**cargo doc 零 warning**（默认 lint 集 + missing_docs 三 crate）
 - 设备：SS3 6eb792dfb0f（adbd root，QNX GPU 通道 + 多设备并行已真机回归）；SS2MAX d1f39648c1f（adb root 可用；**多设备并行 + 冷启动 COLD 874ms 已真机验证**）
 - **测试对象（555ffab 起统一）**：`example/apk/filament-gltf-viewer-v1.76.0-android.apk`（git-lfs 管理，包名 `com.google.android.filament.gltf`，入口 `.MainActivity`）——真机测试一律用它，不再用 svm。已装 SS3 + SS2MAX
 
@@ -52,7 +52,7 @@
 - ~~SS2MAX gpubusy 计数器恒 `0 0` / busy% 可 >100%~~（**已修**，commit 见 SESSION 2026-09-07：根因是 SS2MAX 厂商内核的 gpubusy 为**窗口语义**——读数是上一 ~1s 窗口的 busy/total µs，total 恒 ≈1e6 非累计；按累计差值解析出 1662%。`GpuBusyCalc` 三判据自动锁定窗口语义直读 busy/total；真机对照内核 `gpu_busy_percentage` 均值 75.5 vs 74.7 一致。原"恒 0 0"即 GPU 空闲时的窗口读数，非停走）
 - SS4 ligfx Frequency 单位待真机核实（Hz vs MHz）
 - **QNX proc 链泄漏（2026-09-07 发现，未修）**：三层清理只写 `gpubusystats`（frame 链），`gpu_per_process_busy` 进程链无停止手段（实测死写入者 toggle/写 0/log_level 0 均无效）——每 --gpu 会话泄漏一条，多日累积 ~20 条锁步洪泛，疑似挤占致 frame 链无法启动（两轮会话 0 frame 事件）。恢复 = `adb reboot`（整 SoC 复位含 QNX）。待找到正确停链命令后补进 agent 退出钩子与 host qnx_stop_stats
-- **孤儿 adb exec-out 泄漏（2026-09-07 发现，未修）**：GUI/CLI 进程非正常死亡时，其 spawn 的 `adb exec-out` 进程不随亡（SS2MAX 上实测 7 组残留：host adb 孤儿 + 设备端 agent 靠它续命持续采样耗资源）。杀 host adb → 设备端 agent EPIPE 自退（设计路径有效）。缓解思路：agent 加最大空闲/寿命看门狗，或 host 侧启动时 pgrep 清理残留
+- ~~孤儿 adb exec-out 泄漏~~（**已修**，commit 见 SESSION 2026-09-07 第二条：三层防御——agent stdin EOF 监测（主路径，秒级）+ 停滞看门狗（max(3×interval, 30s) 兜底）+ host `cleanup_orphan_agents`（spawn 前孤儿查杀 + 设备端 pkill 兜底，单测锁定）；传输从 exec-out 改 `adb shell`（exec-out stdin 不传播 EOF，实测 cat 挂死——shell 传输 NDJSON 字节完整）。真机验证：shell EOF 退出 / 新会话零误伤 / 孤儿场景自动查杀 / 正常退出零残留
 - ~~多设备连接时所有 adb 命令不带 -s 会失败~~（**46bd161 已修**：全局 `-s` 注入 + CLI `--device` + GUI 设备下拉，SS3+手机双连真机回归；原候补转正，详见 CLAUDE.md「多设备 adb」）。GUI 多台未指定 `--device` 的自动启动跳过路径为逻辑验证 + 单测覆盖（验证时手机恰断开未双机复现，行为由 pick_device 单测锁定）
 - QNX 双会话并发交互（五轮 review 实测）：①后启动会话的 fd3 写入给先启动方一次 ~7s GPU 停走（看门狗自愈恢复）；②各方 GPU 事件密度升至 ~2×（双方写入产生非锁步多链，行级全等去重不覆盖，值为真值仅密度偏高）；③退出清理已有并发保护（pgrep 检测其他 agent 跳过停链，agent 钩子 >1 / host 兜底 ≥1+收尸等待，真机验证）——并发监控本身罕见，记录不修
 - ~~GUI add_marker 不写 markers.csv~~（已失效：GUI 打点功能整体删除，78f93a9，仅剩 CLI socket 打点）

@@ -217,9 +217,17 @@ pub enum AgentEvent {
     },
 }
 
-/// 与设备端 agent 的 exec-out 长连接流（阻塞逐行读 NDJSON 事件）
+/// 与设备端 agent 的 shell 长连接流（阻塞逐行读 NDJSON 事件）
+///
+/// 传输选择（2026-09-07 实测定）：`adb shell` 而非 `exec-out`——exec-out 的 stdin
+/// 既不传数据也不传 EOF（实测 cat 挂死），而 liveness 依赖 stdin：宿主死亡（含孤儿
+/// adb 残留）→ adb stdin EOF → adbd 关闭设备端 stdin → agent 监测线程带钩子退出。
+/// shell 传输字节完整（NDJSON 全量 JSON 校验通过），`_stdin` 句柄必须持有保活。
 pub struct AgentStream {
     child: Child,
+    /// agent stdin 管道：持有即声明宿主存活（drop/宿主死亡 → EOF → agent 退出）。
+    /// 从不写入数据，纯 liveness 信号。
+    _stdin: std::process::ChildStdin,
     reader: BufReader<std::process::ChildStdout>,
 }
 
@@ -429,10 +437,13 @@ pub fn spawn_agent(
     platform: Option<&dyn Platform>,
     serial: Option<&str>,
 ) -> Result<AgentStream> {
+    cleanup_orphan_agents(serial);
     // setsid：agent 脱离 adb 会话——adbd 断连清理时不再被信号直杀，而是走 stdout
-    // 写失败（EPIPE）路径：心跳/退出钩子得以执行（QNX 链清理等），随后自行退出。
+    // 写失败（EPIPE）/ stdin EOF 路径：心跳/退出钩子得以执行（QNX 链清理等），随后自行退出。
     // 真机验证：无 setsid 时 timeout 杀 adb 后 QNX 统计链残留；加 setsid 后钩子生效。
-    let mut cmd_args = vec!["exec-out".to_string(), "setsid".to_string(), DEVICE_AGENT_PATH.to_string()];
+    // 传输用 shell 而非 exec-out（exec-out 不传播 stdin EOF，liveness 失效，见 AgentStream 文档）；
+    // stdin 置 piped 由 AgentStream 持有——宿主死亡即 EOF，agent 侧监测线程据此退出。
+    let mut cmd_args = vec!["shell".to_string(), "setsid".to_string(), DEVICE_AGENT_PATH.to_string()];
     if let Some(pkg) = package {
         cmd_args.extend(["--package".to_string(), pkg.to_string()]);
     }
@@ -447,14 +458,123 @@ pub fn spawn_agent(
     }
     let mut child = crate::utils::adb_for(serial)
         .args(&cmd_args)
+        .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()?;
+    let stdin = child.stdin.take().expect("stdin piped");
     let stdout = child.stdout.take().expect("stdout piped");
     Ok(AgentStream {
         child,
+        _stdin: stdin,
         reader: BufReader::new(stdout),
     })
+}
+
+/// host 侧一条 agent 采样流（`adb [-s serial] shell|exec-out setsid .../xperf-agent ...` 进程）
+#[derive(Debug, PartialEq, Eq)]
+struct HostStream {
+    /// 进程 PID
+    pid: u32,
+    /// 父进程 PID（孤儿判定用）
+    ppid: u32,
+    /// `-s` 指定的设备 serial（无 `-s` 为 None，即 adb 默认设备）
+    serial: Option<String>,
+}
+
+/// 从 `ps -eo pid=,ppid=,args=` 输出筛出 agent 采样流
+/// （传输为 shell 或 exec-out——exec-out 是旧版残留，清理两类都要覆盖）。
+fn parse_host_streams(ps_out: &str) -> Vec<HostStream> {
+    let mut out = Vec::new();
+    for line in ps_out.lines() {
+        let tok: Vec<&str> = line.split_whitespace().collect();
+        if tok.len() < 4 {
+            continue;
+        }
+        let (Ok(pid), Ok(ppid)) = (tok[0].parse::<u32>(), tok[1].parse::<u32>()) else { continue };
+        let args = &tok[2..];
+        // 程序名为 adb（可为全路径，排除 adbd）；命令行含 shell/exec-out 与设备端 agent 路径
+        if !args[0].ends_with("/adb") && args[0] != "adb" {
+            continue;
+        }
+        if !args.contains(&"shell") && !args.contains(&"exec-out") {
+            continue;
+        }
+        if !args.contains(&DEVICE_AGENT_PATH) {
+            continue;
+        }
+        let serial = args.iter().position(|&t| t == "-s").and_then(|i| args.get(i + 1)).map(|s| s.to_string());
+        out.push(HostStream { pid, ppid, serial });
+    }
+    out
+}
+
+/// ps 快照：pid → 命令行（含自身，孤儿判定用）
+fn parse_ps_map(ps_out: &str) -> std::collections::HashMap<u32, String> {
+    ps_out
+        .lines()
+        .filter_map(|l| {
+            let mut tok = l.split_whitespace();
+            let pid = tok.next()?.parse::<u32>().ok()?;
+            tok.next()?; // ppid
+            Some((pid, tok.collect::<Vec<_>>().join(" ")))
+        })
+        .collect()
+}
+
+/// 孤儿判定：父进程已死，或父进程不是 xperf 工具（xperformance/xperf-gui）。
+/// GUI/CLI 非正常死亡时其 adb exec-out 子进程被 reparent 给 init——父进程不是
+/// xperf 即说明没有存活宿主在消费这条流。
+fn is_orphan_stream(ppid: u32, ps: &std::collections::HashMap<u32, String>) -> bool {
+    match ps.get(&ppid) {
+        None => true,
+        Some(args) => {
+            let exe = args.split_whitespace().next().unwrap_or("");
+            let base = exe.rsplit('/').next().unwrap_or(exe);
+            !base.starts_with("xperf")
+        }
+    }
+}
+
+/// 清理孤儿采样残留（spawn_agent 前调用；`serial` 语义同 [`spawn_agent`]）。
+///
+/// 背景（2026-09-07 实测）：GUI/CLI 进程非正常死亡时，其 spawn 的 `adb exec-out`
+/// 进程不随亡（孤儿化挂到 init），设备端 agent 因写通路仍在而永不退出——SS2MAX
+/// 上曾实测 7 组残留持续采样 4 天。
+///
+/// 两步：
+/// 1. host 侧：父进程已非存活 xperf 工具的采样流即孤儿，一律杀死（不问 serial——
+///    反正已无人消费）；设备端 agent 随即走 EPIPE 自退（带退出钩子，QNX 停链）。
+///    杀过孤儿则等 2s 让钩子落地。
+/// 2. 设备侧兜底：目标设备已无任何存活 host 流（含无 `-s` 的模糊流）时，残留
+///    xperf-agent 皆为泄漏（如 host adb 先死、agent 卡在写阻塞未触发 EPIPE 的
+///    变体），`pkill` 之。有存活流（同设备另一会话采样中）则不动——无法区分
+///    对方 agent 与泄漏 agent，留给对方的退出钩子/停滞看门狗收。
+pub fn cleanup_orphan_agents(serial: Option<&str>) {
+    let eff = crate::utils::resolve_serial(serial);
+    let Ok(out) = Command::new("ps").args(["-eo", "pid=,ppid=,args="]).output() else { return };
+    let ps_out = String::from_utf8_lossy(&out.stdout);
+    let ps_map = parse_ps_map(&ps_out);
+    let streams = parse_host_streams(&ps_out);
+    let mut killed = false;
+    for s in &streams {
+        if is_orphan_stream(s.ppid, &ps_map) {
+            let _ = Command::new("kill").args(["-9", &s.pid.to_string()]).status();
+            killed = true;
+        }
+    }
+    if killed {
+        // 设备端 agent EPIPE 自退 + 退出钩子落地（钩子自身含 ~200ms 等待）
+        std::thread::sleep(std::time::Duration::from_secs(2));
+    }
+    let has_live = streams
+        .iter()
+        .any(|s| !is_orphan_stream(s.ppid, &ps_map) && (s.serial.is_none() || s.serial == eff));
+    if has_live {
+        return;
+    }
+    // `[n]` 正则技巧：防 pkill 命令载体 shell 的命令行（字面含 xperf-age[n]t）自匹配
+    let _ = crate::utils::run_adb_command_for(serial, &["shell", "pkill -f 'xperf-age[n]t'"]);
 }
 
 /// 目标设备是否在线（重连轮询用）。已指定目标设备时只认该设备
@@ -709,5 +829,33 @@ mod tests {
             }
             _ => panic!("应为 Mem 事件"),
         }
+    }
+
+    /// ps 输出解析 + 孤儿判定（2026-09-07 孤儿 exec-out 泄漏修复）
+    #[test]
+    fn test_parse_host_streams_and_orphan() {
+        let ps = "  1000  1     /opt/xperf-gui\n\
+                     281010  1000 adb -s d1f39648c1f exec-out setsid /data/local/tmp/xperf-agent --package com.x --interval 500 --cpu\n\
+                     3247599  1    adb -s 6eb792dfb0f shell setsid /data/local/tmp/xperf-agent --package com.x --gpu\n\
+                     3348449  9999 adb shell setsid /data/local/tmp/xperf-agent --package com.x\n\
+                     9999  1     bash\n\
+                     555  1     adb -s d1f39648c1f shell top\n\
+                     556  1     adbd\n";
+        let streams = parse_host_streams(ps);
+        assert_eq!(
+            streams,
+            vec![
+                HostStream { pid: 281010, ppid: 1000, serial: Some("d1f39648c1f".into()) },
+                HostStream { pid: 3247599, ppid: 1, serial: Some("6eb792dfb0f".into()) },
+                HostStream { pid: 3348449, ppid: 9999, serial: None },
+            ]
+        );
+        let map = parse_ps_map(ps);
+        // 父进程是存活 xperf-gui → 非孤儿（同设备并行会话，不可动）
+        assert!(!is_orphan_stream(1000, &map));
+        // 父进程 pid 1（init）→ 宿主已死 → 孤儿
+        assert!(is_orphan_stream(1, &map));
+        // 父进程是 bash（非 xperf）→ 孤儿
+        assert!(is_orphan_stream(9999, &map));
     }
 }
