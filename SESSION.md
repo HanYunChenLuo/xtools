@@ -7,6 +7,35 @@
 
 ---
 
+## 2026-09-07（日）— E 类修复：SS2MAX gpubusy 窗口语义 + 两项新发现
+
+**任务线**：WORKSPACE E 节 SS2MAX 相关遗留修复（gpubusy 恒 0 0 / busy%>100% 不可信 + GPU 显存无数据源复核）。
+
+### Commits
+
+| commit | 内容 |
+|--------|------|
+| b72ef36 | fix(agent)：SS2MAX kgsl gpubusy 窗口语义自适应。根因：该厂商内核 gpubusy **非累计计数器**，读数为上一 ~1s 窗口的 busy/total µs（total 恒 ≈1e6——开机 4 天 16h 读数仍 ≈1e6 确证；与内核 `gpu_busy_percentage` 同刻值 74.8% vs 75% 互证）。累计差值解析在窗口边界产生 busy 暴增/total 回退 → 1662% 荒谬值。`GpuBusyCalc`（kgsl.rs）三判据命中即永久锁定窗口语义：①total < 60e6 µs 幅值（累计=开机至今 µs，开机 >60s 必超）②计数器回退（total 降或 busy 降）③差值占比 >100%；窗口语义直读 busy/total、读数全等=窗口未刷新不出数、空闲 "0 0" 不出数；累计语义零变化。单测 24→27（真机序列/累计序列/异常锁定三组） |
+
+### 完成内容
+
+- **SS2MAX gpubusy 修复（E 节转正）**：真机验证修复后 busy 68-80% 有界，同窗对照 `gpu_busy_percentage` 均值 75.5 vs 74.7 一致；空闲态（force-stop 被测应用）~22.05% 与直读窗口值 22.09% 一致（系统合成器基线）；mhz 随负载 427/500/585 正常跳变。原 09-03 "恒 0 0" 真相：GPU 空闲时窗口语义读数即 "0 0"，非计数器停走
+- **SS2MAX GPU 显存无数据源复核（维持平台限制结论）**：root 下全路径——dumpsys gpu 无 Memory snapshot 段；/sys/kernel/debug 整个不存在（内核未编译 debugfs，mount 失败）；/proc/kgsl 不存在；kgsl sysfs 仅 usesgmem（开关非计量）
+- **验证门槛**：workspace 104 全绿（agent 27 + core 65+2ignored + xperformance 5 + GUI 5 + xrm 2），clippy 零警告，cargo doc + rustdoc missing_docs 零 warning
+
+### 关键结论与新发现（已记 WORKSPACE E 节）
+
+- **QNX `gpu_per_process_busy` 进程链无停止手段（预存缺陷，本轮发现）**：三层清理只写 `gpubusystats` 停 frame 链；proc 链实测死写入者 toggle（500）/写 0/`gpu_set_log_level 0` **均无效**——每 --gpu 会话泄漏一条，多日累积 ~20 条锁步洪泛（同一 proc 行每窗重复 20+ 份），疑似挤占资源致 frame 链无法启动（我两轮直跑会话 0 frame 事件 + 3 次看门狗自愈无效）。**恢复手段 = `adb reboot`：实测整 SoC 复位含 QNX host**（重启后回开机基线：5000ms frame 链 + 低频 proc 行）。已 reboot 恢复 SS3 并验证一次完整会话（EPIPE 退出路径：38 gpu + 43 gpuproc 事件、1 次自愈、frame 链退出钩子正常停止）
+- **孤儿 adb exec-out 泄漏**：host 侧 7 个 9月04 起残留的 adb exec-out 孤儿进程（GUI/CLI 非正常死亡不带走）让设备端 7 个 agent 持续采样 4 天。杀 host adb → 设备端 agent EPIPE 自退（设计路径有效）。教训：**手动直跑 agent 验证勿用 `timeout`（SIGTERM 不触发退出钩子泄链），须杀 host 侧 adb 走 EPIPE**
+- **终端复制伪影本轮依旧极重**（reboot 命令输出重复 100+ 行）——判据全走文件中转 + 逐条单跑确认
+
+### 遗留问题
+
+- QNX proc 链停链命令待挖掘（找到后补 agent 退出钩子 + host qnx_stop_stats）；在此之前 SS3 上 --gpu 会话每跑一次泄一条 proc 链，密度累积影响 gpuproc 去重外的 wire 冗余，必要时 adb reboot 清
+- 孤儿 adb exec-out：缓解思路（agent 最大空闲看门狗 / host 启动 pgrep 清理）待决策
+
+---
+
 ## 2026-09-04（四）晚 — GUI 多设备改版（设备 tab 并行）+ 应用操作/冷启动
 
 **任务线**：用户需求——「根据 devices 增加页面，实现完整的性能调试功能」（每设备独立 tab：性能分析 / Perfetto / Simpleperf）+「支持打开指定包名应用、重启应用，顺带监控冷启动性能」。
