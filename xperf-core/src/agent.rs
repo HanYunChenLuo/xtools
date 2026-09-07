@@ -9,7 +9,7 @@ use anyhow::Result;
 use serde::Deserialize;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::Command;
 
 const DEVICE_AGENT_PATH: &str = "/data/local/tmp/xperf-agent";
 
@@ -67,6 +67,9 @@ pub enum AgentEvent {
         /// 每核最大频率（KHz）
         #[serde(default)]
         maxkhz: Vec<u64>,
+        /// 协议版本（host 校验：不符则 suicide + 重推二进制）
+        #[serde(default)]
+        version: u32,
     },
     /// ts: 墙钟毫秒；cpu: 单核口径 %；th: [tid, 线程名, cpu%]（仅 >0.05% 的线程）
     Cpu {
@@ -217,22 +220,27 @@ pub enum AgentEvent {
     },
 }
 
-/// 与设备端 agent 的 shell 长连接流（阻塞逐行读 NDJSON 事件）
+/// 与 agent 的协议版本：与 xperf-agent 的 PROTOCOL_VERSION 同步 bump（改 wire 协议/命令时）。
+/// host 连接时校验 hello 的 version，不一致则通知 suicide + 强杀重推。
+pub const AGENT_PROTOCOL_VERSION: u32 = 2;
+
+/// daemon 的抽象 socket 名（设备端 `localabstract:xperf-agent`）
+const AGENT_ABSTRACT_SOCK: &str = "xperf-agent";
+
+/// 与设备端 daemon 的会话流（`adb forward` + TCP 到 localabstract:xperf-agent）。
 ///
-/// 传输选择（2026-09-07 实测定）：`adb shell` 而非 `exec-out`——exec-out 的 stdin
-/// 既不传数据也不传 EOF（实测 cat 挂死），而 liveness 依赖 stdin：宿主死亡（含孤儿
-/// adb 残留）→ adb stdin EOF → adbd 关闭设备端 stdin → agent 监测线程带钩子退出。
-/// shell 传输字节完整（NDJSON 全量 JSON 校验通过），`_stdin` 句柄必须持有保活。
+/// 架构（2026-09-07 daemon 化改版）：agent 常驻设备做 socket 服务，host 每会话一条
+/// TCP 连接（连接即收 hello；`start` 开采样 / `stop` / `ping` / `suicide`）。
+/// host 死亡 → TCP 断开 → daemon 侧会话即收；0 会话持续 60s daemon 自杀。
+/// `writer` 同时供 ping 线程保活（每 5s 一次；agent 30s 无数据断开连接）。
 pub struct AgentStream {
-    child: Child,
-    /// agent stdin 管道：持有即声明宿主存活（drop/宿主死亡 → EOF → agent 退出）。
-    /// 从不写入数据，纯 liveness 信号。
-    _stdin: std::process::ChildStdin,
-    reader: BufReader<std::process::ChildStdout>,
+    writer: std::sync::Arc<std::sync::Mutex<std::net::TcpStream>>,
+    reader: BufReader<std::net::TcpStream>,
+    ping_stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl AgentStream {
-    /// 阻塞读取下一行事件；流结束（agent 退出/断开）返回 Ok(None)。
+    /// 阻塞读取下一行事件；流结束（会话断开/daemon 退出）返回 Ok(None)。
     /// 解析失败的行跳过（返回 Some(Err) 由调用方决定）。
     pub fn next_event(&mut self) -> Result<Option<std::result::Result<AgentEvent, String>>> {
         let mut line = String::new();
@@ -249,10 +257,12 @@ impl AgentStream {
         ))
     }
 
-    /// 杀掉设备端 agent 连接（kill adb 子进程并收尸；agent 侧因 stdout 写失败自行退出）
+    /// 结束会话（停 ping + 断开 TCP；daemon 侧会话线程随连接断开收尾，daemon 本体常驻）
     pub fn kill(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        self.ping_stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        if let Ok(w) = self.writer.lock() {
+            let _ = w.shutdown(std::net::Shutdown::Both);
+        }
     }
 }
 
@@ -427,7 +437,7 @@ pub fn deploy_agent(local: &Path, serial: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-/// 启动设备端采样器，返回事件流。Ctrl-C/断连时 agent 因 stdout 写失败自行退出。
+/// 启动采样会话：确保 daemon 在跑（版本不符重推重启）→ 连接 → 下发 start，返回事件流。
 /// platform: 平台提示（如 "ss3"），传入时 agent 跳过对应探测
 /// `serial`：目标设备（多设备并行会话用，`None` 回退全局选择）。
 pub fn spawn_agent(
@@ -437,144 +447,193 @@ pub fn spawn_agent(
     platform: Option<&dyn Platform>,
     serial: Option<&str>,
 ) -> Result<AgentStream> {
-    cleanup_orphan_agents(serial);
-    // setsid：agent 脱离 adb 会话——adbd 断连清理时不再被信号直杀，而是走 stdout
-    // 写失败（EPIPE）/ stdin EOF 路径：心跳/退出钩子得以执行（QNX 链清理等），随后自行退出。
-    // 真机验证：无 setsid 时 timeout 杀 adb 后 QNX 统计链残留；加 setsid 后钩子生效。
-    // 传输用 shell 而非 exec-out（exec-out 不传播 stdin EOF，liveness 失效，见 AgentStream 文档）；
-    // stdin 置 piped 由 AgentStream 持有——宿主死亡即 EOF，agent 侧监测线程据此退出。
-    let mut cmd_args = vec!["shell".to_string(), "setsid".to_string(), DEVICE_AGENT_PATH.to_string()];
+    use std::io::Write as _;
+    let port = ensure_daemon(serial)?;
+    let tcp = std::net::TcpStream::connect(("127.0.0.1", port))?;
+    let _ = tcp.set_nodelay(true);
+    let writer = std::sync::Arc::new(std::sync::Mutex::new(tcp.try_clone()?));
+    let reader = BufReader::new(tcp);
+    // start 命令复用 agent argv 语法（daemon 端 parse_args 同款校验）
+    let mut cmd = String::from("start");
     if let Some(pkg) = package {
-        cmd_args.extend(["--package".to_string(), pkg.to_string()]);
+        cmd.push_str(&format!(" --package {}", pkg));
     }
-    cmd_args.extend(["--interval".to_string(), interval_ms.to_string()]);
-    cmd_args.extend(flags.to_agent_args());
+    cmd.push_str(&format!(" --interval {}", interval_ms));
+    for a in flags.to_agent_args() {
+        cmd.push(' ');
+        cmd.push_str(&a);
+    }
     // 平台参数：让 agent 跳过运行时探测，直接用平台指定路径
     if let Some(p) = platform {
-        cmd_args.extend(["--platform".to_string(), p.id().as_str().to_string()]);
+        cmd.push_str(&format!(" --platform {}", p.id().as_str()));
         if let Some(qnx) = p.qnx_host() {
-            cmd_args.extend(["--qnx-host".to_string(), qnx.to_string()]);
+            cmd.push_str(&format!(" --qnx-host {}", qnx));
         }
     }
-    let mut child = crate::utils::adb_for(serial)
-        .args(&cmd_args)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()?;
-    let stdin = child.stdin.take().expect("stdin piped");
-    let stdout = child.stdout.take().expect("stdout piped");
-    Ok(AgentStream {
-        child,
-        _stdin: stdin,
-        reader: BufReader::new(stdout),
-    })
-}
-
-/// host 侧一条 agent 采样流（`adb [-s serial] shell|exec-out setsid .../xperf-agent ...` 进程）
-#[derive(Debug, PartialEq, Eq)]
-struct HostStream {
-    /// 进程 PID
-    pid: u32,
-    /// 父进程 PID（孤儿判定用）
-    ppid: u32,
-    /// `-s` 指定的设备 serial（无 `-s` 为 None，即 adb 默认设备）
-    serial: Option<String>,
-}
-
-/// 从 `ps -eo pid=,ppid=,args=` 输出筛出 agent 采样流
-/// （传输为 shell 或 exec-out——exec-out 是旧版残留，清理两类都要覆盖）。
-fn parse_host_streams(ps_out: &str) -> Vec<HostStream> {
-    let mut out = Vec::new();
-    for line in ps_out.lines() {
-        let tok: Vec<&str> = line.split_whitespace().collect();
-        if tok.len() < 4 {
-            continue;
-        }
-        let (Ok(pid), Ok(ppid)) = (tok[0].parse::<u32>(), tok[1].parse::<u32>()) else { continue };
-        let args = &tok[2..];
-        // 程序名为 adb（可为全路径，排除 adbd）；命令行含 shell/exec-out 与设备端 agent 路径
-        if !args[0].ends_with("/adb") && args[0] != "adb" {
-            continue;
-        }
-        if !args.contains(&"shell") && !args.contains(&"exec-out") {
-            continue;
-        }
-        if !args.contains(&DEVICE_AGENT_PATH) {
-            continue;
-        }
-        let serial = args.iter().position(|&t| t == "-s").and_then(|i| args.get(i + 1)).map(|s| s.to_string());
-        out.push(HostStream { pid, ppid, serial });
+    writeln!(writer.lock().unwrap(), "{}", cmd)?;
+    writer.lock().unwrap().flush()?;
+    // 心跳保活：5s 一次（agent 30s 无数据断开连接）
+    let ping_stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    {
+        let (w, stop) = (writer.clone(), ping_stop.clone());
+        std::thread::spawn(move || loop {
+            std::thread::sleep(std::time::Duration::from_secs(5));
+            if stop.load(std::sync::atomic::Ordering::Relaxed) {
+                break;
+            }
+            let mut g = match w.lock() {
+                Ok(g) => g,
+                Err(_) => break,
+            };
+            if writeln!(g, "ping").and_then(|_| g.flush()).is_err() {
+                break;
+            }
+        });
     }
-    out
+    Ok(AgentStream { writer, reader, ping_stop })
 }
 
-/// ps 快照：pid → 命令行（含自身，孤儿判定用）
-fn parse_ps_map(ps_out: &str) -> std::collections::HashMap<u32, String> {
-    ps_out
-        .lines()
-        .filter_map(|l| {
-            let mut tok = l.split_whitespace();
-            let pid = tok.next()?.parse::<u32>().ok()?;
-            tok.next()?; // ppid
-            Some((pid, tok.collect::<Vec<_>>().join(" ")))
-        })
-        .collect()
-}
-
-/// 孤儿判定：父进程已死，或父进程不是 xperf 工具（xperformance/xperf-gui）。
-/// GUI/CLI 非正常死亡时其 adb exec-out 子进程被 reparent 给 init——父进程不是
-/// xperf 即说明没有存活宿主在消费这条流。
-fn is_orphan_stream(ppid: u32, ps: &std::collections::HashMap<u32, String>) -> bool {
-    match ps.get(&ppid) {
-        None => true,
-        Some(args) => {
-            let exe = args.split_whitespace().next().unwrap_or("");
-            let base = exe.rsplit('/').next().unwrap_or(exe);
-            !base.starts_with("xperf")
-        }
-    }
-}
-
-/// 清理孤儿采样残留（spawn_agent 前调用；`serial` 语义同 [`spawn_agent`]）。
+/// 确保设备端 daemon 在跑且协议版本匹配，返回 host 侧转发端口。
 ///
-/// 背景（2026-09-07 实测）：GUI/CLI 进程非正常死亡时，其 spawn 的 `adb exec-out`
-/// 进程不随亡（孤儿化挂到 init），设备端 agent 因写通路仍在而永不退出——SS2MAX
-/// 上曾实测 7 组残留持续采样 4 天。
+/// - 无 daemon：强杀残留（老版 stdout agent/泄漏 daemon）→ 强制重推 → 启动 → 探活
+/// - 版本不符：经 probe 连接发 `suicide` 通知 + `pkill` 强杀兜底 → 强制重推 → 重启
 ///
-/// 两步：
-/// 1. host 侧：父进程已非存活 xperf 工具的采样流即孤儿，一律杀死（不问 serial——
-///    反正已无人消费）；设备端 agent 随即走 EPIPE 自退（带退出钩子，QNX 停链）。
-///    杀过孤儿则等 2s 让钩子落地。
-/// 2. 设备侧兜底：目标设备已无任何存活 host 流（含无 `-s` 的模糊流）时，残留
-///    xperf-agent 皆为泄漏（如 host adb 先死、agent 卡在写阻塞未触发 EPIPE 的
-///    变体），`pkill` 之。有存活流（同设备另一会话采样中）则不动——无法区分
-///    对方 agent 与泄漏 agent，留给对方的退出钩子/停滞看门狗收。
-pub fn cleanup_orphan_agents(serial: Option<&str>) {
-    let eff = crate::utils::resolve_serial(serial);
-    let Ok(out) = Command::new("ps").args(["-eo", "pid=,ppid=,args="]).output() else { return };
-    let ps_out = String::from_utf8_lossy(&out.stdout);
-    let ps_map = parse_ps_map(&ps_out);
-    let streams = parse_host_streams(&ps_out);
-    let mut killed = false;
-    for s in &streams {
-        if is_orphan_stream(s.ppid, &ps_map) {
-            let _ = Command::new("kill").args(["-9", &s.pid.to_string()]).status();
-            killed = true;
+/// 强制重推（绕过 size/mtime 快检）：同秒重建的同尺寸二进制会被快检误判「已是最新」
+/// （2026-09-07 实测：v99/v2 两构建同秒落地同尺寸，快检跳推导致版本协商死循环）。
+/// `serial`：目标设备（多设备并行会话用，`None` 回退全局选择）。
+fn ensure_daemon(serial: Option<&str>) -> Result<u16> {
+    let mut last_err = String::new();
+    for _ in 0..2 {
+        let port = ensure_forward(serial)?;
+        match probe_daemon(port) {
+            Ok(v) if v == AGENT_PROTOCOL_VERSION => return Ok(port),
+            Ok(old) => {
+                eprintln!("agent 协议版本不符（设备 v{} vs 宿主 v{}），通知 suicide 并重推", old, AGENT_PROTOCOL_VERSION);
+                if let Ok(mut t) = std::net::TcpStream::connect(("127.0.0.1", port)) {
+                    use std::io::Write as _;
+                    let _ = writeln!(t, "suicide");
+                    let _ = t.flush();
+                }
+                std::thread::sleep(std::time::Duration::from_millis(500));
+                kill_device_agent(serial);
+                deploy_fresh(serial)?;
+                start_daemon(serial)?;
+                if let Err(e) = wait_probe(port) {
+                    last_err = e.to_string();
+                    continue;
+                }
+            }
+            Err(e) => {
+                last_err = e.to_string();
+                kill_device_agent(serial); // 残留一律清（老版 stdout agent 不监听 socket）
+                deploy_fresh(serial)?;
+                start_daemon(serial)?;
+                if let Err(e) = wait_probe(port) {
+                    last_err = e.to_string();
+                    continue;
+                }
+            }
         }
     }
-    if killed {
-        // 设备端 agent EPIPE 自退 + 退出钩子落地（钩子自身含 ~200ms 等待）
-        std::thread::sleep(std::time::Duration::from_secs(2));
-    }
-    let has_live = streams
-        .iter()
-        .any(|s| !is_orphan_stream(s.ppid, &ps_map) && (s.serial.is_none() || s.serial == eff));
-    if has_live {
-        return;
-    }
-    // `[n]` 正则技巧：防 pkill 命令载体 shell 的命令行（字面含 xperf-age[n]t）自匹配
+    anyhow::bail!("xperf-agent daemon 启动失败：{}", last_err)
+}
+
+/// 部署（强制重推）并启动 daemon（探活失败/版本不符路径共用）
+fn deploy_fresh(serial: Option<&str>) -> Result<()> {
+    let bin = ensure_agent_built()?;
+    push_agent_binary(&bin, serial)
+}
+
+/// 无条件 push agent 二进制（ensure_daemon 的重推路径用；deploy_agent 的快检供
+/// CLI/GUI 启动预热用——那之后 ensure_daemon 仍可能因版本/探活触发强制重推）
+fn push_agent_binary(local: &Path, serial: Option<&str>) -> Result<()> {
+    try_adb_root(serial);
+    let local_mtime = std::fs::metadata(local)?
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    crate::utils::run_adb_command_for(serial, &["push", &local.to_string_lossy(), DEVICE_AGENT_PATH])?;
+    // push 后同步 mtime 对齐本地，使后续 deploy_agent 的 mtime 匹配判断生效
+    let _ = crate::utils::run_adb_command_for(serial, &["shell", &format!("touch -d @{} {}", local_mtime, DEVICE_AGENT_PATH)]);
+    crate::utils::run_adb_command_for(serial, &["shell", "chmod", "755", DEVICE_AGENT_PATH])?;
+    Ok(())
+}
+
+/// 强杀设备端全部 xperf-agent（`[n]` 防载体 shell 自匹配）
+fn kill_device_agent(serial: Option<&str>) {
     let _ = crate::utils::run_adb_command_for(serial, &["shell", "pkill -f 'xperf-age[n]t'"]);
+}
+
+/// 启动 daemon：setsid 脱离 adb 会话 + nohup + stdio 全重定向（host 断开不影响存活）。
+/// 启动日志在设备端 /data/local/tmp/xperf-agent.log（排查 daemon 启动失败用）。
+fn start_daemon(serial: Option<&str>) -> Result<()> {
+    crate::utils::run_adb_command_for(
+        serial,
+        &["shell", &format!("setsid nohup {} --daemon >/data/local/tmp/xperf-agent.log 2>&1 < /dev/null &", DEVICE_AGENT_PATH)],
+    )?;
+    Ok(())
+}
+
+/// 等 daemon 监听就绪：daemon 进程 spawn + bind 需要数百 ms，探活重试 8×400ms。
+fn wait_probe(port: u16) -> Result<u32> {
+    let mut last_err = String::new();
+    for _ in 0..8 {
+        match probe_daemon(port) {
+            Ok(v) => return Ok(v),
+            Err(e) => {
+                last_err = e.to_string();
+                std::thread::sleep(std::time::Duration::from_millis(400));
+            }
+        }
+    }
+    anyhow::bail!("探活超时：{}", last_err)
+}
+
+/// 探活 daemon：TCP 连转发端口，读 hello 行解析协议版本（3s 超时）。
+/// Err = 无 daemon/连接失败/格式非法（调用方走部署重启路径）。
+fn probe_daemon(port: u16) -> Result<u32> {
+    use std::io::BufRead;
+    let addr: std::net::SocketAddr = ([127, 0, 0, 1], port).into();
+    let tcp = std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(1500))?;
+    tcp.set_read_timeout(Some(std::time::Duration::from_secs(3)))?;
+    let mut line = String::new();
+    BufReader::new(tcp).read_line(&mut line)?;
+    let ev: AgentEvent = serde_json::from_str(line.trim())?;
+    match ev {
+        AgentEvent::Hello { version, .. } => Ok(version),
+        _ => anyhow::bail!("首行非 hello: {}", line.trim()),
+    }
+}
+
+/// 确保 host→设备的 adb forward 规则存在，返回 host 侧端口。
+/// 先查 `adb forward --list` 复用既有规则（规则随 adb server 常驻，跨会话复用），
+/// 没有则 `forward tcp:0` 新建（端口由 adb 分配）。
+/// `serial`：目标设备（多设备并行会话用，`None` 回退全局选择）。
+fn ensure_forward(serial: Option<&str>) -> Result<u16> {
+    let eff = crate::utils::resolve_serial(serial);
+    let target = format!("localabstract:{}", AGENT_ABSTRACT_SOCK);
+    if let Ok(out) = crate::utils::adb_for(None).args(["forward", "--list"]).output() {
+        let list = String::from_utf8_lossy(&out.stdout);
+        for line in list.lines() {
+            let tok: Vec<&str> = line.split_whitespace().collect();
+            // 行格式："<serial> tcp:<port> localabstract:<sock>"
+            if tok.len() == 3 && tok[2] == target && eff.as_deref().is_none_or(|e| e == tok[0]) {
+                if let Some(p) = tok[1].strip_prefix("tcp:").and_then(|p| p.parse::<u16>().ok()) {
+                    return Ok(p);
+                }
+            }
+        }
+    }
+    let out = crate::utils::adb_for(serial)
+        .args(["forward", "tcp:0", &target])
+        .output()?;
+    let s = String::from_utf8_lossy(&out.stdout);
+    s.trim()
+        .trim_start_matches("tcp:")
+        .parse::<u16>()
+        .map_err(|e| anyhow::anyhow!("adb forward 返回非法端口: {:?} ({})", s.trim(), e))
 }
 
 /// 目标设备是否在线（重连轮询用）。已指定目标设备时只认该设备
@@ -702,7 +761,7 @@ mod tests {
         let ev: AgentEvent =
             serde_json::from_str(r#"{"t":"hello","ncores":8,"maxkhz":[2841600,2841600],"version":1}"#).unwrap();
         match ev {
-            AgentEvent::Hello { ncores, maxkhz } => assert_eq!((ncores, maxkhz), (8, vec![2841600, 2841600])),
+            AgentEvent::Hello { ncores, maxkhz, .. } => assert_eq!((ncores, maxkhz), (8, vec![2841600, 2841600])),
             _ => panic!("应为 Hello 事件"),
         }
     }
@@ -831,31 +890,22 @@ mod tests {
         }
     }
 
-    /// ps 输出解析 + 孤儿判定（2026-09-07 孤儿 exec-out 泄漏修复）
+    /// hello 版本字段解析（daemon 探活的路径依赖：probe_daemon 据此判版本）
     #[test]
-    fn test_parse_host_streams_and_orphan() {
-        let ps = "  1000  1     /opt/xperf-gui\n\
-                     281010  1000 adb -s d1f39648c1f exec-out setsid /data/local/tmp/xperf-agent --package com.x --interval 500 --cpu\n\
-                     3247599  1    adb -s 6eb792dfb0f shell setsid /data/local/tmp/xperf-agent --package com.x --gpu\n\
-                     3348449  9999 adb shell setsid /data/local/tmp/xperf-agent --package com.x\n\
-                     9999  1     bash\n\
-                     555  1     adb -s d1f39648c1f shell top\n\
-                     556  1     adbd\n";
-        let streams = parse_host_streams(ps);
-        assert_eq!(
-            streams,
-            vec![
-                HostStream { pid: 281010, ppid: 1000, serial: Some("d1f39648c1f".into()) },
-                HostStream { pid: 3247599, ppid: 1, serial: Some("6eb792dfb0f".into()) },
-                HostStream { pid: 3348449, ppid: 9999, serial: None },
-            ]
-        );
-        let map = parse_ps_map(ps);
-        // 父进程是存活 xperf-gui → 非孤儿（同设备并行会话，不可动）
-        assert!(!is_orphan_stream(1000, &map));
-        // 父进程 pid 1（init）→ 宿主已死 → 孤儿
-        assert!(is_orphan_stream(1, &map));
-        // 父进程是 bash（非 xperf）→ 孤儿
-        assert!(is_orphan_stream(9999, &map));
+    fn test_hello_version() {
+        let ev: AgentEvent = serde_json::from_str(r#"{"t":"hello","ncores":8,"maxkhz":[1785600],"version":2}"#).unwrap();
+        match ev {
+            AgentEvent::Hello { ncores, maxkhz, version } => {
+                assert_eq!((ncores, version), (8, 2));
+                assert_eq!(maxkhz, vec![1785600]);
+            }
+            _ => panic!("应为 Hello 事件"),
+        }
+        // 旧版 agent（无 version 字段）兼容解析为 0
+        let ev: AgentEvent = serde_json::from_str(r#"{"t":"hello","ncores":8}"#).unwrap();
+        match ev {
+            AgentEvent::Hello { version, .. } => assert_eq!(version, 0),
+            _ => panic!("应为 Hello 事件"),
+        }
     }
 }

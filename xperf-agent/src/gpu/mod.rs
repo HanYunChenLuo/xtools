@@ -91,23 +91,34 @@ enum GpuEvent {
 /// 公共读线程骨架：逐行读子进程 stdout → parse → 发 gpu/gpuproc 事件。
 /// keepalive：QNX telnet 的 stdin 须移交线程持有保活（drop 即 EOF，telnet 会退出）。
 /// eof_err：流断开时的 err 文案（None 则静默退出）。
-/// agent 退出时管道断开，子进程随会话结束自行清理。
+/// io/stop：daemon 会话的输出通道（TLS 挂接）与停止标志（会话结束线程即收）；
+/// stdout 模式 io=None（直写 stdout）/ stop 永不置位。
+#[allow(clippy::too_many_arguments)]
 fn spawn_stream_parser(
     child: std::process::Child,
     reader: std::io::BufReader<std::process::ChildStdout>,
     keepalive: Option<Arc<Mutex<std::process::ChildStdin>>>,
     eof_err: Option<&'static str>,
     pid_names: &Arc<Mutex<HashMap<String, u32>>>,
+    io: Option<crate::SessionIo>,
+    stop: Arc<std::sync::atomic::AtomicBool>,
     parse: impl Fn(&str) -> Option<GpuEvent> + Send + 'static,
 ) {
     let pid_names = pid_names.clone();
     std::thread::spawn(move || {
         use std::io::BufRead;
+        if let Some(io) = io {
+            crate::set_session_io(io);
+        }
         let _keepalive = keepalive;
         let mut child = child;
         let mut reader = reader;
         let mut line = String::new();
         loop {
+            if stop.load(std::sync::atomic::Ordering::Relaxed) {
+                let _ = child.kill();
+                return;
+            }
             line.clear();
             match reader.read_line(&mut line) {
                 Ok(0) | Err(_) => {
@@ -167,11 +178,18 @@ fn lookup_pid(pid_names: &HashMap<String, u32>, name: &str) -> Option<u32> {
 }
 
 /// 启动流式通道读线程（QNX/TopGpu/Ligfx）；kgsl/DumpMem 由主循环按节拍轮询。
-pub(crate) fn start_stream_channels(gpu_path: &GpuPath, interval_ms: u64, pid_names: &Arc<Mutex<HashMap<String, u32>>>) {
+/// io/stop 见 spawn_stream_parser；会话结束时 stop 置位，读线程/看门狗随收。
+pub(crate) fn start_stream_channels(
+    gpu_path: &GpuPath,
+    interval_ms: u64,
+    pid_names: &Arc<Mutex<HashMap<String, u32>>>,
+    io: Option<crate::SessionIo>,
+    stop: Arc<std::sync::atomic::AtomicBool>,
+) {
     match gpu_path {
-        GpuPath::Qnx => qnx::start(interval_ms, pid_names),
-        GpuPath::TopGpu => topgpu::start(interval_ms, pid_names),
-        GpuPath::Ligfx => ligfx::start(pid_names),
+        GpuPath::Qnx => qnx::start(interval_ms, pid_names, io, stop),
+        GpuPath::TopGpu => topgpu::start(interval_ms, pid_names, io, stop),
+        GpuPath::Ligfx => ligfx::start(pid_names, io, stop),
         GpuPath::Kgsl(_) | GpuPath::DumpMem => {}
     }
 }

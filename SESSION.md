@@ -6,6 +6,33 @@
 > 新会话开始时可先读本文件了解近期上下文。
 
 ---
+
+## 2026-09-07（日）晚 — agent daemon 化（socket 服务 + 多 host + 版本握手）
+
+**任务线**：用户拍板重设计——「不要一条命令杀死一次 agent」：agent 常驻 daemon、心跳/无连接超时自杀、host 每会话连接（版本不符自杀/强杀重推，一致直连）、多 host 上限 10。
+
+### Commits
+
+| commit | 内容 |
+|--------|------|
+| （本轮） | feat(agent,core)：daemon 化。agent `--daemon` 监听 `localabstract:xperf-agent`（连接即 hello 含 version；命令 `start <argv 同款参数>`（复用 parse_args 零新依赖）/`stop`/`ping`/`suicide`；会话上限 10；0 会话 60s 自杀；会话=独立节拍线程 + TLS emitter（子模块 emit 零改动）；QNX/topgpu/ligfx 流式 GPU 通道全局独占（GPU_STREAM_BUSY，被占用发 err）+ teardown 槽（持有会话结束或进程退出执行一次，先停链后放读线程杀 telnet——顺序确定）。core：AgentStream 改 forward+TCP（reader 阻塞读 + ping 线程 5s）；`ensure_daemon` 全权管生命周期（forward 复用/probe 版本/suicide+pkill/强制重推/启动/探活）；`AgentEvent::Hello` 加 version；删 cleanup_orphan_agents（daemon 化根治孤儿泄漏，e692d4e 过渡方案移除） |
+
+### 完成内容与真机验证
+
+- **SS2MAX**：daemon 常驻跨会话复用（pid 不变）+ 第二次会话秒连；kill -9 宿主 → 会话即收零泄漏；**双 CLI 并行**（cpu 18 事件 + memory 9 事件同 daemon）；**版本不符**（v99 daemon → CLI v2：suicide+pkill+强制重推+重启，md5 与日志双重确证）；**max 10**（11 连接实测：前 10 个 hello、第 11 个收「会话数已满（10）」err）；空载 60s 自杀（daemon 日志「空载 60s，daemon 退出」）
+- **SS3 QNX**：会话结束 frame 链即停（teardown 确定性）+ 次会话 0 自愈即起流（17 gpu 事件）；proc 链泄漏依旧（E 节已知未修项）
+- **验证门槛**：105 测试全绿 + clippy 零警告 + cargo doc 零 warning
+
+### 关键结论（踩坑）
+
+- **同秒同尺寸重建会骗过 deploy_agent 的 size+mtime 快检**（v99/v2 测试时两构建同秒落地同尺寸，快检跳推 → 版本协商死循环）——daemon 重推路径改为**强制 push**（800KB ~6ms，不省这个）
+- **`pkill -f` 与启动命令同 shell 会自杀**：组合命令文本里含 "xperf-agent --daemon" 字面量，`pkill -f 'xperf-age[n]t'` 的正则能匹配（`[n]` 只防模式自身，防不了同行其它字面量）——pkill 与 start 必须分开两个 adb 调用
+- **会话结束 teardown 竞态**：stop 置位后 GPU 读线程杀 telnet vs 停链写 telnet 同资源竞争——拆两阶段 stop（会话 loop stop 先，GPU 读线程 gpu_stop 在 teardown 后）确定顺序
+- **抽象 socket std 支持**：`SocketAddrExt::from_abstract_name` 在 `os::android` 与 `os::linux` 下各有一份（std 同 API，cfg 分开引）
+- 连接上限计数按**连接**而非已开始会话（probe/idle 连接也占坑，瞬时可接受）
+
+---
+
 ## 2026-09-07（日）下午 — 孤儿 exec-out 三层防御 + agent 传输改版（exec-out → shell）
 
 **任务线**：用户拍板「两者都要」——agent 侧 liveness 看门狗 + host 侧孤儿清理，根治 E 节「孤儿 adb exec-out 泄漏」（GUI/CLI 非正常死亡 → adb 流孤儿化挂 init → 设备端 agent 永不退出，曾实测 7 组残留跑 4 天）。

@@ -40,7 +40,7 @@ fn map_event(
         }
     }
     match ev {
-        AgentEvent::Hello { ncores, maxkhz } => {
+        AgentEvent::Hello { ncores, maxkhz, .. } => {
             eprintln!("[sampling] agent 已启动（{} 核）", ncores);
             out.push(SampleEvent::AgentHello { ncores, maxkhz });
         }

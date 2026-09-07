@@ -59,11 +59,16 @@ fn parse_line(line: &str) -> Option<GpuEvent> {
     None
 }
 
-/// 启动通道（start_stream_channels 分发）
-pub(super) fn start(interval_ms: u64, pid_names: &Arc<Mutex<HashMap<String, u32>>>) {
+/// 启动通道（start_stream_channels 分发）。io/stop 见 spawn_stream_parser。
+pub(super) fn start(
+    interval_ms: u64,
+    pid_names: &Arc<Mutex<HashMap<String, u32>>>,
+    io: Option<crate::SessionIo>,
+    stop: Arc<std::sync::atomic::AtomicBool>,
+) {
     let period_s = (interval_ms / 1000).max(1);
     match spawn(period_s) {
-        Some((child, reader)) => spawn_stream_parser(child, reader, None, None, pid_names, parse_line),
+        Some((child, reader)) => spawn_stream_parser(child, reader, None, None, pid_names, io, stop, parse_line),
         None => emit("{\"t\":\"err\",\"msg\":\"topgpu 启动失败，--gpu 停止\"}"),
     }
 }

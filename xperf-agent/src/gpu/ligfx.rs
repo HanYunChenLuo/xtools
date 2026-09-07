@@ -71,10 +71,14 @@ fn parse_pct_after(line: &str, key: &str) -> Option<f32> {
     line[pos..].split('%').next()?.trim().parse().ok()
 }
 
-/// 启动通道（start_stream_channels 分发）
-pub(super) fn start(pid_names: &Arc<Mutex<HashMap<String, u32>>>) {
+/// 启动通道（start_stream_channels 分发）。io/stop 见 spawn_stream_parser。
+pub(super) fn start(
+    pid_names: &Arc<Mutex<HashMap<String, u32>>>,
+    io: Option<crate::SessionIo>,
+    stop: Arc<std::sync::atomic::AtomicBool>,
+) {
     match spawn() {
-        Some((child, reader)) => spawn_stream_parser(child, reader, None, None, pid_names, parse_line),
+        Some((child, reader)) => spawn_stream_parser(child, reader, None, None, pid_names, io, stop, parse_line),
         None => emit("{\"t\":\"err\",\"msg\":\"ligfxprofilerd logcat 启动失败，--gpu 停止\"}"),
     }
 }

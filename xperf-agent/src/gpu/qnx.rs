@@ -146,9 +146,16 @@ fn spawn_qnx_gpu(period_ms: u64) -> Option<(std::process::Child, std::process::C
     Some((child, stdin, reader))
 }
 
-/// 启动通道（start_stream_channels 分发）。
+/// 启动通道（start_stream_channels 分发）。io/stop 见 spawn_stream_parser——
+/// 会话结束 stop 置位，读线程与看门狗随收；停链 teardown 注册进 crate 的
+/// GPU_TEARDOWN 槽（持有会话结束或进程退出时执行一次）。
 /// kgsl 统计周期跟随采样间隔（clamp [100, 1000]ms：50ms 实测稳定，过短 busy% 窗口噪声大）。
-pub(super) fn start(interval_ms: u64, pid_names: &Arc<Mutex<HashMap<String, u32>>>) {
+pub(super) fn start(
+    interval_ms: u64,
+    pid_names: &Arc<Mutex<HashMap<String, u32>>>,
+    io: Option<crate::SessionIo>,
+    stop: Arc<std::sync::atomic::AtomicBool>,
+) {
     let period = interval_ms.clamp(100, 1000);
     match spawn_qnx_gpu(period) {
         Some((child, stdin, reader)) => {
@@ -189,17 +196,16 @@ pub(super) fn start(interval_ms: u64, pid_names: &Arc<Mutex<HashMap<String, u32>
                 Some(stdin.clone()),
                 Some("QNX GPU 流断开，--gpu 停止"),
                 pid_names,
+                io.clone(),
+                stop.clone(),
                 parse,
             );
-            // 退出清理：经 telnet 下发 echo>（死写入者）式 gpubusystats 停止全部统计链
-            // （fd3 活连接存在时同样有效，真机实测）。不停链则链泄漏到整机重启，且下一
-            // 会话 fd3 写入撞活链会停走、走 ~8s 看门狗自愈路径；停链后下一会话锁步即起。
-            // 多会话并发时跳过（会杀掉对方采样中的流，由对方看门狗自愈恢复）。
+            // 停链 teardown：经 telnet 下发 echo>（死写入者）式 gpubusystats 停止全部
+            // 统计链（fd3 活连接存在时同样有效，真机实测）。不停链则链泄漏到整机重启，
+            // 且下一会话 fd3 写入撞活链会停走、走 ~8s 看门狗自愈路径；停链后下一会话
+            // 锁步即起。由持有会话结束或进程退出时执行（crate::run_gpu_teardown）。
             let teardown = stdin.clone();
-            crate::register_exit_hook(Box::new(move || {
-                if other_agents_running() {
-                    return;
-                }
+            crate::register_gpu_teardown(Box::new(move || {
                 if let Ok(mut w) = teardown.lock() {
                     let _ = w.write_all(
                         format!("echo gpubusystats {} > /dev/kgsl-control\n", period).as_bytes(),
@@ -208,7 +214,7 @@ pub(super) fn start(interval_ms: u64, pid_names: &Arc<Mutex<HashMap<String, u32>
                 // 给 QNX shell 执行命令的时间（agent 退出后 telnet 随之消亡，命令须先落）
                 std::thread::sleep(Duration::from_millis(200));
             }));
-            spawn_watchdog(period, stdin, sys_count);
+            spawn_watchdog(period, stdin, sys_count, io, stop);
         }
         None => emit("{\"t\":\"err\",\"msg\":\"QNX 通道启动失败（telnet 登录或 kgsl 统计开启失败），--gpu 停止\"}"),
     }
@@ -245,19 +251,6 @@ fn watchdog_step(have_new: bool, past_grace: bool, misses: u32, heals: u32) -> W
     WatchdogAction::Heal
 }
 
-/// 设备上是否还有其他 xperf-agent 会话在跑（多会话并发保护）。
-/// 退出清理若在对方采样中停链，其 GPU 流会断 5-8s 才被自家看门狗自愈——
-/// 有并发会话时跳过清理（链泄漏留给最后一个会话收尾，无害）。
-/// `[n]` 正则技巧：检测命令自身/载体 shell 的命令行（字面含 `xperf-age[n]t`）不匹配。
-fn other_agents_running() -> bool {
-    std::process::Command::new("sh")
-        .arg("-c")
-        .arg("pgrep -fc 'xperf-age[n]t'")
-        .output()
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().parse::<u32>().unwrap_or(0) > 1)
-        .unwrap_or(false)
-}
-
 /// QNX kgsl 统计链看门狗（2026-09-03 真机实测的行为兜底）：
 /// - 统计链为驱动全局，会话/fd 关闭都不清理；echo> 式死写入者撞存量链只 flush 一窗即停
 /// - 长活连接（exec 3>）写入时连接存活 → 存量链全部重相位（计数归零）后持续输出
@@ -268,8 +261,18 @@ fn other_agents_running() -> bool {
 /// 相位每周期漂移 ~1.5ms，长会话中单次缺失是正常漂移（约每 11 分钟必现一次），
 /// 3 连续缺失（3 秒级无任何窗口完成）才构成真停走。
 /// 先尝试写入、成功才报自愈（通道已断时静默退出，不产生误导 err）；恢复后计数归零。
-fn spawn_watchdog(period_ms: u64, stdin: Arc<Mutex<std::process::ChildStdin>>, sys_count: Arc<AtomicU64>) {
+/// 会话结束（stop 置位）看门狗随收。
+fn spawn_watchdog(
+    period_ms: u64,
+    stdin: Arc<Mutex<std::process::ChildStdin>>,
+    sys_count: Arc<AtomicU64>,
+    io: Option<crate::SessionIo>,
+    stop: Arc<std::sync::atomic::AtomicBool>,
+) {
     std::thread::spawn(move || {
+        if let Some(io) = io {
+            crate::set_session_io(io);
+        }
         let period = Duration::from_millis(period_ms);
         // 启动宽限：telnet 登录 + slog2info 起流 + 首个窗口完成需 2~3s
         let start = Instant::now();
@@ -278,6 +281,9 @@ fn spawn_watchdog(period_ms: u64, stdin: Arc<Mutex<std::process::ChildStdin>>, s
         let mut misses = 0u32; // 连续无新 frame 的检查次数
         let mut heals = 0u32; // 自愈次数（恢复后归零，长会话可反复自愈）
         loop {
+            if stop.load(Ordering::Relaxed) {
+                return;
+            }
             std::thread::sleep(period);
             let c = sys_count.load(Ordering::Relaxed);
             match watchdog_step(c > last, Instant::now() - start >= grace, misses, heals) {

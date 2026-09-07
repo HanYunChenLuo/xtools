@@ -461,7 +461,7 @@ async fn monitor_process_agent(
             }
         };
         match ev {
-            AgentEvent::Hello { ncores, maxkhz } => {
+            AgentEvent::Hello { ncores, maxkhz, .. } => {
                 let maxghz: Vec<String> = maxkhz.iter().map(|k| format!("{:.2}", *k as f32 / 1e6)).collect();
                 println!("设备 {} 核（最大频率 GHz: [{}]）", ncores, maxghz.join(", "));
             }
