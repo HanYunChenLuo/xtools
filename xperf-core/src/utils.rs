@@ -27,26 +27,11 @@ pub fn run_command(program: &str, args: &[&str]) -> Result<ProcOutput> {
     })
 }
 
-/// 执行 adb 命令。`run_command` 的薄封装。
-///
-/// 已选择目标设备（`set_target_serial`）时自动在参数前注入 `-s <serial>`，
-/// 保证多设备场景路由到目标设备。
-/// 测试可通过 `set_adb_runner_for_test` 注入 mock 实现，避免真实拉起 adb 子进程
-/// （mock 收到的是注入后的完整参数序列，未选择设备时与调用方原始参数一致）。
-pub fn run_adb_command(args: &[&str]) -> Result<ProcOutput> {
-    run_adb_command_for(None, args)
-}
-
 /// 执行 adb 命令，显式指定目标设备（多设备并行会话用）。
 ///
 /// `serial`：`Some(s)` 注入 `-s s`（空串视同 `None`）；`None` 回退全局选择
-/// （[`target_serial`]）。其余语义与 [`run_adb_command`] 一致。
+/// （[`target_serial`]）。
 pub fn run_adb_command_for(serial: Option<&str>, args: &[&str]) -> Result<ProcOutput> {
-    if let Ok(guard) = ADB_RUNNER_OVERRIDE.lock() {
-        if let Some(runner) = *guard {
-            return runner(args);
-        }
-    }
     match resolve_serial(serial) {
         Some(serial) => {
             let full: Vec<String> = std::iter::once("-s".to_string())
@@ -57,35 +42,6 @@ pub fn run_adb_command_for(serial: Option<&str>, args: &[&str]) -> Result<ProcOu
             run_command("adb", &refs)
         }
         None => run_command("adb", args),
-    }
-}
-
-/// adb 命令执行器的类型（函数指针，不捕获外部状态，按 args 分支返回）。
-pub type AdbRunner = fn(&[&str]) -> Result<ProcOutput>;
-
-static ADB_RUNNER_OVERRIDE: Mutex<Option<AdbRunner>> = Mutex::new(None);
-
-/// 测试串行锁：注入 mock adb runner 的测试共享全局状态（ADB_RUNNER_OVERRIDE，
-/// 以及 cpu.rs 的 MOCK_PHASE 等模块级标志），并行执行会互相覆盖导致偶发失败。
-/// 所有调用 set_adb_runner_for_test 的测试必须全程持有此锁
-/// （async 测试 `.lock().await`，sync 测试 `.blocking_lock()`）。
-#[cfg(test)]
-pub static ADB_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-
-/// 注入 mock adb 执行器，仅用于单元测试。
-/// 可重复调用（覆盖前一次设置）；测试间共享全局状态，调用方须持有 ADB_TEST_LOCK。
-#[cfg(test)]
-pub fn set_adb_runner_for_test(runner: AdbRunner) {
-    if let Ok(mut guard) = ADB_RUNNER_OVERRIDE.lock() {
-        *guard = Some(runner);
-    }
-}
-
-/// 清除 mock adb 执行器，恢复真实 adb 调用，仅用于单元测试。
-#[cfg(test)]
-pub fn clear_adb_runner_for_test() {
-    if let Ok(mut guard) = ADB_RUNNER_OVERRIDE.lock() {
-        *guard = None;
     }
 }
 
@@ -106,12 +62,6 @@ pub fn set_target_serial(serial: Option<String>) {
 /// 当前目标设备 serial（`None` = 未选择）
 pub fn target_serial() -> Option<String> {
     TARGET_SERIAL.lock().ok().and_then(|g| g.clone())
-}
-
-/// 构造已注入 `-s <serial>` 的 adb 命令（未选择设备时不注入）。
-/// 所有 adb 调用统一经此构造，保证多设备场景命令路由到目标设备。
-pub fn adb() -> Command {
-    adb_for(None)
 }
 
 /// 构造已注入 `-s <serial>` 的 adb 命令，显式指定目标设备（多设备并行会话用）。

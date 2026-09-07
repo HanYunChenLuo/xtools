@@ -366,12 +366,16 @@ async fn start_sampling(
     Ok(())
 }
 
-/// 停止指定设备的采样（`running` 置 false，采样线程下一轮检测到后退出并清理）
+/// 停止指定设备的采样（`running` 置 false，采样线程下一轮检测到后退出并清理）。
+/// 会话不存在时静默成功（幂等；前端状态由自身管理，不回读）。
 #[tauri::command]
 fn stop_sampling(serial: String, state: State<'_, AppState>) -> Result<(), String> {
-    let session = state.session(&serial);
-    let mut running = session.running.lock().map_err(|e| e.to_string())?;
-    *running = false;
+    if let Ok(map) = state.sessions.lock() {
+        if let Some(session) = map.get(&serial) {
+            let mut running = session.running.lock().map_err(|e| e.to_string())?;
+            *running = false;
+        }
+    }
     Ok(())
 }
 
@@ -642,14 +646,6 @@ async fn list_packages(serial: String) -> Result<Vec<String>, String> {
     Ok(pkgs)
 }
 
-/// 查询指定设备采样是否正在运行（前端据此设置开始/停止按钮状态）。
-#[tauri::command]
-fn is_running(serial: String, state: State<'_, AppState>) -> Result<bool, String> {
-    let session = state.session(&serial);
-    let running = session.running.lock().map_err(|e| e.to_string())?;
-    Ok(*running)
-}
-
 /// 打开指定设备上的应用并测量冷启动（`am start -W`）。
 ///
 /// `activity` 留空时自动解析包的主入口（`cmd package resolve-activity --brief`）；
@@ -662,13 +658,20 @@ async fn launch_app(serial: String, package: String, activity: String) -> Result
     xperf_core::coldstart::measure(&package, &activity, Some(&serial)).map_err(|e| e.to_string())
 }
 
-/// 重启指定设备上的应用并测量冷启动：force-stop → 等进程死透（800ms）→
+/// 重启指定设备上的应用并测量冷启动：解析主入口（activity 留空时，**先于
+/// force-stop**——解析失败不杀应用）→ force-stop → 等进程死透（800ms）→
 /// `am start -W`。应用已在采样监控中时，重启后 agent 端自动重扫包名进程
 /// （exit 事件 + 新 PID 发现），前端时序/峰值保留。
 #[tauri::command]
 async fn restart_app(serial: String, package: String, activity: String) -> Result<xperf_core::coldstart::ColdStartResult, String> {
     validate_package(&package)?;
     ensure_device_online(&serial)?;
+    // activity 留空时先解析主入口：resolve 失败则不 force-stop（避免应用被杀未拉起）
+    let activity = if activity.is_empty() {
+        xperf_core::coldstart::resolve_activity(&package, Some(&serial)).map_err(|e| e.to_string())?
+    } else {
+        activity
+    };
     xperf_core::coldstart::force_stop(&package, Some(&serial)).map_err(|e| e.to_string())?;
     // force-stop 异步杀进程，立即 start 会测到残留路径；800ms 缓冲进程死透
     std::thread::sleep(std::time::Duration::from_millis(800));
@@ -1216,7 +1219,6 @@ fn main() {
             diag_log,
             list_packages,
             startup_sessions,
-            is_running,
             launch_app,
             restart_app,
             export_csv,

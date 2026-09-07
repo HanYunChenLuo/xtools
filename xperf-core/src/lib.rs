@@ -36,8 +36,8 @@ pub use marker::{send_marker, start_marker_listener, Marker};
 pub use memory::{MemoryDetails, MemoryTimeSeriesData};
 pub use platform::{detect_platform, detect_platform_live, from_id, Platform, PlatformId};
 pub use utils::{
-    adb, adb_for, diff_devices, list_adb_devices, parse_adb_devices, pick_device,
-    resolve_serial, run_adb_command, run_adb_command_for, set_target_serial, target_serial,
+    adb_for, diff_devices, list_adb_devices, parse_adb_devices, pick_device,
+    resolve_serial, run_adb_command_for, set_target_serial, target_serial,
     AdbDevice, ProcOutput,
 };
 

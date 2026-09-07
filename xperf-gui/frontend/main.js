@@ -383,9 +383,11 @@ class DeviceSession {
     if (this.coldStarts.length > 5) this.coldStarts.pop();
     this.renderColdStarts();
     // 重定向检测：实际启动的 Activity 不属于目标包（如车机熄屏/锁定时被系统
-    // 引导页接管）——测量值无效，须提示用户而非给出误导性的 0ms
+    // 引导页接管）——测量值无效，须提示用户而非给出误导性的 0ms。
+    // Activity 两种形态都算本包：`pkg/.MainActivity`（短类名）与 `pkg.MainActivity`（完整类名）
     const pkg = this.package();
-    const redirected = pkg && !r.activity.startsWith(pkg + '/');
+    const inPkg = r.activity.startsWith(pkg + '/') || r.activity.startsWith(pkg + '.');
+    const redirected = pkg && !inPkg;
     this.setStatus(redirected
       ? `${action}应用被重定向: 实际启动 ${r.activity}（设备可能熄屏/锁定，唤醒后重试）`
       : `${action}应用完成 — 冷启动 TotalTime ${r.total_time_ms}ms（WaitTime ${r.wait_time_ms}ms，${r.activity}）`);
@@ -982,20 +984,15 @@ const app = {
 
   updateTitle() {
     // 统计全部设备图表真实数据源（诊断用）
-    let events = 0, cpuPoints = 0, memPoints = 0, fpsPoints = 0, pids = new Set();
+    let events = 0, cpuPoints = 0, memPoints = 0, fpsPoints = 0;
+    let pidCount = new Set();
     for (const s of this.sessions.values()) {
       events += s.eventCount;
-      for (const pts of Object.values(s.charts.cpu.series)) { cpuPoints += pts.length; for (const p of pts) pids.add(p.t); }
+      for (const [k, pts] of Object.entries(s.charts.cpu.series)) { cpuPoints += pts.length; pidCount.add(s.serial + ':' + k); }
       for (const pts of Object.values(s.charts.mem.series)) memPoints += pts.length;
       for (const pts of Object.values(s.charts.fps.series)) fpsPoints += pts.length;
     }
-    const pidCount = new Set([...this.sessions.values()].flatMap(s => {
-      const set = new Set();
-      for (const k of Object.keys(s.charts.cpu.series)) set.add(s.serial + ':' + k);
-      for (const k of Object.keys(s.charts.mem.series)) set.add(s.serial + ':' + k);
-      return [...set];
-    })).size;
-    document.title = `XPerformance | ok | devices:${this.sessions.size} | events:${events} | pids:${pidCount} | cpu:${cpuPoints},mem:${memPoints},fps:${fpsPoints}`;
+    document.title = `XPerformance | ok | devices:${this.sessions.size} | events:${events} | pids:${pidCount.size} | cpu:${cpuPoints},mem:${memPoints},fps:${fpsPoints}`;
   },
 
   // 设备热插拔：新增建页；移除灰显（数据/采样线程保留，插回自动恢复重连）
