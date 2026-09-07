@@ -198,7 +198,8 @@ fn spawn_sampling(app: tauri::AppHandle, serial: String, package: String, interv
             }
         }
         drop(stream);
-        // QNX 统计链清理兜底：agent 可能被 adbd 信号直杀而来不及跑退出钩子
+        // QNX 统计链清理兜底：正常路径由 daemon 会话 teardown 完成；
+        // 仅 daemon 异常死亡（teardown 未跑）时本调用才会真正动链（详见 core 实现）
         if flags.gpu {
             agent::qnx_stop_stats(&*platform, interval, Some(&serial));
         }

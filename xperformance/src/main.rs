@@ -339,7 +339,7 @@ async fn monitor_process_agent(
     let platform = xperf_core::detect_platform_live(None);
     println!("平台: {} ({})", platform.name(), platform.description());
     let mut stream = agent::spawn_agent(Some(&package), args.interval, flags, Some(&*platform), None)?;
-    println!("agent 已部署并启动（间隔 {}ms）", args.interval);
+    println!("采样会话已开始（间隔 {}ms）", args.interval);
 
     // perfetto 深挖（--trace N）：后台线程录制，与采样同窗口（agent 启动后同时开跑）
     let trace_handle = args.trace.map(|n| {
@@ -814,8 +814,9 @@ async fn monitor_process_agent(
         }
     }
 
-    drop(stream); // 杀掉设备端 agent（Drop 里 kill）
-    // QNX 统计链清理兜底：agent 可能被 adbd 信号直杀而来不及跑退出钩子
+    drop(stream); // 关 TCP（daemon 侧会话即收；daemon 本体常驻）
+    // QNX 统计链清理兜底：正常路径由 daemon 会话 teardown 完成；
+    // 仅 daemon 异常死亡（teardown 未跑）时本调用才会真正动链（详见 core 实现）
     if flags.gpu {
         agent::qnx_stop_stats(&*platform, args.interval, None);
     }

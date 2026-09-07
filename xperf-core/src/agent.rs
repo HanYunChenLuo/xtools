@@ -664,30 +664,30 @@ fn device_online(serial: Option<&str>) -> bool {
     }
 }
 
-/// QNX kgsl 统计链停止（会话结束由 host 兜底执行）。
-/// agent 的退出钩子只在 stdout 写失败（EPIPE）路径生效；adb 断连时 adbd 按进程树
-/// 信号直杀 agent（setsid 也挡不住），钩子无机会执行。此函数经独立短 telnet 会话处理：
-/// 先纯观察探测（只读 slog，不动 kgsl-control），frame 流在跑才发 echo>（死写入者）
-/// 停止命令——对已停链写入会将其全部复活（真机实测 toggle 语义），故不可无条件执行。
+/// QNX kgsl 统计链停止（CLI/GUI 会话结束由 host 兜底调用）。
+///
+/// daemon 化（2026-09-07）后的语义：正常路径下链清理由 daemon 的会话 teardown
+/// 完成（先停链后收 telnet，顺序确定），本函数只是**daemon 异常死亡**（SIGKILL
+/// 等，teardown 无机会执行）时的兜底。故门控极简单：
+/// - daemon 进程在（pgrep ≥1）→ teardown 已处理（或别的会话正在采样，停链会
+///   杀掉对方的流），直接返回，不等待不探测；
+/// - daemon 不在（异常死亡）→ 先纯观察探测（只读 slog，不动 kgsl-control），
+///   frame 流在跑才发 echo>（死写入者）停止——对已停链写入会将其全部复活
+///   （真机实测 toggle 语义），故不可无条件执行。
 pub fn qnx_stop_stats(platform: &dyn crate::platform::Platform, interval_ms: u64, serial: Option<&str>) {
     let Some(ip) = platform.qnx_host() else { return };
-    // 多会话并发保护：还有其他 agent 在跑则跳过（停链会杀掉对方采样中的流）。
-    // 先等自身 agent 退出（adbd 异步收尸有 1-2s 延迟，立即探测会把残留的自身
-    // 误判为他人——真机实测），轮询最多 ~5s；之后计数 ≥1 即有他人。
     // `[n]` 正则防检测命令载体自匹配。pgrep 在目标设备上执行，多设备并行时
-    // 各设备天然隔离（一台设备的停链不受另一台上还在采样的 agent 影响）。
+    // 各设备天然隔离（一台设备的停链不受另一台上还在采样的 daemon 影响）。
     let adb = || crate::utils::adb_for(serial);
-    let mut others = 0u32;
-    for _ in 0..10 {
-        let Ok(out) = adb().arg("shell").arg("pgrep -fc 'xperf-age[n]t'").output() else { return };
-        others = String::from_utf8_lossy(&out.stdout).trim().parse::<u32>().unwrap_or(0);
-        if others == 0 {
-            break; // 自身已收尸且无他人
-        }
-        std::thread::sleep(std::time::Duration::from_millis(500));
-    }
+    let others = adb()
+        .arg("shell")
+        .arg("pgrep -fc 'xperf-age[n]t'")
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8_lossy(&o.stdout).trim().parse::<u32>().ok())
+        .unwrap_or(1); // 探测失败按「daemon 在」处理（不动链，宁留勿乱）
     if others >= 1 {
-        return; // 有其他会话在采样，链留给对方退出时收
+        return; // daemon 在：会话 teardown 已停链（或他人在采样）
     }
     let period = interval_ms.clamp(100, 1000);
     // 探测：~5s 纯观察（只读 slog 不写 kgsl-control，无副作用）
@@ -698,7 +698,7 @@ pub fn qnx_stop_stats(platform: &dyn crate::platform::Platform, interval_ms: u64
     let Ok(out) = adb().arg("shell").arg(&probe).output() else { return };
     let flowing = String::from_utf8_lossy(&out.stdout).matches("frame ").count();
     if flowing < 2 {
-        return; // 链未在流（agent 退出钩子已清理 / 本就无链）：不写，死写入者撞停链会复活
+        return; // 链未在流：不写，死写入者撞停链会复活
     }
     // 停链：echo>（死写入者）式写入对流链 = 停止全部（真机实测，fd3 活连接存在时亦有效）
     let kill = format!(

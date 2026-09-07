@@ -416,15 +416,18 @@ fn run_daemon() -> ! {
 
     for conn in listener.incoming() {
         let Ok(stream) = conn else { continue };
+        let hello = hello_line(ncores, &maxkhz);
         if sessions.load(Ordering::Relaxed) >= MAX_SESSIONS {
+            // 满员也必须先发 hello 再发 err：probe 探活只认 hello——若首行是 err，
+            // host 会误判「无 daemon」而强杀重启 daemon，把 10 个活会话全端掉（review 修复）
             use std::io::Write as _;
             let mut s = &stream;
+            let _ = writeln!(s, "{}", hello);
             let _ = writeln!(s, "{{\"t\":\"err\",\"msg\":\"会话数已满（{}）\"}}", MAX_SESSIONS);
             continue;
         }
         sessions.fetch_add(1, Ordering::Relaxed);
         let (sessions, idle_since) = (sessions.clone(), idle_since.clone());
-        let hello = hello_line(ncores, &maxkhz);
         std::thread::spawn(move || {
             handle_conn(stream, hello);
             if sessions.fetch_sub(1, Ordering::Relaxed) == 1 {
@@ -460,7 +463,14 @@ fn handle_conn(stream: std::os::unix::net::UnixStream, hello: String) {
     loop {
         line.clear();
         match reader.read_line(&mut line) {
-            Ok(0) | Err(_) => break, // EOF / 读错误（含 30s 无数据超时）：host 失联
+            Ok(0) => {
+                eprintln!("[conn] EOF（host 断开）");
+                break;
+            }
+            Err(e) => {
+                eprintln!("[conn] 读失败: {}", e);
+                break;
+            }
             Ok(_) => {
                 let cmd = line.trim();
                 if cmd == "ping" {
@@ -470,8 +480,14 @@ fn handle_conn(stream: std::os::unix::net::UnixStream, hello: String) {
                     exit_with_hooks();
                 }
                 if cmd == "stop" {
-                    if let Some(s) = &session_stop {
+                    if let Some(s) = session_stop.take() {
                         s.store(true, Ordering::Relaxed);
+                        // 等会话线程收尾（节拍 ≤interval + dumpsys 有界），
+                        // 收完才允许重新 start（保证 GPU 独占/teardown 已复位）。
+                        // 无 ack：stop 是 fire-and-forget，host 当前也不发它
+                        if let Some(h) = session_handle.take() {
+                            let _ = h.join();
+                        }
                     }
                     continue;
                 }
@@ -845,5 +861,43 @@ mod tests {
     #[test]
     fn test_json_escape() {
         assert_eq!(json_escape("a\"b\\c"), "a\\\"b\\\\c");
+    }
+
+    /// start 命令行 → parse_args（daemon 会话的参数解析路径）
+    #[test]
+    fn test_parse_args() {
+        // 完整参数（与 host spawn_agent 组装的 start 行同构）
+        let argv: Vec<String> = ["--package", "com.x", "--interval", "500", "--cpu", "--memory", "--fps",
+            "--freq", "--io", "--net", "--gpu", "--thermal", "--platform", "ss3", "--qnx-host", "1.2.3.4"]
+            .iter().map(|s| s.to_string()).collect();
+        let a = parse_args(&argv).unwrap();
+        assert_eq!(a.package.as_deref(), Some("com.x"));
+        assert_eq!(a.interval_ms, 500);
+        assert!(a.cpu && a.memory && a.fps && a.freq && a.io && a.net && a.gpu && a.thermal);
+        assert_eq!(a.platform.as_deref(), Some("ss3"));
+        assert_eq!(a.qnx_host.as_deref(), Some("1.2.3.4"));
+        // 最小参数：默认间隔 50ms、其余指标关
+        let a = parse_args(&["--package".to_string(), "com.x".to_string(), "--cpu".to_string()]).unwrap();
+        assert_eq!(a.interval_ms, 50);
+        assert!(!a.memory && !a.fps);
+        // 无采样开关报错
+        assert!(parse_args(&["--package".to_string(), "com.x".to_string()]).is_err());
+        // 无 --package/--pid 报错（host 侧能拿到 err 行而不是会话静默失败）
+        assert!(parse_args(&[]).is_err());
+        // 间隔下限 50ms
+        assert!(parse_args(&["--package".to_string(), "com.x".to_string(), "--interval".to_string(), "10".to_string()]).is_err());
+        // 未知参数报错
+        assert!(parse_args(&["--package".to_string(), "com.x".to_string(), "--bogus".to_string()]).is_err());
+        // 缺值报错
+        assert!(parse_args(&["--package".to_string()]).is_err());
+    }
+
+    /// hello 行含版本号（host 探活协议契约）
+    #[test]
+    fn test_hello_line() {
+        let h = hello_line(8, &[1785600, 2841600]);
+        assert!(h.contains("\"t\":\"hello\""));
+        assert!(h.contains(&format!("\"version\":{}", PROTOCOL_VERSION)));
+        assert!(h.contains("\"maxkhz\":[1785600,2841600]"));
     }
 }

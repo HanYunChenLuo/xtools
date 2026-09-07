@@ -244,7 +244,7 @@ Platform trait + `adb devices -l` product 字段自动检测（HU_SS3/HU_SS2MAXF
 - **生命周期**：`ensure_daemon`（spawn_agent 内）全权管理——adb forward（`--list` 复用既有规则，否则 `tcp:0` 新建）→ probe hello 版本 → 一致直连 / 不符 `suicide`+`pkill`+强制重推重启 / 无 daemon 则 pkill 清残留（含老版 stdout agent）+ 强制重推 + `setsid nohup ... --daemon` 启动。**强制重推绕过 size/mtime 快检**（同秒重建的同尺寸二进制会被快检误判跳推，实测造成版本协商死循环）；daemon 0 会话 60s 自杀，设备重启后下次会话自动重建
 - 手动重建推送：`cargo build -p xperf-agent --target aarch64-linux-android --release && adb push target/aarch64-linux-android/release/xperf-agent /data/local/tmp/`（下次会话自动 suicide 旧 daemon 重推重启）
 
-**协议（daemon socket 上的文本行）**：连接即收 `hello`（含 version/ncores/maxkhz）；host 发 `start <与 argv 相同参数>`（复用 parse_args，零新依赖）/`stop`/`ping`（每 5s，30s 无数据 agent 断连）/`suicide`；agent 回事件流（与 stdout 模式同一 NDJSON 协议）。**手动调试**仍可用 stdout 模式（无 `--daemon`，须 stdin 保持打开）。
+**协议（daemon socket 上的文本行）**：连接即收 `hello`（含 version/ncores/maxkhz；**满员拒连也先发 hello 再发「会话数已满」err**——probe 探活只认 hello，首行非 hello 会触发 host 重推重启流程）；host 发 `start <与 argv 相同参数>`（复用 parse_args，零新依赖；同连接可 `stop` 后重新 `start`——stop 会 join 等会话线程收完再放行）/`stop`/`ping`（每 5s，30s 无数据 agent 断连）/`suicide`；agent 回事件流（与 stdout 模式同一 NDJSON 协议）。**手动调试**仍可用 stdout 模式（无 `--daemon`，须 stdin 保持打开）。
 
 **要点**：
 - 绝对节拍：`start + round × interval`，漂移时发 err 行（"round N overrun"）
