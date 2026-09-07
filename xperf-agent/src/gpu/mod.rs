@@ -18,7 +18,7 @@ use crate::{dumpsys, emit, json_escape, now_ms};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-pub(crate) use kgsl::{read_gpu_busy, Kgsl};
+pub(crate) use kgsl::{GpuBusyCalc, Kgsl, read_gpu_busy};
 
 /// GPU 采样路径（枚举变体即通道）
 pub(crate) enum GpuPath {

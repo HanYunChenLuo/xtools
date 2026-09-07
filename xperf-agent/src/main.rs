@@ -286,7 +286,7 @@ fn main() {
     // 速率类指标的上一轮基线：(上轮时间戳 ms, 计数器...)
     let mut io_states: HashMap<u32, (u64, u64, u64, u64, u64)> = HashMap::new(); // pid → (ts, rchar, wchar, read_bytes, write_bytes)
     let mut prev_net: Option<(u64, u64, u64)> = None; // (ts, rx_bytes, tx_bytes)
-    let mut prev_gpu: Option<(u64, u64)> = None; // (busy_time, total_time)
+    let mut gpu_busy_calc = gpu::GpuBusyCalc::new(); // kgsl gpubusy 占比（累计/窗口语义自适应）
     let mut active_pids: Vec<u32> = args.pids.clone();
 
     // 内存分类明细仅在间隔 ≥500ms 时启用（dumpsys meminfo ~100ms，低间隔下太重）
@@ -413,19 +413,15 @@ fn main() {
             }
         }
 
-        // GPU：kgsl gpubusy 计数器差值 → 窗口占比 %（首轮建基线不出数）；
-        // QNX/TopGpu/Ligfx 路径的 busy% 由独立读线程异步发（不占节拍），
-        // 四条非 kgsl 路径都在这里补采 dumpsys gpu 每 PID 显存（限频 ≥1s）
+        // GPU：kgsl gpubusy 读数 → busy%（GpuBusyCalc 自适应累计/窗口两种内核语义，
+        // 累计语义首轮建基线不出数）；QNX/TopGpu/Ligfx 路径的 busy% 由独立读线程
+        // 异步发（不占节拍），四条非 kgsl 路径都在这里补采 dumpsys gpu 每 PID 显存（限频 ≥1s）
         match &gpu_path {
             Some(GpuPath::Kgsl(g)) => {
                 if let Some((busy, total)) = gpu::read_gpu_busy(g.busy_path) {
-                    if let Some((pb, pt)) = prev_gpu.replace((busy, total)) {
-                        let dtotal = total.saturating_sub(pt);
-                        if dtotal > 0 {
-                            let pct = busy.saturating_sub(pb) as f32 / dtotal as f32 * 100.0;
-                            let mhz = g.clk_path.and_then(proc::read_u64_file).map(|hz| hz / 1_000_000).unwrap_or(0);
-                            emit(&format!("{{\"t\":\"gpu\",\"ts\":{},\"busy\":{:.2},\"mhz\":{}}}", ts, pct, mhz));
-                        }
+                    if let Some(pct) = gpu_busy_calc.sample(busy, total) {
+                        let mhz = g.clk_path.and_then(proc::read_u64_file).map(|hz| hz / 1_000_000).unwrap_or(0);
+                        emit(&format!("{{\"t\":\"gpu\",\"ts\":{},\"busy\":{:.2},\"mhz\":{}}}", ts, pct, mhz));
                     }
                 }
             }
