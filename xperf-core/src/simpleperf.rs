@@ -322,10 +322,14 @@ fn squeeze_spaces(text: &str) -> String {
 
 // ==================== 浏览器火焰图（report_html.py） ====================
 
-/// AOSP 官方脚本缓存目录（`~/.cache/xperf/simpleperf_scripts`）：`report_html.py` 及其
-/// 依赖 + 主机平台 report 库。布局对齐上游 `get_script_dir()`/`get_host_binary_path()`
-/// 的相对定位规则（`bin/<os>/<arch>/<lib>`）。
-const SCRIPTS_CACHE_SUBDIR: &str = ".cache/xperf/simpleperf_scripts";
+/// 脚本集目录：**vendor 进仓库**（`xperf-core/simpleperf_scripts/`，git 管理）：
+/// `report_html.py` 及其依赖 + 主机平台 report 库。布局对齐上游 `get_script_dir()`/
+/// `get_host_binary_path()` 的相对定位规则（`bin/<os>/<arch>/<lib>`）。
+/// 随代码分发、离线即用；更新走 `update_simpleperf_scripts`（CLI
+/// `--update-simpleperf-scripts` / GUI「更新火焰图脚本」按钮），覆盖后经 git 提交同步。
+fn scripts_dir() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("simpleperf_scripts")
+}
 /// gitiles blob 下载基址。**+archive 不支持多级子路径**（实测 `+archive/main/simpleperf/
 /// scripts/simpleperf.tar.gz` 返回 INVALID_ARGUMENT；整仓 tarball 80MB 太重）→ 逐文件
 /// blob `?format=TEXT`（base64 文本）下载，合计 ~10MB。
@@ -336,12 +340,14 @@ const AOSP_SCRIPTS_BASE: &str =
 static SCRIPTS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// 主机平台的 report 库相对目录与文件名（对齐上游 `get_host_binary_path`：linux-x86_64
-/// 用 `.so`，darwin-x86_64 用 `.dylib`；上游未发布其他主机预编译库）。
-/// 不支持的主机返回 Err（附支持列表）。
+/// 用 `.so`，darwin 用 `.dylib`）。上游 dylib 为 **universal 二进制（x86_64 + arm64）**，
+/// Apple Silicon（aarch64）原生加载同一文件，无需 Rosetta。
 fn host_report_lib() -> Result<(&'static str, &'static str)> {
     match (std::env::consts::OS, std::env::consts::ARCH) {
         ("linux", "x86_64") => Ok(("bin/linux/x86_64", "libsimpleperf_report.so")),
-        ("macos", "x86_64") => Ok(("bin/darwin/x86_64", "libsimpleperf_report.dylib")),
+        ("macos", "x86_64") | ("macos", "aarch64") => {
+            Ok(("bin/darwin/x86_64", "libsimpleperf_report.dylib"))
+        }
         (os, arch) => bail!(
             "主机 {}/{} 无 simpleperf report 库预编译版本（上游仅提供 linux-x86_64 / darwin-x86_64）",
             os,
@@ -350,36 +356,163 @@ fn host_report_lib() -> Result<(&'static str, &'static str)> {
     }
 }
 
-/// 从 gitiles blob API 下载一个文件（`?format=TEXT` 为 base64 文本，经
-/// `python3 -m base64 -d` 解码；python3 是本功能的硬依赖，此处不回避）。
-/// URL 与路径均为固定字符集常量/推导值，无注入面。
-fn fetch_aosp_blob(rel_path: &str, dest: &Path) -> Result<()> {
+/// 流式 base64 解码器（标准字母表；容忍 \n/\r 换行与 '=' padding 跨块）。
+/// 一次性解码亦可（全量 push 后 finish）。
+#[derive(Default)]
+struct Base64StreamDecoder {
+    quad: [u32; 4],
+    qlen: usize,
+    written: u64,
+    done: bool,
+}
+
+impl Base64StreamDecoder {
+    /// 喂入一段 base64 文本，解码出的字节写入 `out`
+    fn push(&mut self, input: &[u8], out: &mut impl std::io::Write) -> std::io::Result<()> {
+        for &c in input {
+            if self.done {
+                break; // padding 后不应再有数据
+            }
+            match c {
+                b'\n' | b'\r' => {}
+                b'=' => self.done = true,
+                _ => {
+                    let v = match c {
+                        b'A'..=b'Z' => (c - b'A') as u32,
+                        b'a'..=b'z' => (c - b'a') as u32 + 26,
+                        b'0'..=b'9' => (c - b'0') as u32 + 52,
+                        b'+' => 62,
+                        b'/' => 63,
+                        _ => {
+                            return Err(std::io::Error::new(
+                                std::io::ErrorKind::InvalidData,
+                                format!("非法 base64 字符: {c:#x}"),
+                            ))
+                        }
+                    };
+                    self.quad[self.qlen] = v;
+                    self.qlen += 1;
+                    if self.qlen == 4 {
+                        self.qlen = 0;
+                        let bytes = [
+                            ((self.quad[0] << 2) | (self.quad[1] >> 4)) as u8,
+                            (((self.quad[1] & 0xF) << 4) | (self.quad[2] >> 2)) as u8,
+                            (((self.quad[2] & 3) << 6) | self.quad[3]) as u8,
+                        ];
+                        out.write_all(&bytes)?;
+                        self.written += 3;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// 流结束：解码残组（2 字符→1 字节，3 字符→2 字节；1 字符为非法长度）
+    fn finish(&mut self, out: &mut impl std::io::Write) -> std::io::Result<()> {
+        let bytes = match self.qlen {
+            0 => vec![],
+            2 => vec![((self.quad[0] << 2) | (self.quad[1] >> 4)) as u8],
+            3 => vec![
+                ((self.quad[0] << 2) | (self.quad[1] >> 4)) as u8,
+                (((self.quad[1] & 0xF) << 4) | (self.quad[2] >> 2)) as u8,
+            ],
+            _ => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "base64 长度非法（残 1 字符）",
+                ))
+            }
+        };
+        out.write_all(&bytes)?;
+        self.written += bytes.len() as u64;
+        Ok(())
+    }
+
+    /// 已解码写入的字节数
+    fn written(&self) -> u64 {
+        self.written
+    }
+}
+
+/// 从 gitiles blob API 流式下载一个文件到 `tmp`（`?format=TEXT` 为 base64 文本，
+/// Rust 内置解码器边下边解；curl 退出码非零/解码失败/结果为空均判失败并清临时文件）。
+/// URL 与路径均为固定字符集常量/推导值，无注入面（不再经 shell 管道）。
+/// `on_bytes`：解码字节累计值的进度回调（≥1MB 粒度 + 结束时各一次）。
+fn fetch_aosp_blob_to(
+    rel_path: &str,
+    tmp: &Path,
+    mut on_bytes: Option<&mut dyn FnMut(u64)>,
+) -> Result<()> {
+    use std::io::{Read as _, Write as _};
     let url = format!("{}/{}?format=TEXT", AOSP_SCRIPTS_BASE, rel_path);
-    let dest_str = dest.to_string_lossy();
-    let script = format!(
-        "curl -sL -m 60 '{url}' | python3 -m base64 -d > '{dest_str}' && test -s '{dest_str}'"
+    let mut child = Command::new("curl")
+        .args(["-fsSL", "-m", "300", &url])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .with_context(|| format!("启动 curl 下载 {} 失败", rel_path))?;
+    let mut stdout = child.stdout.take().context("curl stdout 不可读")?;
+    let mut out = std::io::BufWriter::new(
+        std::fs::File::create(tmp).with_context(|| format!("创建 {} 失败", tmp.display()))?,
     );
-    let st = Command::new("sh")
-        .arg("-c")
-        .arg(&script)
-        .status()
-        .with_context(|| format!("下载 {} 失败", rel_path))?;
-    if !st.success() {
+    let mut dec = Base64StreamDecoder::default();
+    let mut buf = [0u8; 65536];
+    let mut last_reported = 0u64;
+    let read_result = loop {
+        match stdout.read(&mut buf) {
+            Ok(0) => break Ok(()),
+            Ok(n) => {
+                if let Err(e) = dec.push(&buf[..n], &mut out) {
+                    break Err(e);
+                }
+                let written = dec.written();
+                if let Some(cb) = on_bytes.as_mut() {
+                    if written - last_reported >= 1_000_000 {
+                        last_reported = written;
+                        cb(written);
+                    }
+                }
+            }
+            Err(e) => break Err(std::io::Error::new(e.kind(), e.to_string())),
+        }
+    };
+    let finish_result = read_result.and_then(|()| dec.finish(&mut out));
+    let flushed = out.flush().is_ok();
+    drop(out);
+    let status = child.wait().context("等待 curl 退出失败")?;
+    let written = dec.written();
+    if let Err(e) = finish_result {
+        let _ = std::fs::remove_file(tmp);
+        bail!("下载 {} 解码失败: {}", rel_path, e);
+    }
+    if !flushed || !status.success() || written == 0 {
+        let _ = std::fs::remove_file(tmp);
         bail!("下载 {} 失败（网络不通或 AOSP 源不可达）", rel_path);
+    }
+    if let Some(cb) = on_bytes.as_mut() {
+        cb(written); // 结束回调：文件最终字节数
     }
     Ok(())
 }
 
-/// 确保 `report_html.py` 脚本集可用（首次使用从 AOSP 引导下载 ~10MB，之后离线）。
-/// 返回脚本目录。完整性检查逐文件进行：半截缓存下次补齐缺项。
-fn ensure_simpleperf_scripts() -> Result<PathBuf> {
-    let _guard = SCRIPTS_LOCK.lock().expect("脚本缓存锁失败");
+/// 下载一个文件并**原子替换** `dest`：先写同目录 `.dl-tmp` 临时文件，成功且非空后
+/// rename 覆盖——失败不留半截文件（vendor 文件直接覆盖会把 git 工作区副本写坏）。
+fn fetch_aosp_blob(
+    rel_path: &str,
+    dest: &Path,
+    on_bytes: Option<&mut dyn FnMut(u64)>,
+) -> Result<()> {
+    let tmp = PathBuf::from(format!("{}.dl-tmp", dest.to_string_lossy()));
+    fetch_aosp_blob_to(rel_path, &tmp, on_bytes)?;
+    std::fs::rename(&tmp, dest).with_context(|| format!("替换 {} 失败", dest.display()))?;
+    Ok(())
+}
+
+/// 需要的文件清单：(AOSP 相对路径, 本地路径)。纯 Python 5 个（各平台一致）+
+/// 平台 report 库（linux-x86_64 `.so` / darwin `.dylib` universal）。
+fn needed_files(dir: &Path) -> Result<Vec<(String, PathBuf)>> {
     let (lib_rel, lib_name) = host_report_lib()?;
-    let dir = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_default()
-        .join(SCRIPTS_CACHE_SUBDIR);
-    let lib_path = dir.join(lib_rel).join(lib_name);
     let mut needed: Vec<(String, PathBuf)> = [
         "report_html.py",
         // write_script 内嵌的前端脚本（add_file('report_html.js')，缺则生成半截 HTML 后失败）
@@ -392,24 +525,162 @@ fn ensure_simpleperf_scripts() -> Result<PathBuf> {
     .iter()
     .map(|f| (f.to_string(), dir.join(f)))
     .collect();
-    needed.push((format!("{}/{}", lib_rel, lib_name), lib_path.clone()));
+    needed.push((format!("{}/{}", lib_rel, lib_name), dir.join(lib_rel).join(lib_name)));
+    Ok(needed)
+}
+
+/// 逐文件下载（已存在的非空文件跳过——半截缓存只补缺项）
+fn download_scripts(needed: &[(String, PathBuf)]) -> Result<()> {
+    for (rel, dest) in needed {
+        if dest.is_file() && std::fs::metadata(dest).map(|m| m.len() > 0).unwrap_or(false) {
+            continue;
+        }
+        fetch_aosp_blob(rel, dest, None)?;
+    }
+    Ok(())
+}
+
+/// 确保 `report_html.py` 脚本集可用。脚本集 **vendor 进仓库**（`xperf-core/simpleperf_scripts/`，
+/// git 管理随代码分发）：文件齐全时零网络直接可用；缺项（首次 clone 未含/被误删）才从
+/// AOSP 引导下载补齐。强制全量重新拉取用 `update_simpleperf_scripts`。
+fn ensure_simpleperf_scripts() -> Result<PathBuf> {
+    let _guard = SCRIPTS_LOCK.lock().expect("脚本缓存锁失败");
+    let dir = scripts_dir();
+    let needed = needed_files(&dir)?;
     let complete = needed
         .iter()
         .all(|(_, p)| p.is_file() && std::fs::metadata(p).map(|m| m.len() > 0).unwrap_or(false));
     if complete {
         return Ok(dir);
     }
-    eprintln!("[simpleperf] 首次使用：从 AOSP 下载 report_html.py 脚本与主机 report 库（~10MB）…");
-    for (rel, dest) in &needed {
-        if dest.is_file() && std::fs::metadata(dest).map(|m| m.len() > 0).unwrap_or(false) {
-            continue; // 半截缓存：只补缺项
-        }
-        if let Some(parent) = dest.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        fetch_aosp_blob(rel, dest)?;
-    }
+    eprintln!("[simpleperf] 脚本集缺项，从 AOSP 下载补齐（~10MB）…");
+    download_scripts(&needed)?;
     Ok(dir)
+}
+
+/// 火焰图脚本下载进度（`update_simpleperf_scripts` 的 progress 回调载荷）：
+/// 当前文件序号/总数 + 当前文件与跨文件累计已下载字节（base64 解码后），
+/// 供 CLI 打印与 GUI 进度显示（进度条基准 = 既有 vendor 文件大小之和）。
+pub struct ScriptsDownloadProgress {
+    /// 当前文件序号（1 起）
+    pub index: usize,
+    /// 文件总数（含双平台 report 库）
+    pub files: usize,
+    /// 当前文件 AOSP 相对路径
+    pub rel: String,
+    /// 当前文件已下载字节数（解码后）
+    pub bytes: u64,
+    /// 跨文件累计已下载字节数（解码后）
+    pub overall_bytes: u64,
+    /// 预期总字节数（既有 vendor 文件大小之和；任一缺失为 None——首装无参照，
+    /// 只能显示已下载字节，无百分比）
+    pub overall_expected: Option<u64>,
+}
+
+/// 强制重新下载全部脚本与 report 库（覆盖 vendor 文件）——跟进上游 simpleperf 更新用。
+/// **两个平台的 report 库都更新**（任一台机器执行，mac/linux 双端同步）；覆盖后
+/// `git status` 可见 diff，提交即分发（仓库内文件，清理缓存不触碰）。
+/// `progress`：每个文件内按 ~1MB 粒度回调 + 文件完成时回调（字节流式下载）。
+///
+/// **两阶段写入**：全部文件先下载到 `*.dl-tmp` 临时文件，全部成功后一次性 rename 覆盖
+/// ——中途失败清空临时文件、既有文件分毫不动（避免留下 report_html.py 与 report_html.js
+/// 半新半旧的配对组合，交叉版本可能渲染失败）。
+pub fn update_simpleperf_scripts(
+    progress: Option<&dyn Fn(&ScriptsDownloadProgress)>,
+) -> Result<String> {
+    let _guard = SCRIPTS_LOCK.lock().expect("脚本缓存锁失败");
+    let dir = scripts_dir();
+    let mut needed = needed_files(&dir)?;
+    // 另一平台（mac↔linux）的 report 库一并更新
+    let other = match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("macos", _) => Some(("bin/linux/x86_64", "libsimpleperf_report.so")),
+        ("linux", "x86_64") => Some(("bin/darwin/x86_64", "libsimpleperf_report.dylib")),
+        _ => None,
+    };
+    if let Some((rel_dir, name)) = other {
+        let rel = format!("{rel_dir}/{name}");
+        needed.push((rel.clone(), dir.join(rel_dir).join(name)));
+    }
+    // 进度条基准：既有 vendor 文件大小之和（首装缺失 → None，仅显示字节计数）
+    let mut expected_total = 0u64;
+    let mut all_exist = true;
+    for (_, d) in &needed {
+        match std::fs::metadata(d) {
+            Ok(m) => expected_total += m.len(),
+            Err(_) => all_exist = false,
+        }
+    }
+    let overall_expected = if all_exist && expected_total > 0 {
+        Some(expected_total)
+    } else {
+        None
+    };
+    let total = needed.len();
+    let mut lines = Vec::new();
+    let mut staged: Vec<(PathBuf, PathBuf)> = Vec::new(); // (tmp, dest)
+    let mut overall_bytes = 0u64;
+    let mut fetch_all = || -> Result<()> {
+        for (i, (rel, dest)) in needed.iter().enumerate() {
+            if let Some(parent) = dest.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            let tmp = PathBuf::from(format!("{}.dl-tmp", dest.to_string_lossy()));
+            let index = i + 1;
+            let mut last_reported = 0u64;
+            {
+                let mut cb = |file_bytes: u64| {
+                    overall_bytes += file_bytes - last_reported;
+                    last_reported = file_bytes;
+                    if let Some(p) = progress {
+                        p(&ScriptsDownloadProgress {
+                            index,
+                            files: total,
+                            rel: (*rel).clone(),
+                            bytes: file_bytes,
+                            overall_bytes,
+                            overall_expected,
+                        });
+                    }
+                };
+                fetch_aosp_blob_to(rel, &tmp, Some(&mut cb))
+                    .with_context(|| format!("下载 {rel} 失败"))?;
+            }
+            overall_bytes -= last_reported;
+            let bytes = std::fs::metadata(&tmp).map(|m| m.len()).unwrap_or(0);
+            overall_bytes += bytes;
+            let line = format!("{index}/{total} {rel}: {:.1} MB", bytes as f64 / 1e6);
+            lines.push(line.clone());
+            if let Some(p) = progress {
+                p(&ScriptsDownloadProgress {
+                    index,
+                    files: total,
+                    rel: (*rel).clone(),
+                    bytes,
+                    overall_bytes,
+                    overall_expected,
+                });
+            }
+            staged.push((tmp, dest.clone()));
+        }
+        Ok(())
+    };
+    if let Err(e) = fetch_all() {
+        // 全部失败：清临时文件，既有 vendor 文件保持原样
+        for (tmp, _) in &staged {
+            let _ = std::fs::remove_file(tmp);
+        }
+        return Err(e);
+    }
+    // 全部成功：一次性原子替换
+    for (tmp, dest) in &staged {
+        std::fs::rename(tmp, dest).with_context(|| format!("替换 {} 失败", dest.display()))?;
+    }
+    Ok(format!(
+        "simpleperf 脚本已更新（{} 个文件，{}）:\n{}\n变更经 git 提交后同步到其他机器",
+        needed.len(),
+        dir.display(),
+        lines.join("\n")
+    ))
 }
 
 /// 数据文件对应的火焰图 HTML 输出路径（同目录同名换扩展：`stack_x.data` → `stack_x.html`）
@@ -419,10 +690,11 @@ fn html_path_for(data_path: &Path) -> PathBuf {
 
 /// 在浏览器中查看 simpleperf 数据（GUI「函数热点」tab 的查看入口）：
 /// 用 AOSP 官方 `report_html.py` 把 `.data` 渲染成**单文件 HTML**（含火焰图/Chart/
-/// Sample Table，实测 3.3MB data → 7.8MB html ~1.2s），再 xdg-open 打开。
+/// Sample Table，实测 3.3MB data → 7.8MB html ~1.2s），再 `open`/`xdg-open` 打开。
 ///
 /// - 首次使用自动从 AOSP 引导下载脚本集到 `~/.cache/xperf/simpleperf_scripts/`
-///   （~10MB，之后离线可用）；需要 `python3`
+///   （~10MB，之后离线可用）；需要 `python3`（上游 report 库 dylib 为
+///   universal 二进制，Apple Silicon 原生可用）
 /// - HTML 已存在且新于 `.data` 时直接复用（同一份数据反复查看不重渲染）
 /// - 生成带手动超时上限（300s，超大 `.data` 防挂死）与 Ctrl-C 中断响应
 ///
@@ -545,8 +817,9 @@ fn remove_dir_counted(path: &Path) -> (u64, u64) {
     (bytes, files)
 }
 
-/// 清理全部缓存与采集数据：`~/.cache/xperf`（perfetto UI 镜像 + simpleperf 脚本集，
-/// 首次使用会重新引导下载）+ `/tmp/xperf`（采集数据目录，含 CSV/图表/trace/调用栈）。
+/// 清理全部缓存与采集数据：`~/.cache/xperf`（perfetto UI 镜像）+ `/tmp/xperf`（采集
+/// 数据目录，含 CSV/图表/trace/调用栈）+ `xperf-core/simpleperf_scripts/`（火焰图脚本
+/// 下载缓存，下次使用重新下载或经 `--update-simpleperf-scripts` 更新）。
 /// trace_processor 官方缓存 `~/.local/share/perfetto` **不在清理范围**（属
 /// get.perfetto.dev 官方工具缓存，与 perfetto UI 镜像不同源）。
 /// 正在采样/录制时调用是安全的：文件被删后流式写入方 create/append 会按需重建，
@@ -559,6 +832,7 @@ pub fn clean_all_caches() -> Result<CleanReport> {
     for dir in [
         home.join(".cache").join("xperf"),
         std::env::temp_dir().join("xperf"),
+        scripts_dir(),
     ] {
         let (b, f) = remove_dir_counted(&dir);
         total.bytes += b;
@@ -889,8 +1163,45 @@ mod tests {
         assert_eq!(name, "libsimpleperf_report.so");
     }
 
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    #[test]
+    fn test_host_report_lib_macos_aarch64() {
+        // Apple Silicon：复用 darwin universal dylib（x86_64+arm64），原生加载
+        let (dir, name) = host_report_lib().expect("macos aarch64 应有预编译库");
+        assert_eq!(dir, "bin/darwin/x86_64");
+        assert_eq!(name, "libsimpleperf_report.dylib");
+    }
+
+    #[test]
+    fn test_base64_stream_decoder() {
+        // 标准向量：整段解码（无 padding）
+        let mut d = Base64StreamDecoder::default();
+        let mut out = Vec::new();
+        d.push(b"Zm9vYmFy", &mut out).unwrap();
+        d.finish(&mut out).unwrap();
+        assert_eq!(out, b"foobar");
+        // 逐字节喂入（残组跨块）+ padding 结尾
+        let mut d = Base64StreamDecoder::default();
+        let mut out = Vec::new();
+        for c in b"Zm9vYg==".iter() {
+            d.push(std::slice::from_ref(c), &mut out).unwrap();
+        }
+        d.finish(&mut out).unwrap();
+        assert_eq!(out, b"foob");
+        // 换行容忍（gitiles 输出可能含换行）
+        let mut d = Base64StreamDecoder::default();
+        let mut out = Vec::new();
+        d.push(b"Zm9v\nYmFy\r\n", &mut out).unwrap();
+        d.finish(&mut out).unwrap();
+        assert_eq!(out, b"foobar");
+        // 非法字符报错
+        let mut d = Base64StreamDecoder::default();
+        let mut out = Vec::new();
+        assert!(d.push(b"Zm*9", &mut out).is_err());
+    }
+
     /// 真实链路手动测试：取 `log/` 下最新 `.data` 走完整 open_stack_in_browser
-    /// （首次会从 AOSP 下载脚本 ~10MB；会 xdg-open 弹浏览器——需要桌面环境）。
+    /// （首次会从 AOSP 下载脚本 ~10MB；会 open/xdg-open 弹浏览器——需要桌面环境）。
     /// 跑法：`cargo test -p xperf-core test_open_stack_in_browser_real -- --ignored --nocapture`
     #[test]
     #[ignore = "真实链路：需要 log/ 下有 .data 且有桌面环境（会弹浏览器）"]

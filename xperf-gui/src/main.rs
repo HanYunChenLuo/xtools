@@ -584,7 +584,7 @@ async fn open_stack_html(data_path: String) -> Result<String, String> {
 }
 
 /// 清理缓存与采集数据（与 CLI `--clean-cache` 同一实现）：
-/// `~/.cache/xperf`（perfetto UI 镜像 + simpleperf 脚本集，首次使用重新下载）
+/// `~/.cache/xperf`（perfetto UI 镜像；simpleperf 脚本集已 vendor 进仓库不受影响）
 /// + `/tmp/xperf`（全部采集数据）。采样/录制进行中会丢当前会话产物——前端
 /// 弹确认框后调用。返回人类可读结果（清理文件数与体积）。
 #[tauri::command]
@@ -595,6 +595,51 @@ async fn clean_cache() -> Result<String, String> {
         r.files,
         r.bytes as f64 / 1e6
     ))
+}
+
+/// 更新 simpleperf 火焰图脚本与双平台 report 库（从 AOSP 强制重新拉取，覆盖
+/// `xperf-core/simpleperf_scripts/` 的 vendor 文件；git 提交后同步到其他机器）。
+/// 逐 MB 进度经 `scripts-update` 事件推给前端（stage: progress/done；percent 为
+/// 基于既有 vendor 文件大小的总体百分比，首装无参照时为 null → 只显示字节计数）。
+#[tauri::command]
+async fn update_simpleperf_scripts(app: tauri::AppHandle) -> Result<String, String> {
+    let emit =
+        |message: String, percent: Option<f64>| {
+            let _ = app.emit(
+                "scripts-update",
+                serde_json::json!({ "stage": "progress", "message": message, "percent": percent }),
+            );
+        };
+    let progress = |p: &xperf_core::simpleperf::ScriptsDownloadProgress| {
+        let percent = p
+            .overall_expected
+            .map(|t| ((p.overall_bytes as f64 / t as f64) * 100.0).clamp(0.0, 100.0));
+        let msg = match p.overall_expected {
+            Some(t) => format!(
+                "更新中 {:.1}/{:.1} MB · {}/{} {}",
+                p.overall_bytes as f64 / 1e6,
+                t as f64 / 1e6,
+                p.index,
+                p.files,
+                p.rel
+            ),
+            None => format!(
+                "更新中 {}/{} {}: 已下载 {:.1} MB",
+                p.index,
+                p.files,
+                p.rel,
+                p.bytes as f64 / 1e6
+            ),
+        };
+        emit(msg, percent);
+    };
+    let msg = xperf_core::simpleperf::update_simpleperf_scripts(Some(&progress))
+        .map_err(|e| e.to_string())?;
+    let _ = app.emit(
+        "scripts-update",
+        serde_json::json!({ "stage": "done", "message": msg }),
+    );
+    Ok(msg)
 }
 
 /// 在浏览器打开 Perfetto UI 并自动加载 trace。
@@ -1217,6 +1262,7 @@ fn main() {
             open_perfetto_ui,
             open_stack_html,
             clean_cache,
+            update_simpleperf_scripts,
             diag_log,
             list_packages,
             startup_sessions,

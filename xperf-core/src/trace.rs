@@ -472,11 +472,34 @@ fn run_trace_processor(tp: &Path, trace: &Path, sql_path: &Path) -> Result<(Stri
         .context("执行 trace_processor 失败")?;
     let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
     let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
-    // 查询出错时 shell 以非零退出，但 stdout 里已完成语句的结果仍有效——只要非空就继续解析
+    // 查询出错时 shell 以非零退出；单条语句执行下 stdout 非空即有效结果
     if stdout.is_empty() && !out.status.success() {
         bail!("trace_processor 查询失败: {}", stderr.trim());
     }
     Ok((stdout, stderr))
+}
+
+/// 把 build_sql 生成的多段 SQL 切成 (段名, 单条语句)。
+/// 背景：新版 trace_processor 禁止一次执行多条返回行的 SELECT（报
+/// "Result rows were returned for multiple queries"），须逐条执行。
+/// 输入为机器生成文本：语句以 `;\n` 结尾、字符串字面量无嵌入分号、
+/// 段标记语句形如 `select '===name===' as m;`。
+fn sql_statements(sql: &str) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = Vec::new();
+    let mut section = String::from("(头部)");
+    for part in sql.split(";\n") {
+        let s = part.trim_start();
+        if s.is_empty() {
+            continue;
+        }
+        if let Some(rest) = s.strip_prefix("select '===") {
+            if let Some(name) = rest.strip_suffix("===' as m") {
+                section = name.trim_matches('=').to_string();
+            }
+        }
+        out.push((section.clone(), format!("{s};\n")));
+    }
+    out
 }
 
 /// 解析 trace_processor 的多语句输出：结果集以空行分隔，marker 结果集用于分段。
@@ -541,17 +564,37 @@ fn cell_str(row: &[String], i: usize) -> String {
 pub fn analyze(tp: &Path, trace: &Path, package: &str, sql_path: &Path) -> Result<Analysis> {
     let sql = build_sql(package);
     std::fs::write(sql_path, &sql).context("写入 trace_queries.sql 失败")?;
-    let (stdout, stderr) = run_trace_processor(tp, trace, sql_path)?;
-    let sec = parse_sections(&stdout);
+    // 新版 trace_processor 禁止一次执行多条返回行的 SELECT（运行即报
+    // "Result rows were returned for multiple queries"），按语句逐条执行：
+    // marker 语句的结果集天然存在，输出按序拼接后与旧版单次执行格式一致；
+    // 某条失败即停（语义与旧版单次执行一致：其后段缺失）。
+    let part_path = sql_path.with_extension("part.sql");
+    let mut stdout_all = String::new();
+    let mut first_err = String::new();
+    for (section, stmt) in sql_statements(&sql) {
+        std::fs::write(&part_path, stmt).context("写入分段 SQL 失败")?;
+        match run_trace_processor(tp, trace, &part_path) {
+            Ok((out, _)) => {
+                stdout_all.push_str(&out);
+                // 保证结果集之间有空行分隔（parse_sections 按空行切块）
+                if !stdout_all.ends_with("\n\n") {
+                    stdout_all.push('\n');
+                }
+            }
+            Err(e) => {
+                first_err = format!("{section}: {e}");
+                break;
+            }
+        }
+    }
+    let _ = std::fs::remove_file(&part_path);
+    if stdout_all.is_empty() {
+        bail!("{first_err}");
+    }
+    let sec = parse_sections(&stdout_all);
     let mut notes = Vec::new();
-    if !sec.contains_key("END") {
-        let reason = stderr
-            .lines()
-            .rev()
-            .find(|l| !l.trim().is_empty())
-            .unwrap_or("未知原因")
-            .to_string();
-        notes.push(format!("部分查询未执行完（帧时间线等末尾段可能缺失）: {}", reason));
+    if !first_err.is_empty() {
+        notes.push(format!("部分查询未执行完（其后段缺失）: {first_err}"));
     }
     let window_ms = sec
         .get("bounds")
@@ -856,17 +899,32 @@ fn ensure_perfetto_ui_mirror() -> Result<PathBuf> {
         .map(PathBuf::from)
         .unwrap_or_default()
         .join(UI_CACHE_SUBDIR);
-    // 完整性检查：index.html 与 frontend_bundle.js 存在即视为缓存有效
+    // 完整性检查：index.html 声明的 stable 版本目录（data-perfetto_version JSON）
+    // 必须存在且含 frontend_bundle.js。混合/半截缓存（多次镜像运行交叠、index.html
+    // 引用的版本目录缺失）曾致页面停在主页，旧检查（任意 v 开头目录存在）认不出。
+    // index.html 无版本声明时退回旧检查。
     if dir.join("index.html").is_file() {
-        let has_bundle = std::fs::read_dir(&dir)
-            .map(|rd| {
-                rd.flatten().any(|e| {
-                    let n = e.file_name().to_string_lossy().into_owned();
-                    n == "frontend_bundle.js" || n.starts_with("v")
+        let stable_bundle = std::fs::read_to_string(dir.join("index.html"))
+            .ok()
+            .and_then(|html| {
+                let key = "\"stable\": \"";
+                let i = html.find(key)? + key.len();
+                let rest = &html[i..];
+                let end = rest.find('"')?;
+                Some(dir.join(&rest[..end]).join("frontend_bundle.js").is_file())
+            });
+        let ok = match stable_bundle {
+            Some(valid) => valid,
+            None => std::fs::read_dir(&dir)
+                .map(|rd| {
+                    rd.flatten().any(|e| {
+                        let n = e.file_name().to_string_lossy().into_owned();
+                        n == "frontend_bundle.js" || n.starts_with("v")
+                    })
                 })
-            })
-            .unwrap_or(false);
-        if has_bundle {
+                .unwrap_or(false),
+        };
+        if ok {
             return Ok(dir);
         }
     }
@@ -1194,6 +1252,22 @@ mod tests {
         for s in ["bounds", "pkg_total", "pkg_threads", "pkg_runnable", "top_procs", "per_core", "cpufreq", "frame_stats", "worst_frames", "END"] {
             assert!(q.contains(&format!("==={}===", s)), "missing marker {}", s);
         }
+    }
+
+    #[test]
+    fn test_sql_statements() {
+        let q = build_sql("p.kg");
+        let stmts = sql_statements(&q);
+        // 首条为 bounds 段（标记语句 + 查询），END 段在最后
+        assert_eq!(stmts.first().unwrap().0, "bounds");
+        assert!(stmts.first().unwrap().1.starts_with("select '===bounds===' as m;\n"));
+        assert_eq!(stmts.last().unwrap().0, "END");
+        // 每条语句以分号结尾；段名随标记切换、帧时间线查询归属正确
+        assert!(stmts.iter().all(|(_, s)| s.ends_with(";\n")));
+        let frame = stmts
+            .iter()
+            .find(|(n, s)| n == "frame_stats" && s.contains("actual_frame_timeline_slice"))
+            .expect("frame_stats 段应包含帧时间线查询");
     }
 
     #[test]

@@ -25,7 +25,7 @@ use xperf_core::simpleperf;
 #[command(version, about = "XPerformance Monitor - Android process CPU/memory monitor", long_about = None)]
 struct Args {
     /// Package name to monitor
-    #[arg(short, long, required_unless_present = "clean_cache")]
+    #[arg(short, long, required_unless_present_any = ["clean_cache", "update_simpleperf_scripts"])]
     package: Option<String>,
 
     /// 目标设备 serial（多台设备同连时必须指定，如 `adb devices` 列出的 6eb792dfb0f；
@@ -101,10 +101,16 @@ struct Args {
     #[arg(long)]
     compare_baseline: bool,
 
-    /// 清理缓存与采集数据后退出（~/.cache/xperf 的 UI 镜像/脚本集 + /tmp/xperf 的全部采集产物；
-    /// 清后首次深挖/火焰图会重新引导下载脚本）
+    /// 清理缓存与采集数据后退出（~/.cache/xperf 的 perfetto UI 镜像 + /tmp/xperf 的全部
+    /// 采集产物 + xperf-core/simpleperf_scripts/ 的火焰图脚本下载缓存，下次使用重新
+    /// 下载；更新用 --update-simpleperf-scripts）
     #[arg(long)]
     clean_cache: bool,
+
+    /// 强制重新下载 simpleperf 火焰图脚本与主机 report 库（覆盖
+    /// xperf-core/simpleperf_scripts/ 的 vendor 文件，git 提交同步到其他机器）后退出
+    #[arg(long)]
+    update_simpleperf_scripts: bool,
 }
 
 /// 设备选择：`--device` 指定 > 单台自动；多台未指定报错并列出清单。
@@ -1387,10 +1393,28 @@ async fn main() -> Result<()> {
     if args.clean_cache {
         let r = xperf_core::simpleperf::clean_all_caches()?;
         println!(
-            "缓存已清理: {} 个文件，{:.1} MB\n  - ~/.cache/xperf（perfetto UI 镜像 + simpleperf 脚本集，首次使用重新下载）\n  - /tmp/xperf（全部采集数据：CSV/图表/trace/调用栈）",
+            "缓存已清理: {} 个文件，{:.1} MB\n  - ~/.cache/xperf（perfetto UI 镜像，首次使用重新镜像）\n  - /tmp/xperf（全部采集数据：CSV/图表/trace/调用栈）\n  - xperf-core/simpleperf_scripts/（火焰图脚本下载缓存，下次使用重新下载或 --update-simpleperf-scripts）",
             r.files,
             r.bytes as f64 / 1e6
         );
+        return Ok(());
+    }
+    // --update-simpleperf-scripts：重新拉取 vendor 脚本后即退出（不进监控流程，无需包名）
+    if args.update_simpleperf_scripts {
+        let msg = xperf_core::simpleperf::update_simpleperf_scripts(Some(&|p| {
+            // 单行原地刷新（stderr；\r 回到行首覆盖上一条）
+            eprint!(
+                "\r{}/{} {}: {:.1} MB",
+                p.index,
+                p.files,
+                p.rel,
+                p.bytes as f64 / 1e6
+            );
+            use std::io::Write as _;
+            let _ = std::io::stderr().flush();
+        }))?;
+        eprintln!();
+        println!("{msg}");
         return Ok(());
     }
     // 监控流程必带 --package（clap required_unless_present 已保证非 clean_cache 时必填）

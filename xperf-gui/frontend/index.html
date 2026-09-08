@@ -20,68 +20,26 @@
   </main>
 
   <!-- 单设备页模板（每台在线设备克隆一份，serial 唯一化 datalist id）：
-       侧栏 = 该设备的采样控制；主区 = 性能指标 / Perfetto / Simpleperf 三个子 tab -->
+       侧栏 = 公共模块（应用管理=包名+应用操作，数据管理），三页常驻；
+       主区 = 性能指标 / Perfetto / Simpleperf 三个子 tab，
+       各自的控制归 tab 内（性能指标=采样控制，分析页=录制时长+录制按钮） -->
   <template id="devicePageTpl">
     <div class="device-page">
       <aside class="sidebar">
+        <h3>应用管理</h3>
         <label>Package:
           <input class="package-input" type="text" placeholder="输入或选择包名" autocomplete="off" />
           <datalist class="pkg-list"></datalist>
-          <div class="sidebar-row">
-            <button class="small flex-fill refresh-pkgs">刷新包列表</button>
-            <button class="small flex-fill launch-btn" title="am start -W 启动应用并测量冷启动">打开应用</button>
-            <button class="small flex-fill restart-btn" title="force-stop 后 am start -W，测真冷启动">重启应用</button>
-          </div>
-          <input class="activity-input" type="text" placeholder="Activity（留空自动解析主入口）" autocomplete="off" />
         </label>
-        <label>采样间隔:
-          <select class="interval-select">
-            <option value="50">50ms（极限，高采样开销）</option>
-            <option value="100">100ms（高频）</option>
-            <option value="200">200ms</option>
-            <option value="500">500ms</option>
-            <option value="1000" selected>1000ms（默认）</option>
-            <option value="2000">2000ms</option>
-            <option value="5000">5000ms（长测低扰动）</option>
-          </select>
-        </label>
-        <div class="checkboxes">
-          <label><input class="metric-cpu" type="checkbox" checked /> CPU</label>
-          <label><input class="metric-memory" type="checkbox" checked /> Memory</label>
-          <label><input class="metric-fps" type="checkbox" /> FPS</label>
-          <label><input class="metric-freq" type="checkbox" /> 频率</label>
-          <label><input class="metric-thermal" type="checkbox" /> 温度</label>
-          <label><input class="metric-gpu" type="checkbox" /> GPU</label>
-          <label><input class="metric-io" type="checkbox" /> IO</label>
-          <label><input class="metric-net" type="checkbox" /> 网络</label>
-        </div>
-        <div class="effective-rates"></div>
-        <label>窗口:
-          <select class="time-window">
-            <option value="follow" selected>跟随最新（10 分钟）</option>
-            <option value="all">全部历史</option>
-          </select>
-        </label>
-        <button class="start-btn">开始监控</button>
-        <button class="stop-btn" disabled>停止</button>
-        <h3>深挖录制</h3>
-        <label>录制时长:
-          <select class="record-seconds" title="录制时长（秒）：Perfetto / simpleperf 分析共用">
-            <option value="5">5 秒</option>
-            <option value="10" selected>10 秒</option>
-            <option value="15">15 秒</option>
-            <option value="30">30 秒</option>
-            <option value="60">60 秒</option>
-            <option value="120">120 秒</option>
-          </select>
-        </label>
-        <div class="record-hint">Perfetto / simpleperf 分析共用，录制期间可观察实时曲线</div>
+        <button class="small refresh-pkgs">刷新包列表</button>
         <div class="sidebar-row">
-          <button class="small flex-fill trace-btn">Perfetto 分析</button>
-          <button class="small flex-fill stack-btn">simpleperf 分析</button>
+          <button class="small flex-fill launch-btn" title="am start -W 启动应用并测量冷启动">打开应用</button>
+          <button class="small flex-fill restart-btn" title="force-stop 后 am start -W，测真冷启动">重启应用</button>
         </div>
+        <input class="activity-input" type="text" placeholder="Activity（留空自动解析主入口）" autocomplete="off" />
         <h3>数据管理</h3>
         <button class="small export-btn">导出 CSV</button>
+        <button class="small update-scripts-btn" title="从 AOSP 重新拉取 report_html.py 脚本与双平台 report 库（覆盖仓库 vendor 文件，git 提交后同步到其他机器）">更新火焰图脚本</button>
         <div class="sidebar-row">
           <button class="small flex-fill save-baseline-btn" title="把当前会话统计存为该包的基线（覆盖旧基线）">保存基线</button>
           <button class="small flex-fill compare-baseline-btn" title="当前会话与已存基线逐指标对比（回归/改善/持平）">对比基线</button>
@@ -95,7 +53,40 @@
           <button class="tab subtab" data-tab="stack">Simpleperf 分析</button>
         </div>
         <div class="tab-content perf-content">
-          <div class="idle-hint session-idle-hint">填包名 → 勾指标 → 「开始监控」。采集数据落 `/tmp/xperf/<包名>/`；深挖用「Perfetto 分析」/「simpleperf 分析」。</div>
+          <div class="perf-controls">
+            <div class="ctrl-row">
+              <button class="start-btn">开始监控</button>
+              <button class="stop-btn" disabled>停止</button>
+              <label>采样间隔:
+                <select class="interval-select">
+                  <option value="50">50ms（极限，高采样开销）</option>
+                  <option value="100">100ms（高频）</option>
+                  <option value="200">200ms</option>
+                  <option value="500">500ms</option>
+                  <option value="1000" selected>1000ms（默认）</option>
+                  <option value="2000">2000ms</option>
+                  <option value="5000">5000ms（长测低扰动）</option>
+                </select>
+              </label>
+              <label>窗口:
+                <select class="time-window">
+                  <option value="follow" selected>跟随最新（10 分钟）</option>
+                  <option value="all">全部历史</option>
+                </select>
+              </label>
+            </div>
+            <div class="checkboxes">
+              <label><input class="metric-cpu" type="checkbox" checked /> CPU</label>
+              <label><input class="metric-memory" type="checkbox" checked /> Memory</label>
+              <label><input class="metric-fps" type="checkbox" /> FPS</label>
+              <label><input class="metric-freq" type="checkbox" /> 频率</label>
+              <label><input class="metric-thermal" type="checkbox" /> 温度</label>
+              <label><input class="metric-gpu" type="checkbox" /> GPU</label>
+              <label><input class="metric-io" type="checkbox" /> IO</label>
+              <label><input class="metric-net" type="checkbox" /> 网络</label>
+            </div>
+            <div class="effective-rates"></div>
+          </div>
           <div class="chart chart-cpu-box"><canvas class="chart-cpu"></canvas></div>
           <div class="chart chart-mem-box"><canvas class="chart-mem"></canvas></div>
           <div class="chart chart-fps-box hidden"><canvas class="chart-fps"></canvas></div>
@@ -130,6 +121,17 @@
         </div>
         <div class="tab-content trace-content hidden">
           <div class="trace-toolbar">
+            <label class="toolbar-record">录制时长
+              <select class="trace-seconds" title="录制时长（秒）">
+                <option value="5">5 秒</option>
+                <option value="10" selected>10 秒</option>
+                <option value="15">15 秒</option>
+                <option value="30">30 秒</option>
+                <option value="60">60 秒</option>
+                <option value="120">120 秒</option>
+              </select>
+            </label>
+            <button class="small trace-start-btn" title="录制 trace 并分析，报告显示在本页">录制并分析</button>
             <button class="small open-perf-btn" disabled>在浏览器打开 Perfetto UI</button>
             <span class="trace-file-label"></span>
           </div>
@@ -139,6 +141,17 @@
         </div>
         <div class="tab-content stack-content hidden">
           <div class="trace-toolbar">
+            <label class="toolbar-record">录制时长
+              <select class="stack-seconds" title="录制时长（秒）">
+                <option value="5">5 秒</option>
+                <option value="10" selected>10 秒</option>
+                <option value="15">15 秒</option>
+                <option value="30">30 秒</option>
+                <option value="60">60 秒</option>
+                <option value="120">120 秒</option>
+              </select>
+            </label>
+            <button class="small stack-start-btn" title="录制调用栈并生成报告，结果显示在本页">录制并分析</button>
             <button class="small open-stack-btn" disabled>在浏览器打开火焰图</button>
             <span class="trace-file-label"></span>
           </div>

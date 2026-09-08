@@ -318,15 +318,13 @@ class DeviceSession {
       '<span class="rate-label">实际周期</span> ' + parts.join(' · ');
   }
 
-  // ---- 子 tab 切换（性能指标 / Perfetto / Simpleperf） ----
+  // ---- 子 tab 切换（性能指标 / Perfetto / Simpleperf；侧栏公共模块三页常驻） ----
   switchTab(which) {
     const perf = which === 'perf';
     this.el('perf-content').classList.toggle('hidden', !perf);
     this.el('trace-content').classList.toggle('hidden', which !== 'trace');
     this.el('stack-content').classList.toggle('hidden', which !== 'stack');
     for (const t of this.els('subtab')) t.classList.toggle('active', t.dataset.tab === which);
-    // 分析页隐藏左侧采样控制栏（报告占满全宽）；性能指标页恢复
-    this.el('sidebar').classList.toggle('hidden', !perf);
     // 图表容器显隐变化后尺寸需刷新
     if (perf) this.refreshChartSizes();
   }
@@ -573,6 +571,45 @@ class DeviceSession {
   }
 
   // ---- trace / stack 事件处理（payload 带 serial 已由 App 分发） ----
+  // 深挖「录制并分析」按钮（分析页 toolbar 内）状态同步
+  setTraceButtons(disabled) {
+    this.el('trace-start-btn').disabled = disabled;
+  }
+  setStackButtons(disabled) {
+    this.el('stack-start-btn').disabled = disabled;
+  }
+
+  // 启动 perfetto 录制+分析（分析页 toolbar 入口；不切换当前页，
+  // 进度在状态栏与报告区可见，done/error 时自动切到分析页）
+  async startTraceRecording(seconds) {
+    const pkg = this.package();
+    if (!pkg) { this.setStatus('请先填写包名'); return; }
+    try {
+      await invoke('start_trace', { serial: this.serial, package: pkg, seconds });
+      this.setTraceButtons(true);
+      this.setStatus('Perfetto 分析录制中: ' + pkg);
+      _diag('[' + this.serial + '] traceBtn: ' + pkg + ' ' + seconds + 's');
+    } catch (err) {
+      this.setStatus('Perfetto 分析错误: ' + err);
+      _diag('[' + this.serial + '] traceBtn invoke ERROR: ' + JSON.stringify(err));
+    }
+  }
+
+  // 启动 simpleperf 录制+报告（分析页 toolbar 入口，同上）
+  async startStackRecording(seconds) {
+    const pkg = this.package();
+    if (!pkg) { this.setStatus('请先填写包名'); return; }
+    try {
+      await invoke('start_stack', { serial: this.serial, package: pkg, seconds });
+      this.setStackButtons(true);
+      this.setStatus('Simpleperf 分析录制中: ' + pkg);
+      _diag('[' + this.serial + '] stackBtn: ' + pkg + ' ' + seconds + 's');
+    } catch (err) {
+      this.setStatus('Simpleperf 错误: ' + err);
+      _diag('[' + this.serial + '] stackBtn invoke ERROR: ' + JSON.stringify(err));
+    }
+  }
+
   handleTrace(p) {
     const { stage, message, trace_path } = p;
     if (stage === 'progress') {
@@ -590,17 +627,17 @@ class DeviceSession {
     this.el('trace-report').textContent = message;
     if (stage === 'recording') {
       // 命令行自动启动（--trace）时无 click handler 禁用，收到 recording 事件统一禁用
-      this.el('trace-btn').disabled = true;
+      this.setTraceButtons(true);
       this.setStatus(message);
     } else if (stage === 'recorded') {
       // 录制完成进入分析阶段：退出进度态，避免进度条冻结在 100%"录制中"
       this.setStatus('Perfetto trace 已拉回，分析中…');
     } else if (stage === 'done') {
-      this.el('trace-btn').disabled = false;
+      this.setTraceButtons(false);
       this.setStatus('Perfetto 分析完成');
       if (app.active === this.serial) this.switchTab('trace');
     } else if (stage === 'error') {
-      this.el('trace-btn').disabled = false;
+      this.setTraceButtons(false);
       this.setStatus('Perfetto 分析失败');
       if (app.active === this.serial) this.switchTab('trace');
     }
@@ -622,16 +659,16 @@ class DeviceSession {
     }
     this.el('stack-report').textContent = message;
     if (stage === 'recording') {
-      this.el('stack-btn').disabled = true;
+      this.setStackButtons(true);
       this.setStatus(message);
     } else if (stage === 'recorded') {
       this.setStatus('调用栈已拉回，生成报告中…');
     } else if (stage === 'done') {
-      this.el('stack-btn').disabled = false;
+      this.setStackButtons(false);
       this.setStatus('Simpleperf 分析完成');
       if (app.active === this.serial) this.switchTab('stack');
     } else if (stage === 'error') {
-      this.el('stack-btn').disabled = false;
+      this.setStackButtons(false);
       this.setStatus('Simpleperf 分析失败');
       if (app.active === this.serial) this.switchTab('stack');
     }
@@ -687,7 +724,6 @@ class DeviceSession {
       this.samplingRunning = true;
       this.el('start-btn').disabled = true;
       this.el('stop-btn').disabled = false;
-      this.el('session-idle-hint').classList.add('hidden');
       this.setStatus('监控中: ' + f.package);
     } catch (e) {
       this.setStatus('错误: ' + e);
@@ -771,7 +807,6 @@ class DeviceSession {
       this.toggleCharts();
       this.updateEffectiveRates();
     }
-    this.el('session-idle-hint').classList.add('hidden');
     this.el('start-btn').disabled = true;
     this.el('stop-btn').disabled = false;
     this.setStatus('监控中: ' + args.package);
@@ -814,21 +849,9 @@ class DeviceSession {
       t.addEventListener('click', () => this.switchTab(t.dataset.tab));
     }
 
-    // ---- Perfetto 深挖 ----
-    this.el('trace-btn').addEventListener('click', async () => {
-      const pkg = this.package();
-      if (!pkg) { this.setStatus('请先填写包名'); return; }
-      const seconds = parseInt(this.el('record-seconds').value, 10) || 10;
-      try {
-        await invoke('start_trace', { serial: this.serial, package: pkg, seconds });
-        this.el('trace-btn').disabled = true;
-        // 录制期间留在指标页观察实时曲线（采样与录制并行），完成/失败时自动切到分析页
-        this.setStatus('Perfetto 分析录制中: ' + pkg);
-        _diag('[' + this.serial + '] traceBtn: ' + pkg + ' ' + seconds + 's');
-      } catch (err) {
-        this.setStatus('Perfetto 分析错误: ' + err);
-        _diag('[' + this.serial + '] traceBtn invoke ERROR: ' + JSON.stringify(err));
-      }
+    // ---- Perfetto 深挖（分析页 toolbar 内录制；进度见状态栏与报告区） ----
+    this.el('trace-start-btn').addEventListener('click', () => {
+      this.startTraceRecording(parseInt(this.el('trace-seconds').value, 10) || 10);
     });
     // 打开浏览器 Perfetto UI 并自动加载 trace：本地镜像 UI + 同源深链（全自动）；
     // 离线/镜像失败自动回退拖拽方式（后端 open_perfetto_ui 处理，msg 含结果说明）
@@ -844,20 +867,9 @@ class DeviceSession {
       }
     });
 
-    // ---- Simpleperf 函数热点 ----
-    this.el('stack-btn').addEventListener('click', async () => {
-      const pkg = this.package();
-      if (!pkg) { this.setStatus('请先填写包名'); return; }
-      const seconds = parseInt(this.el('record-seconds').value, 10) || 10;
-      try {
-        await invoke('start_stack', { serial: this.serial, package: pkg, seconds });
-        this.el('stack-btn').disabled = true;
-        this.setStatus('Simpleperf 分析录制中: ' + pkg);
-        _diag('[' + this.serial + '] stackBtn: ' + pkg + ' ' + seconds + 's');
-      } catch (err) {
-        this.setStatus('Simpleperf 错误: ' + err);
-        _diag('[' + this.serial + '] stackBtn invoke ERROR: ' + JSON.stringify(err));
-      }
+    // ---- Simpleperf 函数热点（分析页 toolbar 内录制） ----
+    this.el('stack-start-btn').addEventListener('click', () => {
+      this.startStackRecording(parseInt(this.el('stack-seconds').value, 10) || 10);
     });
     // 打开浏览器火焰图：report_html.py 渲染 .data 为单文件 HTML（首次自动下载 AOSP
     // 脚本 ~10MB，需 python3）；HTML 新于 .data 时复用不重渲染
@@ -908,12 +920,24 @@ class DeviceSession {
         this.setStatus('基线对比失败: ' + e);
       }
     });
-    // 清理缓存与采集数据：~/.cache/xperf（UI 镜像/脚本集，首次使用重新下载）+
+    // 更新火焰图脚本：从 AOSP 强制重新拉取 vendor 文件（覆盖后 git 提交同步到其他机器）
+    this.el('update-scripts-btn').addEventListener('click', async () => {
+      this.setStatus('更新火焰图脚本中（AOSP，双平台 ~30MB）…');
+      try {
+        const msg = await invoke('update_simpleperf_scripts');
+        this.setStatus(msg);
+        _diag('[' + this.serial + '] updateScripts: OK');
+      } catch (err) {
+        this.setStatus('更新火焰图脚本失败: ' + err);
+        _diag('[' + this.serial + '] updateScripts ERROR: ' + JSON.stringify(err));
+      }
+    });
+    // 清理缓存与采集数据：~/.cache/xperf（UI 镜像；simpleperf 脚本集 vendor 在仓库不受影响）+
     // /tmp/xperf（全部采集数据）。采样/录制进行中会丢当前会话产物——原生对话框确认
     // （confirm() 在 webkit2gtk 下标题为 "Javascript-taurixxx"，不专业）
     this.el('clean-btn').addEventListener('click', async () => {
       const ok = await window.__TAURI__.dialog.confirm(
-        '将清理：\n- ~/.cache/xperf（UI 镜像/脚本集，首次使用会重新下载）\n- /tmp/xperf（全部采集数据：CSV/图表/trace/调用栈，含全部设备）\n\n正在采样/录制时当前会话产物会丢失，确认清理？',
+        '将清理：\n- ~/.cache/xperf（UI 镜像）\n- /tmp/xperf（全部采集数据：CSV/图表/trace/调用栈，含全部设备）\n- xperf-core/simpleperf_scripts/（火焰图脚本下载缓存，下次使用重新下载）\n\n正在采样/录制时当前会话产物会丢失，确认清理？',
         { title: 'XPerformance - 清理缓存与数据', kind: 'warning' }
       );
       if (!ok) return;
@@ -1047,6 +1071,21 @@ listen('sampling-error', (e) => {
   if (s) s.handleSamplingError(e.payload.message);
 });
 listen('devices-changed', (e) => app.onDevicesChanged(e.payload));
+// 火焰图脚本更新进度（全局操作，路由到激活设备的状态栏；进度条按完成文件数铺开）
+listen('scripts-update', (e) => {
+  const s = app.sessions.get(app.active);
+  if (!s) return;
+  const { stage, message } = e.payload;
+  if (stage === 'progress') {
+    // 消息形如 "3/7 report_html.js: 0.1 MB"（core 每完成一个文件回调一次）
+    const m = message.match(/^(\d+)\/(\d+)\b/);
+    if (m) {
+      s.setStatusProgress(message, (parseInt(m[1], 10) / parseInt(m[2], 10)) * 100);
+      return;
+    }
+  }
+  s.setStatus(message); // done / 无进度格式：普通样式
+});
 _diag('event listeners registered');
 
 // ---------- 主题切换（暗/亮，localStorage 持久化；全部设备页同步） ----------

@@ -7,6 +7,87 @@
 
 ---
 
+## 2026-09-08（一）午后 — perfetto 解析/浏览器打开 与 simpleperf 火焰图修复（Apple Silicon）
+
+**现象**：GUI 上 perfetto 分析失败、perfetto UI 浏览器打开失败、simpleperf 火焰图浏览器打开失败——三连挂的根因各不相同，均为 **macOS（Apple Silicon）环境差异**。
+
+### 1) perfetto 解析失败（真 bug，新 trace_processor 行为变更）
+
+- 报错：`Result rows were returned for multiple queries. Ensure that only the final
+  statement is a SELECT statement...`——新版 trace_processor（prebuilt
+  `trace_processor_shell-64180e40f94fa8bd`）**禁止一次执行多条返回行的 SELECT**，
+  而报告设计是单文件多段 SELECT（旧版本允许）
+- **修复**：`analyze()` 改为**逐条执行**（`sql_statements()` 按 `;\n` 切分，marker 语句
+  结果集天然存在，输出拼接后与旧版单次执行格式一致，`parse_sections` 无感）；
+  `-q file trace` 旧语法新旧版本通吃（Linux 机旧二进制无需变动）；失败即停语义保留
+  （其后段缺失 + notes 归因），首段失败保持整体报错
+- **E2E 验证**：CLI `--trace 5` 全链路 ✓（报告落盘、频率/帧时间线段齐全）
+
+### 2) perfetto UI 浏览器打开
+
+- 镜像缓存实测健康（headless Chrome 走真实深链：`Opening trace using built-in WASM
+  engine` → `Loading trace 22.07 MB (81.8 MB/s)`，console 判据）
+- 加固：`ensure_perfetto_ui_mirror` 完整性检查改为**校验 index.html 声明的 stable
+  版本目录**存在（含 frontend_bundle.js）——混合/半截缓存（多次镜像运行交叠）旧检查
+  （任意 v 目录存在）认不出
+- 用户当时的失败疑与 reboot 后 /tmp 清空/旧 GUI 进程相关，待 GUI 重启后复测
+
+### 3) simpleperf 火焰图失败（真 bug，Apple Silicon 平台缺口）
+
+- `host_report_lib()` 只认 `macos/x86_64`——本机 aarch64 直接命中兜底 bail
+  （缓存目录不存在 = 下载从未发生，佐证）
+- **实测发现上游 dylib 已是 universal 二进制（x86_64 + arm64）**，Apple Silicon 原生
+  可加载——**修复 = `host_report_lib` 接受 `("macos","aarch64")` 走同一路径**，
+  无需 Rosetta（中途实现的 `report_py_args` Rosetta 方案已删，最小正确实现）
+- **E2E 验证**：gitiles 逐文件下载（6 文件，dylib 25MB universal）+ 原生 python3 渲染
+  2.6MB data → 3.57MB HTML（1.4s）✓
+
+### 工程备忘
+
+- 工具 shell 捕获对含全角字符的输出偶发整段丢行（`od -c` 读文件绕过）；`/tmp` 在
+  沙箱内行为不稳定，临时文件用 workspace 内路径
+- CLAUDE.md 的 xdg-open 描述已过时（实为 open/xdg-open 分支），simpleperf 文档已同步
+
+### GUI 布局重排（分析页控件 + 侧栏瘦身）
+
+- 分析页（Perfetto/Simpleperf）toolbar 各加「录制时长下拉 + 录制并分析」——就地录制
+  不切页，与侧栏入口共用 `start_trace`/`start_stack` 命令；禁用状态经
+  `setTraceButtons`/`setStackButtons` 同步（命令行自动启动路径经 recording 事件覆盖）
+- **侧栏瘦身**：仅保留公共模块、**三个 tab 常驻不再隐藏**（switchTab 去掉 sidebar 切换）——
+  「应用管理」=包名输入/刷新包列表/打开应用/重启应用/Activity 输入（打开/重启与 Activity
+  从 Package label 内拆出独立成组）；「数据管理」=导出 CSV/保存基线/对比基线/清理缓存
+- 性能指标页新增 `perf-controls` 控制区：开始/停止、采样间隔、窗口、指标勾选横排
+  （checkboxes 由两列 grid 改单行流式）、实际周期；侧栏「深挖录制」段删除（时长下拉归各分析页）
+- 复用现有命令与事件流，无 Rust 逻辑改动；前端资产编译期嵌入（frontendDist），改前端须重建
+
+### 火焰图脚本 vendor 进仓库 + 更新功能
+
+- 脚本集从 `~/.cache/xperf/simpleperf_scripts/` **迁移到 `xperf-core/simpleperf_scripts/`**
+  （git 管理，7 文件 ~31MB：5 个纯 Python + **双平台 report 库**——darwin dylib 25MB universal
+  + linux .so 6MB ELF），文件齐全零网络；路径经 `env!("CARGO_MANIFEST_DIR")` 编译期锚定，
+  与运行 cwd 无关
+- **更新功能**：core `update_simpleperf_scripts()`（强制重拉、**双平台库都更新**——任一台
+  机器执行即双端同步）→ CLI `--update-simpleperf-scripts`（维护 flag，无需 --package）+
+  GUI 数据管理「更新火焰图脚本」按钮（`update_simpleperf_scripts` 命令）；覆盖后 git
+  提交即分发
+- ensure 行为：文件齐全直接用；缺项才逐文件补齐（下载函数 `download_scripts` 抽出共用）
+- `--clean-cache` 语义变化：脚本集 vendor 在仓库**不受清理影响**（消息与 GUI confirm 文案已同步）
+- Linux 侧适配（用户指正）：`bin/linux/x86_64/libsimpleperf_report.so`（ELF x86-64，6MB）
+  一并 vendor；.gitignore 加 `__pycache__/`（火焰图脚本运行的 python 产物）
+- E2E：CLI `--update-simpleperf-scripts` 7 文件重拉 ✓（git status 可见 vendor 目录待提交）
+- **更新进度**：`update_simpleperf_scripts(progress: Option<&dyn Fn(&ScriptsDownloadProgress)>)`
+  ——`ScriptsDownloadProgress`{index, files, rel, bytes, overall_bytes, overall_expected}；
+  CLI 回调 stderr `\r` 单行原地刷新、GUI emit `scripts-update` 事件（progress/done +
+  percent 字段）→ 前端 `setStatusProgress` 绿色进度条（done 退普通样式）
+- **下载改 Rust 流式**：不再经 shell 管道（`curl | python3 -m base64 -d > dest` 的重定向
+  会截断目标文件，失败留半截；且 python 退出码会掩盖 curl 失败）——spawn curl 读 stdout
+  字节流 + 内置 `Base64StreamDecoder` 边下边解（~1MB 粒度回调），python3 不再是下载依赖
+  （仍是 report_html.py 运行依赖）；`.dl-tmp` 原子替换 + update 两阶段（全下完才统一覆盖）
+- 进度条基准 = 既有 vendor 文件大小之和（首装缺失 → 只显示字节计数无百分比，诚实不造假）
+- E2E：进度 44 条流式（1MB 粒度）、`.dl-tmp` 零残留、重下 dylib md5 一致 ✓
+
+---
+
 ## 2026-09-08（一）上午 — GUI「打开应用」后 NoProcess 排查（RemoteServer 崩溃，非工具问题）
 
 **现象**：GUI 采样 `com.google.android.filament.gltf`（SS2 MAX）持续 `NoProcess: 包名下无进程`；用户确认点击过「打开应用」。

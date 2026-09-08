@@ -142,14 +142,28 @@ body { font-family: -apple-system, "Segoe UI", "Noto Sans CJK SC", "PingFang SC"
 .panel td { padding: 2px 8px 2px 0; font-variant-numeric: tabular-nums; }
 .panel pre { white-space: pre-wrap; font-size: 12px; line-height: 1.5; margin: 0; color: var(--text); }
 .effective-rates { font-size: 11px; color: var(--text-dim); margin: 4px 0 8px; line-height: 1.6; }
-.record-hint { font-size: 11px; color: var(--text-dim); margin: 2px 0 6px; line-height: 1.5; }
 .effective-rates .rate-label { font-weight: 600; }
 .effective-rates .rate-same { color: var(--ok); }
 .effective-rates .rate-limited { color: var(--warn); }
 
+/* ---------- 性能指标页控制区（原侧栏采样控制移入，随 tab 常驻） ---------- */
+.perf-controls { flex-shrink: 0; background: var(--bg-card); border-radius: 6px; padding: 10px 12px; display: flex; flex-direction: column; gap: 6px; }
+.perf-controls .ctrl-row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.perf-controls label, .perf-controls .ctrl-title { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--text); margin: 0; }
+.perf-controls select { padding: 4px 6px; background: var(--bg-input); color: var(--text); border: 1px solid var(--border); border-radius: 3px; }
+.perf-controls button { border: none; border-radius: 4px; cursor: pointer; }
+.perf-controls .start-btn { background: var(--ok); color: var(--on-ok); padding: 6px 14px; font-size: 13px; }
+.perf-controls .stop-btn { background: var(--err); color: var(--on-ok); padding: 6px 14px; font-size: 13px; }
+.perf-controls .start-btn:disabled, .perf-controls .stop-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.perf-controls .small { width: auto; padding: 4px 8px; font-size: 12px; background: var(--bg-btn); color: var(--text); flex-shrink: 0; }
+/* 指标勾选横排（侧栏时代的两列 grid 改为单行流式） */
+.perf-controls .checkboxes { display: flex; flex-wrap: wrap; gap: 2px 12px; margin: 0; }
+
 /* ---------- Perfetto / Simpleperf 分析 tab ---------- */
 .trace-toolbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; flex-shrink: 0; }
 .trace-toolbar .small { width: auto; padding: 5px 10px; }
+.trace-toolbar .toolbar-record { font-size: 12px; color: var(--text-mute); display: flex; align-items: center; gap: 4px; flex-shrink: 0; }
+.trace-toolbar select { padding: 4px 6px; background: var(--bg-input); color: var(--text); border: 1px solid var(--border); border-radius: 3px; }
 .trace-file-label { font-size: 12px; color: var(--text-mute); word-break: break-all; }
 .trace-report-box { flex: 1; min-height: 0; background: var(--bg-card); border-radius: 6px; padding: 10px 14px; overflow: auto; }
 .trace-report-box pre { white-space: pre-wrap; font-size: 12px; line-height: 1.5; margin: 0; color: var(--text); }

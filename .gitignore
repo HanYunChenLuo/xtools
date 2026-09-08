@@ -6,3 +6,5 @@ log/*.log
 xperf-gui/gen/
 # Node / 前端构建产物
 node_modules/
+# python 运行时产物（火焰图脚本运行生成）
+__pycache__/
