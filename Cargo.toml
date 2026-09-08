@@ -1,3 +1,7 @@
 [workspace]
 members = ["xperf-core", "xperformance", "xperf-gui", "xrm", "xperf-agent"]
+# xperf-agent 仅存在 Android 端二进制（设备端采样器），不含 macOS/Linux 主机产物：
+# 默认成员集排除它，主机上的 cargo build/test/check/doc 不构建 agent；
+# agent 只交叉编译：cargo build -p xperf-agent --target aarch64-linux-android --release
+default-members = ["xperf-core", "xperformance", "xperf-gui", "xrm"]
 resolver = "2"

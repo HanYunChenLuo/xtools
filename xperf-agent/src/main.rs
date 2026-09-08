@@ -53,6 +53,12 @@
 //!   限频至 ≥500ms 周期（每 fps_every_n_rounds 轮一次），与 CPU/内存节拍解耦——
 //!   低间隔下每轮跑 dumpsys SurfaceFlinger 会拖垮节拍（实测 50ms 间隔约半数轮次 overrun）
 
+// 仅 Android 目标：读 /proc、监听 localabstract 抽象 socket，主机平台无意义也无产物
+#[cfg(not(target_os = "android"))]
+compile_error!(
+    "xperf-agent 是 Android 设备端采样器，仅支持交叉编译：cargo build -p xperf-agent --target aarch64-linux-android --release"
+);
+
 mod fps;
 mod gpu;
 mod mem;
@@ -374,11 +380,7 @@ fn hello_line(ncores: u32, maxkhz: &[u64]) -> String {
 /// daemon 模式：监听抽象 socket，每连接一个会话（上限 MAX_SESSIONS），
 /// 0 会话持续 IDLE_EXIT_SECS 秒自杀。永不返回（bind 失败除外——已有 daemon 在跑）。
 fn run_daemon() -> ! {
-    // 抽象 socket 扩展 trait：Android/Linux 各在 os::android/os::linux 下（std 同 API）
-    #[cfg(target_os = "android")]
     use std::os::android::net::SocketAddrExt;
-    #[cfg(target_os = "linux")]
-    use std::os::linux::net::SocketAddrExt;
     use std::os::unix::net::UnixListener;
 
     let Some((_, ncores)) = proc::read_total_jiffies() else {

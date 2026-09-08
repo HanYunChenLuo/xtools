@@ -12,14 +12,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Commands
 
 ```bash
-# Build all tools (dev)
-cargo build --workspace
+# Build all host tools (dev；default-members 不含 xperf-agent，主机上不构建设备端 agent)
+cargo build
 
-# Build release binaries
-cargo build --release --workspace
+# Build release binaries (host tools；agent 无 macOS/Linux 二进制)
+cargo build --release
 
-# Run tests
-cargo test --workspace
+# Run tests（default-members，主机工具；agent 仅 Android 目标无主机测试）
+cargo test
 
 # Run tests for a single crate
 cargo test -p xperformance
@@ -28,8 +28,9 @@ cargo test -p xrm
 # Run a specific test
 cargo test -p xrm tests::test_dangerous_operation_detection
 
-# Check for errors without building
-cargo check --workspace
+# Check for errors without building（主机工具；--workspace 会连 agent 一起检查，
+# 在 macOS/Linux 主机上会被 agent 的 Android-only compile_error 拦截）
+cargo check
 
 # 文档构建与覆盖检查（两条都要跑：cargo doc 有默认 lint 集——裸尖括号 HTML/
 # 裸 URL/未解析链接等 missing_docs 单 lint 查不出来；xperf-core 已
@@ -42,7 +43,7 @@ cargo rustdoc -p xperf-gui --bins -- -W missing_docs
 
 Release binaries are written to `target/release/`。
 
-Workspace 成员：`xperf-core`（采样核心）、`xperformance`（CLI）、`xperf-gui`（Tauri GUI）、`xperf-agent`（设备端低间隔采样器，交叉编译 `cargo build -p xperf-agent --target aarch64-linux-android --release`，链接器配置在 `.cargo/config.toml`）、`xrm`（安全删除）。
+Workspace 成员：`xperf-core`（采样核心）、`xperformance`（CLI）、`xperf-gui`（Tauri GUI）、`xperf-agent`（设备端低间隔采样器，**仅 Android 二进制**——workspace `default-members` 排除它，主机目标显式构建被 `compile_error!` 拦截；交叉编译 `cargo build -p xperf-agent --target aarch64-linux-android --release`，链接器经 `.cargo/ndk-clang.sh` 按宿主 OS 探测（NDK **>= 25.1.8937393** 中取最相近，显式 ANDROID_NDK_HOME 等优先；API 26））、`xrm`（安全删除）。
 
 ---
 
@@ -239,7 +240,7 @@ Platform trait + `adb devices -l` product 字段自动检测（HU_SS3/HU_SS2MAXF
 **为什么**：adb 轮询单轮固定 6+ 次调用（每次 ~13ms 起，`dumpsys meminfo` ~100ms），低间隔下开销超过间隔本身，且每次 adb 调用都扰动被测系统。agent 常驻设备直接读 /proc（微秒级），NDJSON 经 socket 流式回传（PerfDog Agent 同构思路，但免装 APK：纯静态二进制）。当前 CLI/GUI 的**唯一**采样路径。
 
 **部署与 daemon 生命周期（2026-09-07 daemon 化）**：
-- 本机二进制：`target/aarch64-linux-android/release/xperf-agent`（不存在时自动执行 `cargo build -p xperf-agent --target aarch64-linux-android --release`；需 NDK，链接器配置在 `.cargo/config.toml`，当前绑定 NDK 25.1.8937393 / API 26）
+- 本机二进制：`target/aarch64-linux-android/release/xperf-agent`（不存在时自动执行 `cargo build -p xperf-agent --target aarch64-linux-android --release`；链接器经 `.cargo/ndk-clang.sh` 探测——macOS/Linux 双平台，NDK **>= 25.1.8937393** 中取最相近，显式 ANDROID_NDK_HOME/ANDROID_NDK_ROOT/NDK_HOME 优先且不过滤，无满足版本时报错列出已发现版本）
 - 设备端路径：`/data/local/tmp/xperf-agent`；daemon 启动日志 `/data/local/tmp/xperf-agent.log`
 - **生命周期**：`ensure_daemon`（spawn_agent 内）全权管理——adb forward（`--list` 复用既有规则，否则 `tcp:0` 新建）→ probe hello 版本 → 一致直连 / 不符 `suicide`+`pkill`+强制重推重启 / 无 daemon 则 pkill 清残留（含老版 stdout agent）+ 强制重推 + `setsid nohup ... --daemon` 启动。**强制重推绕过 size/mtime 快检**（同秒重建的同尺寸二进制会被快检误判跳推，实测造成版本协商死循环）；daemon 0 会话 60s 自杀，设备重启后下次会话自动重建
 - 手动重建推送：`cargo build -p xperf-agent --target aarch64-linux-android --release && adb push target/aarch64-linux-android/release/xperf-agent /data/local/tmp/`（下次会话自动 suicide 旧 daemon 重推重启）

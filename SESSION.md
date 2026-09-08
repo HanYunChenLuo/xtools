@@ -7,6 +7,111 @@
 
 ---
 
+## 2026-09-08（一）上午 — GUI「打开应用」后 NoProcess 排查（RemoteServer 崩溃，非工具问题）
+
+**现象**：GUI 采样 `com.google.android.filament.gltf`（SS2 MAX）持续 `NoProcess: 包名下无进程`；用户确认点击过「打开应用」。
+
+### 结论（证据闭环）
+
+- **xperf 工具链无异常**。「打开应用」正常执行（force-stop→800ms→`am start -W`），Activity 正常拉起，崩溃发生在应用自身 `onCreate`
+- **崩溃机制**：样例的 `RemoteServer(8082)`（CivetWeb）`mg_start` 失败 → fork 源码链 `RemoteServer.cpp ctor(48-64)` graceful 返回 → JNI `isValid()==false→return 0`（`RemoteServer.cpp(JNI):25-28`）→ Java `RemoteServer.java:43` 抛 IllegalStateException → FATAL（crash buffer 09-08 09:37:13 pid1744 + 09-04 18:46 pid1742 两条同栈）。进程死 → agent 每轮重扫 → NoProcess 刷屏
+- **排除端口占用**：3 次 `adb reboot` × 17 次早开机探测（最早 +25s），`/proc/net/tcp{,6}` 全程 8082(0x1F92) 仅应用自身监听；watcher 脚本（500ms 轮询 LISTEN + /proc/*/fd 定位持有者）从未见第三方进程
+- **未定位**：mg_start 失败的确切 errno。CivetWeb Android 构建的 `mg_cry_internal_impl` 走 `__android_log_vprint(tag=civetweb)`（`third_party/civetweb/src/civetweb.c:3695`）——错误本会进 logcat，但 09:37 主 buffer 已被 veh-faas 日志刷滚；`error_log_file=civetweb.txt` 写 cwd=/（只读）丢失
+- **复现条件**：两次失败均为**当天第一次冷开机**后 ~1 分钟内；`adb reboot`（温启动）3 次均无法复现
+
+### 遗留与工具
+
+- 已部署 `/data/local/tmp/catch8082.sh`：下次冷开机后 `adb root && adb shell sh /data/local/tmp/catch8082.sh` 自动拉起 6 轮 + 全量 logcat 落盘（catch.log）+ 8082 端口表（catch8082.log），失败即得 tag=civetweb 确切错误
+- 彻底方案：样例 `error_log_file` 改绝对路径（如 `/data/local/tmp/civetweb.txt`）重编 APK
+- 可选 feature（另立项）：GUI 检测「打开应用后进程立即消失」时提示应用启动崩溃（查 logcat -b crash），避免 NoProcess 误导
+
+---
+
+## 2026-09-07（日）夜 — Mac 主机构建修复（xperf-agent 收紧为 Android-only）
+
+**任务**：macOS 上 `cargo build --release` 失败——xperf-agent 用了 Linux/Android 专属 API
+`SocketAddr::from_abstract_name`（`std::os::linux|android::net::SocketAddrExt`），macOS 无此 API。
+
+### 方案（按「agent 只有 Android 端二进制」语义收紧）
+
+- **workspace 层**（`Cargo.toml`）：新增 `default-members`（core/CLI/GUI/xrm），主机上的
+  build/test/check/doc 不再构建 agent；`-p xperf-agent` 交叉编译不受影响（member 仍在）
+- **crate 层**（`xperf-agent/src/main.rs`）：`#[cfg(not(target_os = "android"))] compile_error!`
+  拦截主机目标的显式构建，报错信息直接给出交叉编译命令；顺带清理 run_daemon 里的
+  linux cfg 分支（crate 已 Android-only，linux 分支成死代码，`SocketAddrExt` import 无条件化）
+- **链接器跨平台**（`.cargo/config.toml` + 新增 `.cargo/ndk-clang.sh`）：原 config 硬编码
+  Linux 机器路径（`/home/han/.../linux-x86_64/...`），本 Mac 交叉编译同样失败。改为相对路径
+  指向包装脚本，按 `uname` 选 `darwin-x86_64`/`linux-x86_64` prebuilt，探测顺序
+  `$ANDROID_NDK_HOME` → `~/Library/Android/sdk/ndk/25.1.8937393` → `~/Android/Sdk/ndk/...`
+  （绑定 NDK 25.1.8937393 / API 26 不变）
+
+### 验证
+
+- `cargo build --release`（Mac 主机）✓；`cargo test` 77 passed 0 failed ✓
+- `cargo check -p xperf-agent`（主机目标）→ compile_error 明确拦截 ✓
+- `cargo build -p xperf-agent --target aarch64-linux-android --release` ✓
+  （产物 `target/aarch64-linux-android/release/xperf-agent`，907KB）
+- `cargo doc` + 三个 rustdoc missing_docs 检查全 0 warning ✓
+
+### 关键结论
+
+- cargo config 无宿主机条件语法（`cfg()` 只作用于编译目标），跨机器链接器解析只能经
+  包装脚本；rustc 对含 `/` 的相对 `linker` 路径按工作目录（workspace 根）解析，实测可用
+- `--workspace` 全量命令在主机上会触发 agent 的 compile_error（设计如此），
+  主机工作流一律用默认成员集命令（CLAUDE.md Commands 节已同步）
+
+### review 追加（NDK 版本策略统一）
+
+- 版本策略改为「**>= 25.1.8937393 均可，多版本取最相近**（满足下限的最小版本），
+  显式 ANDROID_NDK_HOME/ANDROID_NDK_ROOT/NDK_HOME 优先且不过滤」——不再 pin 具体版本
+- **删除 core 的 `find_ndk_linker()`（~60 行）+ `CARGO_TARGET_..._LINKER` env 覆盖**，
+  `.cargo/ndk-clang.sh` 成为唯一探测机制（补齐显式 env 分支与 SDK 根扫描）；
+  附带删除其单测（65→64）
+- 脚本验证：版本 key（major*1e12+minor*1e9+build）整型比较；假 wrapper 树实测
+  多版本取相近/无满足版本报错列出已发现版本/显式 env 直用/真机三版本取 25.1 全通过
+  （注：工具 shell 捕获对含全角字符的输出偶发丢行，用 od 读文件绕过）
+
+---
+
+## 2026-09-07（日）夜 — GitHub LFS 慢速下载修复（media 路线自定义传输通道）
+
+**任务**：本仓库 `example/apk/*.apk`（LFS）拉取极慢，定位并修复网络瓶颈。
+
+### 定位（实测数据）
+
+LFS 流程两段速度悬殊：batch API 协商（`github.com`）正常（TLS 0.17s）；**对象下载走
+`github-cloud.githubusercontent.com`（AWS S3 alambic 中转）仅 21KB/s**（29MB ≈ 24 分钟）。
+而 GitHub 自家媒体边缘 `media.githubusercontent.com/media/<owner>/<repo>/<ref>/<path>`
+直连 3.5MB/s（快 165 倍）。本机无代理（scutil/pgrep 确认），公共 gh 加速器对该 S3 签名
+URL 全部不可用（ghfast 1.1KB/s / ghproxy 9.7KB/s / moeyy 超时）。
+
+### 方案：git-lfs standalone 自定义传输通道
+
+- **代理脚本**：`~/.local/bin/git-lfs-media-agent`（python3，git-lfs custom transfer
+  协议：init 回 `{}`；download 时 oid→path 由 `git lfs ls-files` 解析（**注意输出是 10 位
+  短 oid，须前缀匹配**）、`<owner>/<repo>` 从 remote URL 解析（兼容 SSH/HTTPS/LFS endpoint
+  `/info/lfs` 后缀，字符集严格校验）、ref 取 HEAD——构造 media URL 下载，失败回退 batch
+  href（仅 https）；全程 subprocess 列表参数无 shell 注入面）
+- **接线（仓库 `.git/config` 本地生效，勿提交——脚本路径机器相关，提交会弄坏他人 clone）**：
+  ```bash
+  git config lfs.customtransfer.media-rewrite.path ~/.local/bin/git-lfs-media-agent
+  git config lfs.customtransfer.media-rewrite.direction download
+  git config lfs.standalonetransferagent media-rewrite
+  ```
+- **验证**：`git lfs env` 出现 `media-rewrite`；`git lfs pull` 13.7s 完成（原约 24 分钟），
+  SHA256 与 pointer oid 一致，`git lfs ls-files` 状态 `*`
+
+### 关键结论
+
+- 「git 主站快但 LFS 慢」= 两段流量走不同域名，S3 中转域线路劣化是根因；换 media 域即修复
+- **新 clone 首次 smudge 仍走慢速 basic**（clone 时仓库本地 config 尚未存在）：先
+  `GIT_LFS_SKIP_SMUDGE=1 git clone`，接线后 `git lfs pull`。全局启用（对所有 GitHub 仓库
+  生效，含 clone 时）把上面三条 `git config` 改 `git config --global` 即可
+- git-lfs 只认 batch API 的 transfer 协商，但 `lfs.standalonetransferagent` 可无条件绕过
+  （GitHub 不感知）；agent 回退 href 的设计保证 media 域 404 时行为退化为 basic，不丢功能
+
+---
+
 ## 2026-09-07（日）晚 — agent daemon 化（socket 服务 + 多 host + 版本握手）
 
 **任务线**：用户拍板重设计——「不要一条命令杀死一次 agent」：agent 常驻 daemon、心跳/无连接超时自杀、host 每会话连接（版本不符自杀/强杀重推，一致直连）、多 host 上限 10。
