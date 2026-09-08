@@ -529,10 +529,14 @@ fn needed_files(dir: &Path) -> Result<Vec<(String, PathBuf)>> {
     Ok(needed)
 }
 
-/// 逐文件下载（已存在的非空文件跳过——半截缓存只补缺项）
+/// 逐文件下载（已存在的非空文件跳过——半截缓存只补缺项；report 库按 >1MB 判存在，
+/// LFS 指针文本不算）
 fn download_scripts(needed: &[(String, PathBuf)]) -> Result<()> {
     for (rel, dest) in needed {
-        if dest.is_file() && std::fs::metadata(dest).map(|m| m.len() > 0).unwrap_or(false) {
+        let min_len = if rel.starts_with("bin/") { 1_000_000 } else { 0 };
+        if dest.is_file()
+            && std::fs::metadata(dest).map(|m| m.len() > min_len).unwrap_or(false)
+        {
             continue;
         }
         fetch_aosp_blob(rel, dest, None)?;
@@ -549,7 +553,19 @@ fn ensure_simpleperf_scripts() -> Result<PathBuf> {
     let needed = needed_files(&dir)?;
     let complete = needed
         .iter()
-        .all(|(_, p)| p.is_file() && std::fs::metadata(p).map(|m| m.len() > 0).unwrap_or(false));
+        .all(|(rel, p)| {
+            if !p.is_file() {
+                return false;
+            }
+            let len = std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
+            if rel.starts_with("bin/") {
+                // report 库为大二进制（6-25MB）：LFS 未拉取时本地是 ~130B 的指针文本，
+                // 按大小判缺（重新从 AOSP 下载），避免把指针文件当库加载报错难懂
+                len > 1_000_000
+            } else {
+                len > 0
+            }
+        });
     if complete {
         return Ok(dir);
     }
