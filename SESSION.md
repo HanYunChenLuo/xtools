@@ -88,6 +88,11 @@
 - **LFS 管理大二进制**：.gitattributes 加 `bin/**/*.dylib|so`，`git add --renormalize`
   迁移（9686402）；ensure/download 对 report 库按 >1MB 判存在——LFS 未拉取时本地是
   ~130B 指针文本，自动回退 AOSP 下载（避免把指针文件当库加载）
+- **历史重写**：`git lfs migrate import --everything` 把旧提交里的裸 blob（~31MB）也
+  转为指针——注意 migrate 会因工作区脏（含未跟踪文件）弹 y/N 询问导致挂起（后台跑
+  也会卡），须先清干净再跑；重写后 `git push --force-with-lease` 强推（LFS 对象
+  同 oid 免重传）；**本地保险分支 `backup-pre-lfs-migrate` 保留旧历史**（未推送）；
+  **Linux 机同步须 `git fetch && git reset --hard origin/main`（或重 clone），不能直接 pull**
 
 ---
 
