@@ -85,6 +85,9 @@
   （仍是 report_html.py 运行依赖）；`.dl-tmp` 原子替换 + update 两阶段（全下完才统一覆盖）
 - 进度条基准 = 既有 vendor 文件大小之和（首装缺失 → 只显示字节计数无百分比，诚实不造假）
 - E2E：进度 44 条流式（1MB 粒度）、`.dl-tmp` 零残留、重下 dylib md5 一致 ✓
+- **LFS 管理大二进制**：.gitattributes 加 `bin/**/*.dylib|so`，`git add --renormalize`
+  迁移（9686402）；ensure/download 对 report 库按 >1MB 判存在——LFS 未拉取时本地是
+  ~130B 指针文本，自动回退 AOSP 下载（避免把指针文件当库加载）
 
 ---
 
