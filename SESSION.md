@@ -7,6 +7,32 @@
 
 ---
 
+## 2026-09-09(3) — 非 root 设备支持全链路（WORKSPACE G 闭环）
+
+**任务**：探索无 root 时各指标可用性并落地能力降级；加「获取 root」按钮（结果反馈）；auto-root 收敛为非车机不默认提权。
+
+**环境**：SS3/SS2MAX 接 hppc（SSH 远程后端操作）；两台 `adb reboot` 掉 root（uid=2000 shell）作探索/回归环境，收尾已恢复 root。
+
+**commit**：9d26384（矩阵文档）→ 19ecef9（auto-root 仅车机 + XPERF_NO_AUTO_ROOT）→ ea3986f（协议 v3 hello.root + 内存降级 + RSS 兜底）→ 9c34b23（QNX 内嵌 telnet 去 busybox + --qnx-stop）→ ec2de2b（GUI 徽章/root 按钮/err 透传）。`feature/non-root-support` 合 main。
+
+**关键结论**（两机 shell 逐项实测，矩阵全表在 WORKSPACE G 节）：
+- **shell 直接可用**：CPU/线程（/proc 挂 hidepid=2,gid=3009，shell 在 readproc 组）、dumpsys meminfo 全分类、FPS（SF --list/--latency/全量 dump）、scaling_cur_freq、thermalservice、/proc/net/dev、冷启动、perfetto（traced 代劳特权）、SS2MAX kgsl gpubusy、SS3 dumpsys gpu 显存。
+- **shell 不可用**：smaps_rollup（PTRACE 拒）、/proc/<pid>/io（0400 owner-only，无兜底）、simpleperf（gltf viewer 非 debuggable）。
+- **QNX 惊喜**：/vendor/bin/busybox 被 SELinux 拒执行，但 QNX telnet 端口网络 shell 可达——agent 内嵌极简 telnet client（纯 TCP + IAC 协商全拒）后 **SS3 GPU 全功能（busy/util/频率/每进程）非 root 可用**。
+- 内存降级设计：低间隔 smaps 不可读 → decide_mode 探测一次 → dumpsys meminfo 限频 ≥500ms + err 告知；RSS 用 App Summary「TOTAL PSS:」同行的 TOTAL RSS 兜底（非 root 下 rss 不再为 0）。
+- 部署零障碍：/data/local/tmp shell 可写可执行，daemon 模式本无 root 依赖。
+
+**真机回归基线**（全部 --remote hppc）：
+- 非 root SS3 @500ms 九项齐开：hello root=false + 降级提示；CPU 41%/FPS 60/内存明细/RSS 765MB/**QNX busy 20.3% util 16.2% 506/635MHz + gpuproc 归因**；IO err 一次后静默；退出 teardown 停链（--qnx-stop 复核「未在跑，不动链」守卫正确）。
+- 非 root SS2MAX @50ms：内存 dumpsys 降级（PSS 629MB/RSS 741MB，~500ms 周期，dumpsys 开销致每 10 轮 2 轮 overrun——已知的降级代价）；kgsl 74.7%@585MHz shell 直读；IO err 禁用。
+- root 回归 SS3 @50ms：无 XPERF_NO_AUTO_ROOT → 车机 auto-root 生效（hello root=true），smaps 50ms 快路 + IO + QNX 全恢复。
+- GUI 冒烟（XPERF_NO_AUTO_ROOT + SS2MAX）：AgentHello{root:false} 到前端，徽章/灰显链路通（diag 佐证）。
+- 静态：全量测试 95 绿（core 80+6ignored/gui 8/cli 5/xrm 2）、clippy 0、cargo doc 0。
+
+**遗留**：GUI「获取 root」按钮点击交互人工目验（acquire_root 的 adb 序列 SS2MAX 真机 ~0.5s 生效）；泛型 Android 跳过 auto-root 分支无非车机真机（逻辑+detect 单测锁定）；agent 单测无法在主机跑（compile_error 限 Android 目标，历史如此）。
+
+---
+
 ## 2026-09-09(2) — Perfetto UI 镜像蓝屏修复 + GUI 性能优化 + 流式落盘统一
 
 **任务**：修远程 Perfetto UI 蓝屏；审查并优化 GUI 热路径性能；series 内存无限增长治理。

@@ -181,12 +181,14 @@ pub enum SampleEvent {
         /// 窗口内 jank 帧数（间隔 > 2×窗口中位间隔）
         jank_count: u32,
     },
-    /// agent 握手信息（核数 + 每核最大频率 KHz）
+    /// agent 握手信息（核数 + 每核最大频率 KHz + 权限身份）
     AgentHello {
         /// 设备核数
         ncores: u32,
         /// 每核最大频率（KHz，下标即核号）
         maxkhz: Vec<u64>,
+        /// agent 进程是否 uid=0（false 时 IO/smaps_rollup 等路径降级，GUI 灰显标注）
+        root: bool,
     },
     /// 每核当前频率（KHz），下标与 AgentHello 的 maxkhz 对应
     FreqUpdate {

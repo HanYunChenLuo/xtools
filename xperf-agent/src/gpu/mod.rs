@@ -34,6 +34,12 @@ pub(crate) fn set_qnx_host(ip: &str) {
     qnx::set_qnx_host(ip);
 }
 
+/// 一次性 QNX 停链（`--qnx-stop` 模式；host qnx_stop_stats 兜底路径的设备端载体，
+/// 内嵌 telnet 无 busybox 依赖、shell 可执行）。详见 qnx::stop_once。
+pub(crate) fn qnx_stop_once(ip: Option<&str>, period_ms: u64) {
+    qnx::stop_once(ip, period_ms);
+}
+
 /// GPU 路径探测（带平台提示）
 /// platform: "ss3" → QNX | "ss2max" → TopGpu | "ss4" → Ligfx | "android" → Kgsl | None → 自动探测
 pub(crate) fn detect_gpu_path_ex(platform: Option<&str>) -> Option<GpuPath> {
@@ -88,16 +94,34 @@ enum GpuEvent {
     Proc { name: String, busy: f32 },
 }
 
-/// 公共读线程骨架：逐行读子进程 stdout → parse → 发 gpu/gpuproc 事件。
-/// keepalive：QNX telnet 的 stdin 须移交线程持有保活（drop 即 EOF，telnet 会退出）。
+/// 流式通道的行源抽象：子进程 stdout（TopGpu/Ligfx）或 QNX 内嵌 telnet 会话。
+/// （QNX 通道 2026-09-09 起去 busybox 依赖改纯 TCP——shell 身份下 busybox 被
+/// SELinux 拒执行，非 root 设备需要无外部进程的行源）
+trait LineReader: Send + 'static {
+    /// 读一行（语义同 `BufRead::read_line`）：Ok(0) = EOF/连接断开
+    fn read_line(&mut self, buf: &mut String) -> std::io::Result<usize>;
+}
+
+/// 子进程 stdout 行源（TopGpu/Ligfx）
+struct ChildLines(std::io::BufReader<std::process::ChildStdout>);
+impl LineReader for ChildLines {
+    fn read_line(&mut self, buf: &mut String) -> std::io::Result<usize> {
+        std::io::BufRead::read_line(&mut self.0, buf)
+    }
+}
+
+/// 公共读线程骨架：逐行读行源 → parse → 发 gpu/gpuproc 事件。
+/// cleanup：EOF/stop 退出时的资源回收（kill 子进程 / 断开 TCP），只执行一次。
+/// keepalive：QNX telnet 的写半须移交线程持有保活（Arc 计数归零即断连风险无——
+/// 语义是防止线程存活期间写半被独占回收；watchdog/teardown 另持 Arc）。
 /// eof_err：流断开时的 err 文案（None 则静默退出）。
 /// io/stop：daemon 会话的输出通道（TLS 挂接）与停止标志（会话结束线程即收）；
 /// stdout 模式 io=None（直写 stdout）/ stop 永不置位。
 #[allow(clippy::too_many_arguments)]
 fn spawn_stream_parser(
-    child: std::process::Child,
-    reader: std::io::BufReader<std::process::ChildStdout>,
-    keepalive: Option<Arc<Mutex<std::process::ChildStdin>>>,
+    reader: impl LineReader,
+    cleanup: impl FnOnce() + Send + 'static,
+    keepalive: Option<Arc<Mutex<dyn std::io::Write + Send>>>,
     eof_err: Option<&'static str>,
     pid_names: &Arc<Mutex<HashMap<String, u32>>>,
     io: Option<crate::SessionIo>,
@@ -106,23 +130,26 @@ fn spawn_stream_parser(
 ) {
     let pid_names = pid_names.clone();
     std::thread::spawn(move || {
-        use std::io::BufRead;
         if let Some(io) = io {
             crate::set_session_io(io);
         }
         let _keepalive = keepalive;
-        let mut child = child;
         let mut reader = reader;
+        let mut cleanup = Some(cleanup);
         let mut line = String::new();
         loop {
             if stop.load(std::sync::atomic::Ordering::Relaxed) {
-                let _ = child.kill();
+                if let Some(c) = cleanup.take() {
+                    c();
+                }
                 return;
             }
             line.clear();
             match reader.read_line(&mut line) {
                 Ok(0) | Err(_) => {
-                    let _ = child.kill();
+                    if let Some(c) = cleanup.take() {
+                        c();
+                    }
                     if let Some(msg) = eof_err {
                         emit(&format!("{{\"t\":\"err\",\"msg\":\"{}\"}}", json_escape(msg)));
                     }

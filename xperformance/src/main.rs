@@ -480,9 +480,20 @@ async fn monitor_process_agent(
             }
         };
         match ev {
-            AgentEvent::Hello { ncores, maxkhz, .. } => {
+            AgentEvent::Hello { ncores, maxkhz, root, .. } => {
                 let maxghz: Vec<String> = maxkhz.iter().map(|k| format!("{:.2}", *k as f32 / 1e6)).collect();
-                println!("设备 {} 核（最大频率 GHz: [{}]）", ncores, maxghz.join(", "));
+                println!(
+                    "设备 {} 核（最大频率 GHz: [{}]，权限: {}）",
+                    ncores,
+                    maxghz.join(", "),
+                    if root { "root" } else { "shell（非 root）" }
+                );
+                if !root {
+                    println!(
+                        "{}",
+                        "⚠️ 非 root 设备：--io 不可用；低间隔内存降级为 dumpsys meminfo（有效周期 ≥500ms）；--stack 仅支持 debuggable 应用".yellow()
+                    );
+                }
             }
             AgentEvent::Cpu { ts, pid, cpu, th } => {
                 let Some(t) = DateTime::from_timestamp_millis(ts as i64)

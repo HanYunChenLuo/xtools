@@ -93,8 +93,8 @@ process_cpu% = (proc_jiffies_delta / total_jiffies_delta) × 100 × num_cores
 
 ### 内存采样
 
-- interval ≥ 500ms：设备端 `dumpsys meminfo <pid>`（App Summary 全分类明细）+ smaps_rollup 补 RSS
-- interval < 500ms：只读 `/proc/<pid>/smaps_rollup`（Pss/Rss，~1ms；dumpsys ~100ms 太重）
+- interval ≥ 500ms：设备端 `dumpsys meminfo <pid>`（App Summary 全分类明细）+ smaps_rollup 补 RSS（smaps 不可读时用 App Summary 的 TOTAL RSS 兜底）
+- interval < 500ms：优先只读 `/proc/<pid>/smaps_rollup`（Pss/Rss，~1ms；dumpsys ~100ms 太重）；**非 root 不可读时降级 dumpsys meminfo 限频 ≥500ms**（decide_mode 探测一次 + err 行告知）
 
 **真机格式注意**：App Summary 分类行与 `TOTAL PSS:` 之间隔一个空行——空行结束区块，TOTAL 必须在区块外兜底解析。
 
@@ -154,9 +154,10 @@ fps_sample_round(pid)                    ← agent 内每 PID 每 FPS 轮一次�
 
 关键设计点：
 - **net 是整机口径**：Android 应用共享 netns，`/proc/<pid>/net/dev` 与整机一致；per-app 流量需 qtaguid（内核无）或 eBPF maps（不便读），实测被测包 uid=1000 系统聚合也无意义——如实标注整机。
-- **QNX 通道细节**（SS3/8295，GPU 由 QNX host 管理，GVM 内无 kgsl 任何东西）：agent 起 `busybox telnet 172.31.101.52`（QNX 侧 root 免密）长连接，**`exec 3>/dev/kgsl-control` 持 fd 写入**开统计（gpu_set_log_level 4 + gpubusystats + gpu_per_process_busy 经 `>&3`），`slog2info -W | grep kgsl &` 流式读（**-W 不回放历史**，-w 会先倒几百行 backlog；grep 挡 VHAL 刷屏；**必须后台 &**，前台时 shell 阻塞、自愈命令滞留 tty 缓冲）。读线程独立不占节拍；进程行按 comm 名归因（QNX 显示名 = /proc/<pid>/comm）。
+- **QNX 通道细节**（SS3/8295，GPU 由 QNX host 管理，GVM 内无 kgsl 任何东西）：agent **内嵌极简 telnet client**（纯 TCP + RFC 854 最小协商全拒；2026-09-09 起替代 busybox telnet——shell 身份下 /vendor/bin/busybox 被 SELinux 拒执行，内嵌后**非 root 设备 QNX 通道可用**，网络层 shell 可达已实测）长连接，**`exec 3>/dev/kgsl-control` 持 fd 写入**开统计（gpu_set_log_level 4 + gpubusystats + gpu_per_process_busy 经 `>&3`），`slog2info -W | grep kgsl &` 流式读（**-W 不回放历史**，-w 会先倒几百行 backlog；grep 挡 VHAL 刷屏；**必须后台 &**，前台时 shell 阻塞、自愈命令滞留 tty 缓冲）。读线程独立不占节拍（读半=行源，写半 Arc 共享给看门狗/teardown）；进程行按 comm 名归因（QNX 显示名 = /proc/<pid>/comm）。
 - **QNX kgsl 统计链**（2026-09-03 实测）：驱动全局（开机自带 5000ms 链），会话/fd 关闭都不清理。写入语义：**fd3 长活连接（exec 3>）写入 → 存量链全部重相位（计数归零锁步）持续输出；`echo>` 死写入者是 toggle——流链→停、停链→复活**。故启动命令必须 exec 3> 持 fd 写；多链锁步重复行由读线程按"与上一行全等"去重；frame 静默超宽限（3 连续缺失）由看门狗经 fd3 重写自愈。**链清理（daemon 化后）**：teardown 注册进 GPU_TEARDOWN 槽，持有会话结束（先停链、后放读线程杀 telnet——顺序确定）或 daemon 退出时执行一次；host `qnx_stop_stats` 条件兜底（纯观察探测≥2 帧才发 echo> 停链——对已停链写入会复活，不可无条件执行）。流式 GPU 通道全局独占（GPU_STREAM_BUSY），多会话不再各开链。**已知缺陷（2026-09-07 发现，未修）**：清理只写 `gpubusystats`，**`gpu_per_process_busy` 进程链无停止手段**（实测死写入者 500 toggle / 写 0 / `gpu_set_log_level 0` 均无效）——每 --gpu 会话泄漏一条进程链，多日累积成 ~20 条锁步洪泛（疑似挤占资源致 frame 链无法启动，两轮会话 0 frame 事件）；**恢复手段 = `adb reboot`（整 SoC 复位含 QNX，链全清回开机基线）**；另 daemon 被 SIGKILL/`timeout` SIGTERM 杀时 teardown 无机会执行，同样泄链（手动直跑 agent 验证时勿用 timeout）。
-- 坑：QNX `login:`/`# ` 提示符**无换行**，必须逐字节读；子进程 stdin 句柄 drop 即 EOF，telnet 会退出（须移交读线程持有）。
+- 坑：QNX `login:`/`# ` 提示符**无换行**，必须逐字节读（内嵌 client 的 read_until 逐字节 + 读超时驱动 deadline）。
+- **权限模型（2026-09-09 非 root 支持）**：hello 带 `root` 标志（协议 v3，agent /proc/self/status Uid==0）。**auto-root 仅车机平台**（SS2/SS3/SS4 内部开发设备；泛型 Android 不默认提权，`XPERF_NO_AUTO_ROOT=1` 整体旁路供回归测试）；GUI 侧栏「设备权限」徽章 + 「获取 root」按钮（core `acquire_root`：adb root + 轮询确认，结果反馈状态栏；adbd 重启杀 daemon，采样走重连恢复）。**非 root 实测矩阵见 WORKSPACE G 节**：CPU/FPS/频率/温度/网络/显存/perfetto/冷启动 shell 全可用；内存低间隔 smaps 不可读自动降级 dumpsys meminfo 限频 ≥500ms（RSS 用 TOTAL RSS 兜底）；IO 无数据源发 err 禁用（GUI 灰显勾选）；simpleperf 仅 debuggable 应用。
 - **gpu/thermal 自适应降级**：探测失败发 err 并降级/禁用；此车机 thermalservice 是 test HAL 假数据（恒定 30.8°C），代码按标准接口实现，真手机有效。
 - **host 侧开关收敛为 `MetricFlags`**（xperf-core/agent.rs）：`spawn_agent`/`reconnect_agent` 签名从逐 bool 改为该结构体，CLI/GUI 共用。
 - **速率类指标（io/net/gpu）首样建基线不出数**，窗口按墙钟差值（非假定间隔），overrun 时速率仍准。（例外：kgsl 窗口语义下读数自含占比，首样即出数。）
@@ -185,7 +186,7 @@ Platform trait + `adb devices -l` product 字段自动检测（HU_SS3/HU_SS2MAXF
 
 **GPU 通道按平台选路**（agent `detect_gpu_path_ex`）：kgsl sysfs（Android/SS2）→ QNX telnet（SS3：172.31.101.52，写 /dev/kgsl-control 开统计，slog2info -W 流读，独立线程）→ topgpu（SS2MAX，需 push 工具）→ ligfxprofilerd logcat（SS4）→ dumpsys gpu 显存保底。SS3/SS4 有每进程 GPU busy（gpuproc 事件，按 comm 名归因，`lookup_pid` 15 字符截断匹配）。
 
-**SS2MAX 特性**：温度走 sysfs thermal zones 兜底（thermalservice sensors 列表为空但 HAL 有数据，条件须 `!sensors.is_empty()`）；IO 需 adb root（agent 自动 try_adb_root + id 验证）；GPU 显存无数据源（dumpsys gpu 无 Memory snapshot 段，/sys/kernel/debug 未编译进内核，/proc/kgsl 不存在——2026-09-07 root 下确证）；**gpubusy 是窗口语义**（读数为上一 ~1s 窗口的 busy/total µs，total 恒 ≈1e6，非累计计数器；按累计差值解析曾出 1662% 荒谬值）——`GpuBusyCalc` 自动判别累计/窗口双语义（幅值/回退/>100% 三判据锁定），窗口语义直读 busy/total、与 `gpu_busy_percentage` 节点同刻值互证一致。
+**SS2MAX 特性**：温度走 sysfs thermal zones 兜底（thermalservice sensors 列表为空但 HAL 有数据，条件须 `!sensors.is_empty()`）；IO 需 root（车机平台 auto-root 覆盖；非 root 时 /proc/<pid>/io 拒读发 err 禁用）；GPU 显存无数据源（dumpsys gpu 无 Memory snapshot 段，/sys/kernel/debug 未编译进内核，/proc/kgsl 不存在——2026-09-07 root 下确证）；**gpubusy 是窗口语义**（读数为上一 ~1s 窗口的 busy/total µs，total 恒 ≈1e6，非累计计数器；按累计差值解析曾出 1662% 荒谬值）——`GpuBusyCalc` 自动判别累计/窗口双语义（幅值/回退/>100% 三判据锁定），窗口语义直读 busy/total、与 `gpu_busy_percentage` 节点同刻值互证一致；gpubusy 节点 shell 可读（非 root 亦可采 GPU busy%）。
 
 ---
 
@@ -288,23 +289,23 @@ hop#2: 本机 P_loc → 远端 adb forward 分配端口（agent 事件流，每�
 **要点**：
 - 绝对节拍：`start + round × interval`，漂移时发 err 行（"round N overrun"）
 - CPU 窗口 = 相邻两轮差值（常驻保有状态，无 phase1/phase2 结构）
-- 需要 root（读他进程的 /proc、smaps_rollup）；内部设备 adbd 已 root
+- 权限：root 最优（他进程 smaps_rollup/io 需 root）；shell 身份自动降级（矩阵见 WORKSPACE G 节）——CPU/FPS/频率/温度/网络/显存/perfetto 全可用，内存低间隔降级 dumpsys 限频，IO 发 err 禁用；hello 带 `root` 标志（协议 v3）
 - 终端输出：interval ≥ 500ms 逐条详细打印；< 500ms 按 ~1s 聚合（avg/max），全量明细在流式 CSV；CSV 时间戳毫秒精度（`%.3f`）
-- 会话收尾：host 断开（TCP EOF）→ 会话即停；持有 GPU 流式通道的会话**先跑 teardown（QNX 停链写 telnet）再放读线程杀子进程**（顺序确定——先杀 telnet 则停链写入落空链残留，真机实测）；daemon 进程退出（suicide/空载/信号）经同一 teardown 槽
+- 会话收尾：host 断开（TCP EOF）→ 会话即停；持有 GPU 流式通道的会话**先跑 teardown（QNX 停链写 telnet）再放读线程断 TCP**（顺序确定——先断 TCP 则停链写入落空链残留，真机实测）；daemon 进程退出（suicide/空载/信号）经同一 teardown 槽
 - 宿主非正常死亡（kill -9）：TCP 随进程消亡 → daemon 会话即收——不再产生泄漏（旧 exec-out 时代的孤儿泄漏由 daemon 化根治）
 
 **代码结构**（模块拆分）：
-- `main.rs`：协议头注释、Args/parse_args、daemon（监听/连接处理/空载自杀）与 stdout 双模式、会话节拍循环（run_session）、TLS emitter 与公共工具（emit/json_escape/now_ms/dumpsys，crate 根私有项对所有子模块可见）
+- `main.rs`：协议头注释、Args/parse_args、`--qnx-stop` 一次性停链模式、daemon（监听/连接处理/空载自杀）与 stdout 双模式、会话节拍循环（run_session）、TLS emitter 与公共工具（emit/json_escape/now_ms/dumpsys，crate 根私有项对所有子模块可见）
 - `proc.rs`：/proc 与 sysfs 读取（stat jiffies/resolve_pids/cpufreq/io/net）+ `PidState::sample_cpu`（CPU% + 线程明细）
-- `mem.rs`：smaps_rollup（低间隔）+ dumpsys meminfo App Summary（≥500ms），`sample_memory` 直接 emit
+- `mem.rs`：smaps_rollup（低间隔）+ dumpsys meminfo App Summary（≥500ms），`MemMode::decide_mode` 探测降级（非 root 低间隔 → dumpsys 限频 ≥500ms），`sample_memory` 直接 emit
 - `fps.rs`：SurfaceFlinger 图层发现 + 帧时间戳差值 + jank，`FpsState::sample_round`
 - `thermal.rs`：thermalservice 解析 + sysfs thermal zones 兜底，`sample` 返回是否有数据
-- `gpu/`：`mod.rs`（GpuPath 枚举 + detect_gpu_path_ex + `spawn_stream_parser` 公共读线程骨架 + emit_gpumem）+ `kgsl.rs`/`qnx.rs`/`topgpu.rs`/`ligfx.rs` 四通道；三流式通道样本归一为 `GpuEvent::Sys/Proc` 后交公共读线程 emit（wire 格式不变：按通道字段有无按需输出 util/maxmhz）
+- `gpu/`：`mod.rs`（GpuPath 枚举 + detect_gpu_path_ex + `spawn_stream_parser` 公共读线程骨架（LineReader 行源抽象 + cleanup 闭包）+ emit_gpumem）+ `kgsl.rs`/`qnx.rs`（内嵌 telnet client `QnxTelnet`）/`topgpu.rs`/`ligfx.rs` 四通道；三流式通道样本归一为 `GpuEvent::Sys/Proc` 后交公共读线程 emit（wire 格式不变：按通道字段有无按需输出 util/maxmhz）
 
 **要点**：
 - 绝对节拍：`start + round × interval`，漂移时发 err 行（"round N overrun"）
 - CPU 窗口 = 相邻两轮差值（常驻保有状态，无 phase1/phase2 结构）
-- 需要 root（读他进程的 /proc、smaps_rollup）；内部设备 adbd 已 root
+- 权限：root 最优（他进程 smaps_rollup/io 需 root）；shell 身份自动降级（见上条要点）
 - 终端输出：interval ≥ 500ms 逐条详细打印；< 500ms 按 ~1s 聚合（avg/max），全量明细在流式 CSV；CSV 时间戳毫秒精度（`%.3f`）
 - 主机断连（EOF）→ 自动重连恢复（见上）；Ctrl-C → adb 连接关闭 → agent 写 stdout 失败自行退出（节拍循环整轮零输出时发空行探活，一个周期内感知断连；host 侧 next_event 跳过空行，零协议影响）；宿主进程死亡 → 孤儿清理 + stdin EOF/停滞看门狗兜底（见「传输与 liveness」）
 

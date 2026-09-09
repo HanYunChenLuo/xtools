@@ -70,6 +70,9 @@ pub enum AgentEvent {
         /// 协议版本（host 校验：不符则 suicide + 重推二进制）
         #[serde(default)]
         version: u32,
+        /// agent 进程是否 uid=0（v3 起；无 root 时 IO/smaps_rollup 等路径降级）
+        #[serde(default)]
+        root: bool,
     },
     /// ts: 墙钟毫秒；cpu: 单核口径 %；th: [tid, 线程名, cpu%]（仅 >0.05% 的线程）
     Cpu {
@@ -222,7 +225,8 @@ pub enum AgentEvent {
 
 /// 与 agent 的协议版本：与 xperf-agent 的 PROTOCOL_VERSION 同步 bump（改 wire 协议/命令时）。
 /// host 连接时校验 hello 的 version，不一致则通知 suicide + 强杀重推。
-pub const AGENT_PROTOCOL_VERSION: u32 = 2;
+/// v3：hello 增加 `root` 字段。
+pub const AGENT_PROTOCOL_VERSION: u32 = 3;
 
 /// daemon 的抽象 socket 名（设备端 `localabstract:xperf-agent`）
 const AGENT_ABSTRACT_SOCK: &str = "xperf-agent";
@@ -356,7 +360,18 @@ pub fn ensure_agent_built() -> Result<PathBuf> {
 /// 尝试 adb root（生产构建可能失败，静默忽略）。
 /// 不解析 adb root 文案（各版本不同），直接 `adb shell id` 验证 uid。
 /// `serial`：目标设备（多设备并行会话用，`None` 回退全局选择）。
+///
+/// 策略（2026-09-09）：**仅车机平台（SS2/SS3/SS4）自动 root**——车机是内部开发
+/// 设备，root 无副作用且 IO 等指标依赖它；非车机（普通 Android 手机等）跳过，
+/// 不在用户设备上默认提权（无 root 时各指标按能力降级，矩阵见 WORKSPACE G 节）。
+/// `XPERF_NO_AUTO_ROOT=1` 整体禁用自动 root（非 root 降级路径的回归测试用）。
 fn try_adb_root(serial: Option<&str>) {
+    if std::env::var_os("XPERF_NO_AUTO_ROOT").is_some() {
+        return;
+    }
+    if matches!(crate::platform::detect_platform_live(serial).id(), crate::platform::PlatformId::Android) {
+        return; // 非车机：不默认获取 root
+    }
     let adb = || crate::utils::adb_for(serial);
     let _ = adb().args(["root"]).output();
     // adbd 重启后等设备回来
@@ -365,7 +380,39 @@ fn try_adb_root(serial: Option<&str>) {
     if id.contains("uid=0") {
         eprintln!("adb root: 成功（uid=0）");
     } else {
-        eprintln!("adb root: 未生效（{}），IO/GPU 显存等指标不可用", id.trim());
+        eprintln!("adb root: 未生效（{}），无 root 指标按能力降级（IO 等不可用）", id.trim());
+    }
+}
+
+/// 显式获取 root 权限（GUI「获取 root」按钮用；用户显式动作，任意平台都执行——
+/// 与 try_adb_root 的「仅车机自动 root」策略不同，这里是用户明确要求）。
+/// `adb root` 会重启 adbd：设备短暂离线、设备端 daemon 被杀，采样中会话走既有
+/// 重连恢复（新 daemon 继承 root 身份，新 hello root=true）。轮询 `id` 确认
+/// （adbd 重启需数秒），上限 15s；生产构建拒 root 时透传 adb 原文报错。
+/// `serial`：目标设备（多设备并行会话用，`None` 回退全局选择）。
+pub fn acquire_root(serial: Option<&str>) -> Result<String> {
+    use std::time::{Duration, Instant};
+    let out = crate::utils::adb_for(serial)
+        .args(["root"])
+        .output()
+        .context("adb root 执行失败")?;
+    let msg = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(500));
+        let id = crate::utils::run_adb_command_for(serial, &["shell", "id"]).map(|o| o.stdout).unwrap_or_default();
+        if id.contains("uid=0") {
+            return Ok("已获取 root 权限（uid=0）".to_string());
+        }
+        // adbd 已回来但仍 shell 且 adb root 明确拒绝（生产构建）：fail-fast 报原文
+        if id.contains("uid=") && msg.contains("cannot") {
+            anyhow::bail!("{}", msg.trim());
+        }
+    }
+    if msg.trim().is_empty() {
+        anyhow::bail!("adb root 超时（15s 内设备未以 root 回来）")
+    } else {
+        anyhow::bail!("{}（15s 未生效）", msg.trim())
     }
 }
 
@@ -643,13 +690,15 @@ fn device_online(serial: Option<&str>) -> bool {
 /// QNX kgsl 统计链停止（CLI/GUI 会话结束由 host 兜底调用）。
 ///
 /// daemon 化（2026-09-07）后的语义：正常路径下链清理由 daemon 的会话 teardown
-/// 完成（先停链后收 telnet，顺序确定），本函数只是**daemon 异常死亡**（SIGKILL
+/// 完成（先停链后断 TCP，顺序确定），本函数只是**daemon 异常死亡**（SIGKILL
 /// 等，teardown 无机会执行）时的兜底。故门控极简单：
 /// - daemon 进程在（pgrep ≥1）→ teardown 已处理（或别的会话正在采样，停链会
 ///   杀掉对方的流），直接返回，不等待不探测；
-/// - daemon 不在（异常死亡）→ 先纯观察探测（只读 slog，不动 kgsl-control），
-///   frame 流在跑才发 echo>（死写入者）停止——对已停链写入会将其全部复活
-///   （真机实测 toggle 语义），故不可无条件执行。
+/// - daemon 不在（异常死亡）→ 调设备端 agent `--qnx-stop` 一次性模式：纯观察
+///   frame 流（只读 slog 不写 kgsl-control），在跑才发 echo>（死写入者）停止
+///   （对已停链写入会将其全部复活——toggle 语义真机实测，不可无条件执行）。
+///   2026-09-09 起走 agent 内嵌 telnet（无 busybox 依赖，shell 身份可执行）；
+///   旧版设备端二进制无 --qnx-stop 会报错退出，best-effort 忽略。
 pub fn qnx_stop_stats(platform: &dyn crate::platform::Platform, interval_ms: u64, serial: Option<&str>) {
     let Some(ip) = platform.qnx_host() else { return };
     // `[n]` 正则防检测命令载体自匹配。pgrep 在目标设备上执行，多设备并行时
@@ -666,22 +715,17 @@ pub fn qnx_stop_stats(platform: &dyn crate::platform::Platform, interval_ms: u64
         return; // daemon 在：会话 teardown 已停链（或他人在采样）
     }
     let period = interval_ms.clamp(100, 1000);
-    // 探测：~5s 纯观察（只读 slog 不写 kgsl-control，无副作用）
-    let probe = format!(
-        "({{ sleep 1; echo root; sleep 1; echo 'slog2info -W | grep frame &'; sleep 3; }} | busybox telnet {})",
-        ip
-    );
-    let Ok(out) = adb().arg("shell").arg(&probe).output() else { return };
-    let flowing = String::from_utf8_lossy(&out.stdout).matches("frame ").count();
-    if flowing < 2 {
-        return; // 链未在流：不写，死写入者撞停链会复活
+    // adb 调用本身失败：best-effort 忽略
+    if let Ok(o) = adb()
+        .arg("shell")
+        .arg(format!("{} --qnx-stop {} {}", DEVICE_AGENT_PATH, ip, period))
+        .output()
+    {
+        let out = String::from_utf8_lossy(&o.stdout).trim().to_string();
+        let err = String::from_utf8_lossy(&o.stderr).trim().to_string();
+        // 诊断留痕（正常路径 teardown 已停链时这里会打印「未在跑，不动链」）
+        eprintln!("qnx-stop: {}{}", out, if err.is_empty() { String::new() } else { format!(" | stderr: {}", err) });
     }
-    // 停链：echo>（死写入者）式写入对流链 = 停止全部（真机实测，fd3 活连接存在时亦有效）
-    let kill = format!(
-        "({{ sleep 1; echo root; sleep 1; echo 'echo gpubusystats {} > /dev/kgsl-control'; sleep 2; }} | busybox telnet {})",
-        period, ip
-    );
-    let _ = adb().arg("shell").arg(&kill).output();
 }
 
 /// 断连恢复：事件流 EOF（adb 长连接断开 / agent 进程退出）后调用。
@@ -883,18 +927,23 @@ mod tests {
     /// hello 版本字段解析（daemon 探活的路径依赖：probe_daemon 据此判版本）
     #[test]
     fn test_hello_version() {
-        let ev: AgentEvent = serde_json::from_str(r#"{"t":"hello","ncores":8,"maxkhz":[1785600],"version":2}"#).unwrap();
+        let ev: AgentEvent =
+            serde_json::from_str(r#"{"t":"hello","ncores":8,"maxkhz":[1785600],"version":3,"root":true}"#).unwrap();
         match ev {
-            AgentEvent::Hello { ncores, maxkhz, version } => {
-                assert_eq!((ncores, version), (8, 2));
+            AgentEvent::Hello { ncores, maxkhz, version, root } => {
+                assert_eq!((ncores, version), (8, 3));
                 assert_eq!(maxkhz, vec![1785600]);
+                assert!(root);
             }
             _ => panic!("应为 Hello 事件"),
         }
-        // 旧版 agent（无 version 字段）兼容解析为 0
+        // 旧版 agent（无 version/root 字段）兼容解析：version=0、root=false（按非 root 标注）
         let ev: AgentEvent = serde_json::from_str(r#"{"t":"hello","ncores":8}"#).unwrap();
         match ev {
-            AgentEvent::Hello { version, .. } => assert_eq!(version, 0),
+            AgentEvent::Hello { version, root, .. } => {
+                assert_eq!(version, 0);
+                assert!(!root);
+            }
             _ => panic!("应为 Hello 事件"),
         }
     }

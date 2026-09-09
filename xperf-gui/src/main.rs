@@ -40,9 +40,9 @@ fn map_event(
         }
     }
     match ev {
-        AgentEvent::Hello { ncores, maxkhz, .. } => {
-            eprintln!("[sampling] agent 已启动（{} 核）", ncores);
-            out.push(SampleEvent::AgentHello { ncores, maxkhz });
+        AgentEvent::Hello { ncores, maxkhz, root, .. } => {
+            eprintln!("[sampling] agent 已启动（{} 核，{}）", ncores, if root { "root" } else { "shell" });
+            out.push(SampleEvent::AgentHello { ncores, maxkhz, root });
         }
         AgentEvent::Cpu { ts, pid, cpu, th } => {
             let t = ts_of(ts);
@@ -116,7 +116,14 @@ fn map_event(
         AgentEvent::Noproc => {
             out.push(SampleEvent::NoProcess { error: "包名下无进程".to_string() });
         }
-        AgentEvent::Err { msg } => eprintln!("[sampling] agent: {}", msg),
+        AgentEvent::Err { msg } => {
+            eprintln!("[sampling] agent: {}", msg);
+            // 能力/降级类 err 透传前端状态栏（用户需要看到「IO 需 root」等提示）；
+            // 节拍 overrun 警告（"round N overrun"）高频重复只进日志
+            if !msg.starts_with("round ") {
+                out.push(SampleEvent::SampleError { pid: None, stage: "agent".to_string(), error: msg });
+            }
+        }
     }
     out
 }
@@ -828,6 +835,16 @@ async fn restart_app(serial: String, package: String, activity: String) -> Resul
     xperf_core::coldstart::measure(&package, &activity, Some(&serial)).map_err(|e| e.to_string())
 }
 
+/// 显式获取设备 root 权限（侧栏「获取 root」按钮，结果文案直接反馈到状态栏）。
+/// `adb root` 重启 adbd：设备短暂离线、daemon 被杀；采样中会话走既有重连恢复
+/// （新 daemon 以 root 身份重建，新 hello 带 root=true，前端据此更新徽章/解禁 IO）。
+/// 阻塞数秒（adbd 重启 + 轮询确认），async 不卡 UI。
+#[tauri::command]
+async fn acquire_root(serial: String) -> Result<String, String> {
+    ensure_device_online(&serial)?;
+    xperf_core::agent::acquire_root(Some(&serial)).map_err(|e| e.to_string())
+}
+
 /// 在线设备清单（顶栏设备 tab 用）：`{devices: [{serial, model, version}]}`
 #[tauri::command]
 fn list_devices() -> Result<serde_json::Value, String> {
@@ -1455,6 +1472,7 @@ fn main() {
             startup_sessions,
             launch_app,
             restart_app,
+            acquire_root,
             export_csv,
             save_baseline,
             compare_baseline,
