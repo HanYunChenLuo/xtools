@@ -736,6 +736,137 @@ fn list_devices() -> Result<serde_json::Value, String> {
     }))
 }
 
+// ---------- SSH 远程后端（连接切换；设计 docs/DESIGN-ssh-remote.md §6.2） ----------
+
+/// 远程连接配置（`~/.config/xperf/remotes.json` 持久化，顶栏「连接」控件编辑）
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct RemoteConfig {
+    /// 展示名（下拉选项文本与唯一键，如 `hppc`）
+    name: String,
+    /// ssh 目标（`ssh_config` Host 别名或 `user@host`）
+    host: String,
+    /// 远端 adb 可执行路径（默认 `adb`；远端 PATH 常不含）
+    adb_path: String,
+    /// 远端 adb server 端口（默认 5037）
+    remote_port: u16,
+}
+
+fn remotes_config_path() -> Option<std::path::PathBuf> {
+    let base = std::env::var_os("XDG_CONFIG_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".config")));
+    base.map(|b| b.join("xperf").join("remotes.json"))
+}
+
+fn load_remotes() -> Vec<RemoteConfig> {
+    remotes_config_path()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+/// 设备列表转 JSON（list_devices / connect_remote 共用）
+fn devices_json(devices: Vec<xperf_core::AdbDevice>) -> serde_json::Value {
+    serde_json::json!({
+        "devices": devices
+            .into_iter()
+            .map(|d| serde_json::json!({ "serial": d.serial, "model": d.model, "version": d.android_version }))
+            .collect::<Vec<_>>(),
+    })
+}
+
+/// 已保存的远程连接配置列表
+#[tauri::command]
+fn list_remotes() -> Vec<RemoteConfig> {
+    load_remotes()
+}
+
+/// 增/改远程连接配置（按 name upsert 后落盘）
+#[tauri::command]
+fn save_remote(cfg: RemoteConfig) -> Result<(), String> {
+    if cfg.name.trim().is_empty() || cfg.host.trim().is_empty() {
+        return Err("名称与 ssh 目标不能为空".into());
+    }
+    let mut list = load_remotes();
+    list.retain(|r| r.name != cfg.name);
+    list.push(cfg);
+    let p = remotes_config_path().ok_or("无法确定配置目录（HOME 未设置）")?;
+    if let Some(dir) = p.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    }
+    std::fs::write(&p, serde_json::to_string_pretty(&list).map_err(|e| e.to_string())?)
+        .map_err(|e| e.to_string())
+}
+
+/// 当前远程状态：`{mode: "local"|"ssh", host, alive}`（顶栏状态/启动回填用）
+#[tauri::command]
+fn remote_status() -> serde_json::Value {
+    match xperf_core::transport() {
+        xperf_core::Transport::Local => {
+            serde_json::json!({"mode": "local", "host": null, "alive": true})
+        }
+        xperf_core::Transport::Ssh(t) => serde_json::json!({
+            "mode": "ssh",
+            "host": t.host,
+            "alive": xperf_core::tunnel_alive(),
+        }),
+    }
+}
+
+/// 切换连接：停全部会话 → 关旧远程 → （可选）建新远程 → 返回新侧设备列表。
+/// `host: None` = 切回本机。前端成功后重建全部设备 tab。
+/// 进行中的 trace/stack 录制不等待（时间有界，adb 断开自然报错收尾）。
+#[tauri::command]
+async fn connect_remote(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    host: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let emit = |state_s: &str, host: Option<&str>, message: String| {
+        let _ = app.emit(
+            "remote-status",
+            serde_json::json!({"state": state_s, "host": host, "message": message}),
+        );
+    };
+    // 停全部采样会话（采样线程下一轮退出；AgentStream drop 关 TCP → daemon 会话收尾）
+    if let Ok(map) = state.sessions.lock() {
+        for s in map.values() {
+            *s.running.lock().unwrap() = false;
+        }
+    }
+    xperf_core::shutdown_remote();
+
+    let Some(host) = host else {
+        emit("local", None, "已切回本机".to_string());
+        return xperf_core::list_adb_devices()
+            .map(devices_json)
+            .map_err(|e| e.to_string());
+    };
+
+    emit("connecting", Some(&host), format!("正在连接 {host}…"));
+    // 配置查找（按 name 或 host 匹配）；未保存的临时目标用默认 adb 路径/端口
+    let cfg = load_remotes()
+        .into_iter()
+        .find(|r| r.name == host || r.host == host);
+    let mut target = xperf_core::SshTarget::new(&host);
+    if let Some(c) = cfg {
+        target = xperf_core::SshTarget::new(&c.host)
+            .with_adb_path(&c.adb_path)
+            .with_remote_port(c.remote_port);
+    }
+    match xperf_core::init_remote(target) {
+        Ok(devices) => {
+            emit("connected", Some(&host), format!("已连接 {host}"));
+            Ok(devices_json(devices))
+        }
+        Err(e) => {
+            let msg = format!("{:#}", e);
+            emit("error", Some(&host), msg.clone());
+            Err(msg)
+        }
+    }
+}
+
 /// 设备热插拔监视线程：每 3s 轮询 `adb devices -l`，与上次快照 diff，有变化时
 /// emit `devices-changed` 事件：`{devices: [{serial, model, version}], added, removed}`。
 /// 首轮只建立快照不通知（首屏由前端 loadDevices 填充，避免重复提示）。
@@ -745,8 +876,32 @@ fn spawn_device_monitor(app: tauri::AppHandle) {
     std::thread::spawn(move || {
         let mut last: Vec<xperf_core::AdbDevice> = Vec::new();
         let mut first_round = true;
+        let mut tunnel_was_dead = false;
         loop {
             std::thread::sleep(std::time::Duration::from_secs(3));
+            // SSH 远程：隧道死则 adb 全灭，枚举只会每 3s 刷错——短路并边沿通知；
+            // 恢复后轮询自动继续（隧道重建由采样重连或用户重连触发）
+            let tunnel_dead = matches!(xperf_core::transport(), xperf_core::Transport::Ssh(_))
+                && !xperf_core::tunnel_alive();
+            if tunnel_dead {
+                if !tunnel_was_dead {
+                    tunnel_was_dead = true;
+                    let _ = app.emit(
+                        "remote-status",
+                        serde_json::json!({"state": "tunnel-down", "message": "SSH 隧道断开，等待恢复…"}),
+                    );
+                }
+                continue;
+            }
+            if tunnel_was_dead {
+                tunnel_was_dead = false;
+                last.clear(); // 清快照强制全量 diff，设备 tab 状态与新侧对齐
+                first_round = true;
+                let _ = app.emit(
+                    "remote-status",
+                    serde_json::json!({"state": "tunnel-up", "message": "SSH 隧道已恢复"}),
+                );
+            }
             let devices = match xperf_core::list_adb_devices() {
                 Ok(d) => d,
                 Err(_) => continue, // adb 暂不可用，下轮重试
@@ -1155,6 +1310,24 @@ fn main() {
     // 显式指定但无效时直接跳过自动启动（不静默回落到自动选台——用户指定了设备）
     let mut auto_serial: Option<String> = None;
     let mut auto_start = true;
+    // SSH 远程后端（--remote <host> [--remote-adb <path>] [--remote-adb-port <n>]）：
+    // 须在任何 adb 调用（设备枚举/选择）之前建立隧道——隧道在，设备列表即指向远端
+    if let Some(host) = get_opt("--remote") {
+        let mut target = xperf_core::SshTarget::new(&host);
+        if let Some(p) = get_opt("--remote-adb") {
+            target = target.with_adb_path(p);
+        }
+        if let Some(p) = get_opt("--remote-adb-port").and_then(|v| v.parse().ok()) {
+            target = target.with_remote_port(p);
+        }
+        match xperf_core::init_remote(target) {
+            Ok(devices) => eprintln!("[startup] 远程后端: {}（在线 {} 台）", host, devices.len()),
+            Err(e) => {
+                eprintln!("[startup] 远程后端初始化失败: {:#}（前端可经顶栏「连接」重试）", e);
+                auto_start = false;
+            }
+        }
+    }
     if let Some(serial) = get_opt("--device") {
         match xperf_core::pick_device(Some(&serial), &xperf_core::list_adb_devices().unwrap_or_default()) {
             Ok(d) => auto_serial = Some(d.serial),
@@ -1272,6 +1445,10 @@ fn main() {
             save_baseline,
             compare_baseline,
             list_devices,
+            list_remotes,
+            save_remote,
+            connect_remote,
+            remote_status,
             resize_default
         ])
         .on_window_event(|window, event| {
@@ -1296,6 +1473,8 @@ fn main() {
                     // 等采样线程检测到 running=false 并退出（最长一个 interval 周期）
                     std::thread::sleep(std::time::Duration::from_millis(1200));
                 }
+                // 关窗收尾远程后端：清理 forward 规则 + 关隧道（R9/R10）
+                xperf_core::shutdown_remote();
             }
         })
         .run(tauri::generate_context!())
@@ -1305,6 +1484,33 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- SSH 远程连接配置（save_remote/list_remotes；XDG_CONFIG_HOME 隔离到临时目录） ----
+
+    #[test]
+    fn test_remote_config_upsert() {
+        let dir = std::env::temp_dir().join(format!("xperf-remotes-test-{}", std::process::id()));
+        std::env::set_var("XDG_CONFIG_HOME", &dir);
+        let cfg = |name: &str, host: &str| RemoteConfig {
+            name: name.into(),
+            host: host.into(),
+            adb_path: "adb".into(),
+            remote_port: 5037,
+        };
+        // 新增两条 + name 相同 upsert（host 更新）
+        save_remote(cfg("hppc", "hppc")).unwrap();
+        save_remote(cfg("lab", "user@lab")).unwrap();
+        save_remote(cfg("hppc", "hppc2")).unwrap();
+        let list = list_remotes();
+        assert_eq!(list.len(), 2);
+        assert_eq!(list.iter().find(|r| r.name == "hppc").unwrap().host, "hppc2");
+        assert_eq!(list.iter().find(|r| r.name == "lab").unwrap().host, "user@lab");
+        // 校验：空名称/空 host 拒绝
+        assert!(save_remote(cfg("", "x")).is_err());
+        assert!(save_remote(cfg("x", "")).is_err());
+        std::env::remove_var("XDG_CONFIG_HOME");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     // ---- 多设备会话状态隔离 ----
 

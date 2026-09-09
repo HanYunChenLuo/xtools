@@ -219,6 +219,12 @@ pub fn tunnel_server_port() -> Option<u16> {
     tunnel().map(|t| t.server_port())
 }
 
+/// 当前隧道是否存活（`-O check`；非远程模式/无隧道返回 `false`）——
+/// 供热插拔监视器在隧道死时短路（adb 全灭，枚举无意义）
+pub fn tunnel_alive() -> bool {
+    tunnel().map(|t| t.is_alive()).unwrap_or(false)
+}
+
 /// 安装当前隧道（`init_remote` 建隧成功后调用）
 pub(crate) fn install_tunnel(t: SshTunnel) {
     *TUNNEL.lock().unwrap_or_else(|e| e.into_inner()) = Some(std::sync::Arc::new(t));
