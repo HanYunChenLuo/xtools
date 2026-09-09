@@ -1121,8 +1121,113 @@ window.addEventListener('resize', () => {
   if (s) s.refreshChartSizes();
 });
 
+// ---------- SSH 远程后端：连接切换（顶栏 remoteBox，设计 §6.2） ----------
+const remoteUI = {
+  // 重建设备 tab：清空全部设备页（采样线程已被后端停止）→ 按新侧设备重建
+  rebuildDevices(devices) {
+    for (const s of app.sessions.values()) {
+      s.root.remove();
+      s.tabBtn.remove();
+    }
+    app.sessions.clear();
+    app.active = null;
+    for (const d of devices) app.addDevice(d);
+    document.getElementById('noDeviceHint').classList.toggle('hidden', devices.length > 0);
+    app.renderStatus();
+  },
+
+  async populate(currentHost) {
+    const sel = document.getElementById('remoteSelect');
+    let remotes = [], sshHosts = [];
+    try { remotes = await invoke('list_remotes'); } catch (e) { _diag('list_remotes ERROR: ' + JSON.stringify(e)); }
+    try { sshHosts = await invoke('list_ssh_hosts'); } catch (e) { _diag('list_ssh_hosts ERROR: ' + JSON.stringify(e)); }
+    // 已保存配置优先；ssh_config 主机补充（跳过与已保存条目同 host/name 的）
+    const savedKeys = new Set(remotes.flatMap(r => [r.host, r.name]));
+    const extra = sshHosts.filter(h => !savedKeys.has(h));
+    sel.innerHTML = '<option value="">本机</option>' +
+      remotes.map(r => `<option value="${r.host}">${r.name}</option>`).join('') +
+      extra.map(h => `<option value="${h}">${h}（ssh）</option>`).join('');
+    sel.value = currentHost || '';
+    if (currentHost && sel.value !== currentHost) {
+      // 未保存的临时目标（--remote 启动）：补一个选项显示
+      const o = document.createElement('option');
+      o.value = currentHost;
+      o.textContent = currentHost;
+      sel.appendChild(o);
+      sel.value = currentHost;
+    }
+  },
+
+  async switchTo(host) {
+    const sel = document.getElementById('remoteSelect');
+    sel.disabled = true;
+    this.setGlobalStatus(host ? '正在连接 ' + host + '…' : '正在切回本机…');
+    try {
+      const r = await invoke('connect_remote', { host: host || null });
+      this.rebuildDevices(r.devices || []);
+      this.setGlobalStatus(host ? '已连接远程: ' + host : '本机');
+    } catch (e) {
+      const msg = (e && e.toString()) || '连接失败';
+      this.setGlobalStatus('连接失败: ' + msg);
+      // 连接失败：后端已回落本机，下拉复位并重建本机设备 tab
+      sel.value = '';
+      try {
+        const r = await invoke('connect_remote', { host: null });
+        this.rebuildDevices(r.devices || []);
+      } catch (e2) { _diag('fallback local ERROR: ' + JSON.stringify(e2)); }
+    } finally {
+      sel.disabled = false;
+    }
+  },
+
+  setGlobalStatus(text) {
+    const el = document.getElementById('status');
+    el.classList.remove('progress');
+    el.textContent = text;
+  },
+
+  async init() {
+    const sel = document.getElementById('remoteSelect');
+    // 当前状态（--remote 启动时后端已是远程）：同步选中项
+    let currentHost = null;
+    try {
+      const st = await invoke('remote_status');
+      if (st.mode === 'ssh') currentHost = st.host;
+    } catch (e) { _diag('remote_status ERROR: ' + JSON.stringify(e)); }
+    await this.populate(currentHost);
+
+    sel.addEventListener('change', () => this.switchTo(sel.value || null));
+
+    const form = document.getElementById('remoteForm');
+    document.getElementById('remoteAddBtn').addEventListener('click', () => form.classList.toggle('hidden'));
+    document.getElementById('rfSave').addEventListener('click', async () => {
+      const name = document.getElementById('rfName').value.trim();
+      const host = document.getElementById('rfHost').value.trim();
+      const adb = document.getElementById('rfAdb').value.trim() || 'adb';
+      const port = parseInt(document.getElementById('rfPort').value, 10) || 5037;
+      if (!name || !host) { this.setGlobalStatus('远程配置：名称与 ssh 目标不能为空'); return; }
+      try {
+        await invoke('save_remote', { cfg: { name, host, adb_path: adb, remote_port: port } });
+        form.classList.add('hidden');
+        await this.populate(null);
+        this.setGlobalStatus('已保存远程: ' + name);
+      } catch (e) {
+        this.setGlobalStatus('保存失败: ' + e);
+      }
+    });
+
+    // 隧道/连接状态事件 → 状态栏（切换中的 error 由 switchTo 自己呈现，不覆盖）
+    listen('remote-status', (e) => {
+      const { state, message } = e.payload;
+      if (state === 'connecting' || state === 'error') return;
+      this.setGlobalStatus(message || state);
+    });
+  },
+};
+
 // ---------- 初始化：列设备建页 → 回填自动启动会话 → 动态窗口尺寸 ----------
 (async function init() {
+  await remoteUI.init();
   try {
     const r = await invoke('list_devices');
     for (const d of r.devices) app.addDevice(d);

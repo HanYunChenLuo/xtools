@@ -9,6 +9,19 @@
 <body>
   <header id="topbar">
     <span id="brand">XPerformance</span>
+    <div id="remoteBox" title="连接：本机或 SSH 远程后端（真机接远端机时使用）">
+      <select id="remoteSelect">
+        <option value="">本机</option>
+      </select>
+      <button id="remoteAddBtn" class="small" title="新增远程连接">＋</button>
+      <div id="remoteForm" class="hidden">
+        <input id="rfName" placeholder="名称" autocomplete="off" />
+        <input id="rfHost" placeholder="ssh 目标（别名/user@host）" autocomplete="off" />
+        <input id="rfAdb" placeholder="远端 adb 路径（默认 adb）" autocomplete="off" />
+        <input id="rfPort" placeholder="端口 5037" type="number" min="1" max="65535" />
+        <button id="rfSave" class="small">保存</button>
+      </div>
+    </div>
     <nav id="deviceTabs"></nav>
     <div id="status">未开始</div>
     <button id="themeBtn" title="切换暗色/亮色主题">☾ 亮色</button>

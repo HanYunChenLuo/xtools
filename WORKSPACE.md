@@ -2,7 +2,7 @@
 
 > 本文件记录跨会话的待办事项（backlog）。每次会话的历史总结见 `SESSION.md`。
 > 完成一项就把状态改为 ✅ 并注明完成的 commit；新增想法随时追加。
-> 最后更新：2026-09-07 晚（agent daemon 化：socket 服务 + 多 host + 版本握手 + 空载自杀，孤儿泄漏根治，见 SESSION 当日条目）
+> 最后更新：2026-09-09（SSH 远程后端全量落地：两跳隧道 + transport.rs + CLI/GUI 接入，见 SESSION 当日条目）
 
 ## 当前状态速览
 
@@ -16,7 +16,8 @@
 - 落盘：数据根 `/tmp/xperf`（CLI 流式 CSV + 退出图表；GUI 完整历史 + CSV 导出，共用同根；GUI 深挖目录 `<pkg>/<ts>-<serial>/` 防双设备撞名）；清理走 CLI `--clean-cache` / GUI 按钮（~/.cache/xperf + /tmp/xperf，2bd6bca）
 - GUI：9 张折线图 + 实时数值面板 + Top 线程 + 峰值 + 冷启动面板 + 间隔档位下拉 + 实际周期标注 + 勾选即时生效（自动重启会话）+ Perfetto 分析（独立 tab 报告 + 浏览器自动加载 + 每秒录制进度）+ **函数热点**（独立 tab + 每秒录制进度 + 浏览器火焰图）+ 暗/亮双主题
 - agent 部署：自动尝试 adb root（IO 等需 root）；src 树内任一 .rs mtime 变化自动重建
-- 测试：**105 全绿**（agent 27：解析 + watchdog_step 决策 + GpuBusyCalc 双语义；core 66+2 ignored：协议/trace/simpleperf/baseline/coldstart/设备 diff/孤儿流解析与判定；xperformance 5：alerts；GUI 5：export_csv×2 + 基线×2 + 多会话隔离 1；xrm 2），clippy 零警告，**cargo doc 零 warning**（默认 lint 集 + missing_docs 三 crate）
+- 测试：**全量全绿**（core 78+5 ignored（3 条 hppc 集成）：协议/transport/trace/simpleperf/baseline/coldstart/设备 diff；xperformance 5：alerts；GUI 6：export_csv×2 + 基线×2 + 多会话隔离 + 远程配置；xrm 2），clippy 零警告，**cargo doc 零 warning**（默认 lint 集 + missing_docs 三 crate）
+- **SSH 远程后端（feature/ssh-remote 已合 main）**：`--remote hppc` 经 SSH 隧道连远端 adb server（hop#1 承载 adb 协议 + hop#2 每设备一条承载 agent 流），采样/trace/simpleperf/断连重连/GUI 连接切换全通；详见 CLAUDE.md「SSH 远程后端」与 `docs/DESIGN-ssh-remote.md`
 - 设备：SS3 6eb792dfb0f（adbd root，QNX GPU 通道 + 多设备并行已真机回归）；SS2MAX d1f39648c1f（adb root 可用；**多设备并行 + 冷启动 COLD 874ms 已真机验证**）
 - **测试对象（555ffab 起统一）**：`example/apk/filament-gltf-viewer-v1.76.0-android.apk`（git-lfs 管理，包名 `com.google.android.filament.gltf`，入口 `.MainActivity`）——真机测试一律用它，不再用 svm。已装 SS3 + SS2MAX
 
@@ -58,6 +59,11 @@
 - ~~GUI add_marker 不写 markers.csv~~（已失效：GUI 打点功能整体删除，78f93a9，仅剩 CLI socket 打点）
 - marker 每连接线程无界（有 10s 读超时兜底）
 - GUI 基线/应用操作按钮与设备 tab 切换的点击渲染为人工目验项（后端链路由命令级测试锁定：save/compare 端到端 + build_summary 口径 + 多会话隔离；真机日志已验手动开始/勾选重启/trace 录制全链路）
+
+## F. SSH 远程调试（已完成）
+
+- [x] **SSH 远程后端**（2026-09-09，`feature/ssh-remote` 分支合 main；设计 `docs/DESIGN-ssh-remote.md` v2 + 实现 S1-S11 全步骤）：真机接在 hppc 上，本机跑 GUI/CLI 经 SSH 调试采样/perfetto/simpleperf。commit 链：f45d44b（设计）→ c156141（S1 transport 基础）→ e520787（S2 隧道）→ 759d72d（S2a hop#2 映射表）→ cd81a37+b578b9f（S3 utils 注入）→ ea61e05（S4 init/shutdown）→ e4ae289（S5 CLI + S6 agent hop#2）→ b5c179a（S9 断连重连）→ f2a58a9（S10 GUI）。真机回归：远程采样/trace/simpleperf/断连重连/并发会话/退出零残留全通（详见 CLAUDE.md「SSH 远程后端」节）
+
 
 ---
 

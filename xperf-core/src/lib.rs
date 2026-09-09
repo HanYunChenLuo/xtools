@@ -26,6 +26,8 @@ pub mod platform;
 pub mod simpleperf;
 /// perfetto 深挖：录制、trace_processor SQL 归因、本地镜像 UI 自动加载。
 pub mod trace;
+/// adb 传输后端：本机 adb server 或经 SSH 隧道的远端 adb server（远程调试）。
+pub mod transport;
 /// 主机侧通用工具（adb 命令封装、中断标志、控制字符清洗）。
 pub mod utils;
 
@@ -35,9 +37,10 @@ pub use fps::FpsTimeSeriesData;
 pub use marker::{send_marker, start_marker_listener, Marker};
 pub use memory::{MemoryDetails, MemoryTimeSeriesData};
 pub use platform::{detect_platform, detect_platform_live, from_id, Platform, PlatformId};
+pub use transport::{init_remote, shutdown_remote, transport, tunnel_alive, SshTarget, Transport};
 pub use utils::{
     adb_for, diff_devices, list_adb_devices, parse_adb_devices, pick_device,
-    resolve_serial, run_adb_command_for, set_target_serial, target_serial,
+    resolve_serial, run_adb, run_adb_command_for, set_target_serial, target_serial,
     AdbDevice, ProcOutput,
 };
 
