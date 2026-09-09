@@ -220,17 +220,103 @@ pub fn tunnel_server_port() -> Option<u16> {
 }
 
 /// 安装当前隧道（`init_remote` 建隧成功后调用）
-// TODO(S4)：init_remote/shutdown_remote 落地后去掉 cfg(test)
-#[cfg(test)]
 pub(crate) fn install_tunnel(t: SshTunnel) {
     *TUNNEL.lock().unwrap_or_else(|e| e.into_inner()) = Some(std::sync::Arc::new(t));
 }
 
 /// 摘除当前隧道（`shutdown_remote` 调用；摘除后 Drop 触发 `-O exit` 关隧道）
-// TODO(S4)：同上
-#[cfg(test)]
 pub(crate) fn clear_tunnel() {
     let _ = TUNNEL.lock().unwrap_or_else(|e| e.into_inner()).take();
+}
+
+// ---------- 远程后端生命周期（S4）----------
+
+use crate::utils::AdbDevice;
+
+/// 初始化远程后端：建 hop#1 → 校验 adb 协议版本（R2）→ 返回远端设备列表。
+///
+/// 顺序是硬约束：本函数必须早于**任何** adb 调用。成功后 [`transport`] 切到
+/// `Ssh`，全部 adb 命令经 hop#1 指向远端 server。
+/// 任一步失败：隧道回收、传输保持 `Local`，不产生残留。
+pub fn init_remote(target: SshTarget) -> Result<Vec<AdbDevice>> {
+    // R2 协议版本校验先于一切 adb 客户端调用：版本不符时 adb 客户端会
+    // kill 远端 server（可能正被他人共用），故先用两侧 CLI banner 比对。
+    check_protocol_version(&target)?;
+
+    let t = SshTunnel::establish(&target)?;
+    install_tunnel(t);
+    set_transport(Transport::Ssh(target.clone()));
+
+    match crate::utils::list_adb_devices() {
+        Ok(devices) => Ok(devices),
+        Err(e) => {
+            // 设备枚举失败：完整回滚，不留半截状态
+            clear_tunnel();
+            set_transport(Transport::Local);
+            Err(e.context("远程 adb server 设备枚举失败"))
+        }
+    }
+}
+
+/// 关闭远程后端：逐条清理本工具注册的 forward 规则（R10，**禁用
+/// `--remove-all`**——全局生效会踢掉他人规则）→ 关隧道 → 回落 `Local`。
+/// 幂等：非远程模式调用为空操作。隧道已断时清理失败仅忽略（规则残留由
+/// 远端 server 持有，无法触及，下次 init 的 ensure_forward 复用逻辑消化）。
+pub fn shutdown_remote() {
+    let Some(t) = tunnel() else {
+        set_transport(Transport::Local);
+        return;
+    };
+    // 本工具注册的远端 forward 规则 = hop#2 映射表的键集合
+    let remote_ports: Vec<u16> = t.lock_forwards().keys().copied().collect();
+    for p in remote_ports {
+        let _ = crate::utils::run_adb(&["forward", "--remove", &format!("tcp:{p}")]);
+    }
+    clear_tunnel(); // take → Drop → -O exit（带走 hop#1 与全部 hop#2）
+    set_transport(Transport::Local);
+}
+
+/// R2：adb 协议版本校验（判据是**协议**版本而非 platform-tools 版本，
+/// 附录 A #30：36.0.2 连 36.0.0 安全，因协议同为 1.0.41）。
+/// 比对本机 `adb version` 与远端 `<adb_path> version` 的 banner 协议串；
+/// 不一致**报错中止**（绝不主动 kill-server——远端 server 可能被共用）。
+fn check_protocol_version(target: &SshTarget) -> Result<()> {
+    let local_out = crate::utils::run_command("adb", &["version"])
+        .context("本机 adb version 执行失败")?;
+    let remote_cmd = format!("{} version", target.adb_path);
+    let remote_out = Command::new("ssh")
+        .args(ssh_base_opts())
+        .arg(&target.host)
+        .arg(&remote_cmd)
+        .output()
+        .context("ssh 远端 adb version 执行失败")?;
+    if !remote_out.status.success() {
+        bail!(
+            "远端 adb version 失败：{}——确认 --remote-adb 路径正确",
+            String::from_utf8_lossy(&remote_out.stderr).trim()
+        );
+    }
+    let remote_stdout = String::from_utf8_lossy(&remote_out.stdout);
+    let local_v = parse_adb_version(&local_out.stdout)
+        .context("本机 adb version 输出无法解析")?;
+    let remote_v = parse_adb_version(&remote_stdout)
+        .context("远端 adb version 输出无法解析")?;
+    if local_v != remote_v {
+        bail!(
+            "adb 协议版本不一致（本机 {local_v} vs 远端 {remote_v}）：继续会导致 adb 客户端 \
+             kill 远端 server（影响他人调试）。请对齐两端 platform-tools 后重试"
+        );
+    }
+    Ok(())
+}
+
+/// 从 `adb version` 输出解析协议版本串（`Android Debug Bridge version 1.0.41` → `1.0.41`）
+fn parse_adb_version(output: &str) -> Option<&str> {
+    output
+        .lines()
+        .find_map(|l| l.strip_prefix("Android Debug Bridge version "))
+        .map(|v| v.split_whitespace().next().unwrap_or(v))
+        .filter(|v| !v.is_empty())
 }
 
 impl Drop for SshTunnel {
@@ -609,5 +695,37 @@ mod tests {
         );
         // remove 幂等
         tun.remove_forward(SshTarget::DEFAULT_ADB_PORT).unwrap();
+    }
+
+    // ---- S4：init_remote / shutdown_remote ----
+
+    #[test]
+    fn test_parse_adb_version() {
+        let out = "Android Debug Bridge version 1.0.41\nVersion 36.0.2-12345678\nInstalled as /usr/local/bin/adb\n";
+        assert_eq!(parse_adb_version(out), Some("1.0.41"));
+        assert_eq!(parse_adb_version("Android Debug Bridge version 1.0.39\n"), Some("1.0.39"));
+        assert_eq!(parse_adb_version("garbage\n"), None);
+        assert_eq!(parse_adb_version(""), None);
+    }
+
+    /// 远程后端全生命周期：init → transport 切 Ssh → adb 命令指向远端 →
+    /// shutdown → 回落 Local + 隧道摘除（幂等二次调用不炸）
+    #[test]
+    #[ignore = "需要 hppc：SSH 免密可达 + 远端 adb（~/Android/Sdk/platform-tools/adb）"]
+    fn test_init_shutdown_remote_hppc() {
+        let _serial = TRANSPORT_TEST_LOCK.lock().unwrap();
+        let target = SshTarget::new("hppc").with_adb_path("~/Android/Sdk/platform-tools/adb");
+        let devices = init_remote(target.clone()).expect("init_remote 失败");
+        assert_eq!(transport(), Transport::Ssh(target));
+        assert!(tunnel().is_some());
+        // adb 命令已指向远端 server（设备枚举即经 hop#1 完成，与返回值自洽）
+        let out = crate::utils::run_adb(&["devices", "-l"]).unwrap();
+        let parsed = crate::utils::parse_adb_devices(&out.stdout);
+        assert_eq!(parsed.len(), devices.len(), "init 与 run_adb 枚举应一致");
+        shutdown_remote();
+        assert_eq!(transport(), Transport::Local);
+        assert!(tunnel().is_none());
+        shutdown_remote(); // 幂等
+        assert_eq!(transport(), Transport::Local);
     }
 }
