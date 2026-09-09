@@ -59,6 +59,20 @@
 - marker 每连接线程无界（有 10s 读超时兜底）
 - GUI 基线/应用操作按钮与设备 tab 切换的点击渲染为人工目验项（后端链路由命令级测试锁定：save/compare 端到端 + build_summary 口径 + 多会话隔离；真机日志已验手动开始/勾选重启/trace 录制全链路）
 
+## F. SSH 远程调试（新 feature，设计 v2 待实现）
+
+- [ ] **SSH 远程后端**（设计文档 `docs/DESIGN-ssh-remote.md` **v2**，2026-09-09）：真机接在 hppc 上，本机跑 GUI/CLI 经 SSH 调试采样/perfetto/simpleperf。
+  - **架构**：adb server 前移 + SSH 隧道（本机恒为 adb **客户端**，连 hppc 的 adb server）。**两跳隧道**：hop#1 = 本机端口 → hppc:5037（承载全部 adb 命令，恒 1 条）；**hop#2 = 本机端口 → hppc 上 `adb forward` 分配的端口**（承载 agent NDJSON 流，**每设备 1 条**，经 ControlMaster `-O forward` 动态增删）
+  - **核心机制（真实拓扑实测，设备接 hppc）**：`pull` 落 **client(Mac)** ✅ / `push` 读 **client** ✅ / stdin 管道透传 ✅ / 退出码保真 ✅ ⇒ `trace_processor`/`report_html.py`/落盘/桌面打开**全零改动**；**唯一例外 `adb forward` 监听在 server(hppc) 侧** ⇒ 需 hop#2（v1 曾误判为客户端侧，见下）
+  - **v2 修订（review 发现的设计缺陷）**：v1 据**反向隧道**推断「forward 端口在客户端侧监听」——**结论错误**（反向拓扑下 Mac 扮演的是 *server* 而非 client；`pull`/`push` 看的是对侧故正确，`forward` 看的是 Mac 侧角色恰好翻转）。真实拓扑复验：Mac 连 hppc 的 forward 端口 `Connection refused`，按 v1 实现 agent 通道**必然连不上**。已补 hop#2 并实测打通：读到真实 `hello` + 下发 start 后 5s 收 18 事件（freq 10 + cpu 8，CPU 40.40%，真机真包）。**教训：角色对称的实验必须逐项确认「这一侧此刻扮演什么角色」**
+  - **多设备并行 + perfetto/simpleperf 全支持**：隧道位于 adb client↔server 之间，比「设备」低一层 ⇒ `-s` 路由/GUI 每设备 tab/深挖并发**全零改动**（每设备 hop#2 一条）。队头阻塞实测不成立：200ms 采样节拍在并发 3×47MB 拉取（141MB）下 p50 仍 **200ms**（ssh channel 独立流控）；24 条并发 `direct-tcpip` channel 全通（`MaxSessions` 默认 10 **不约束**转发 channel，无需改 sshd）。唯一并行代价 = 带宽共享（总吞吐守恒）
+  - **带宽（真实 47MB pftrace，非 `/dev/zero`）**：直连裸 TCP 12.18s ≈ 隧道无压缩 11.17s（链路 ~31Mbps 是瓶颈，ssh 开销测不出）→ **隧道 `Compression=yes` 2.68s（4.2×）**，与 zstd 最优 2.24s 仅差 0.4s ⇒ **隧道参数必带 `Compression=yes`**
+  - 改造面：`utils.rs:19`/`:72` 两个 adb 构造点注入 `ADB_SERVER_SOCKET` + 新增 `transport.rs`（`Transport`/`SshTarget`/`SshTunnel` 含 hop#2 映射表）+ `ensure_daemon` 按 Transport 分流端口；CLI `--remote/--remote-adb/--remote-adb-port`，GUI 连接切换 UI + 4 命令
+  - **已否决方案**（附录 B 留档）：方案 A 命令包装（`pull`/`push` 落点全搬走 + 转义地狱）、方案 C 自研远端 server（「远端 server + client」**正是 adb 自身架构**，自研等于重写 `adb server`；带宽只快 0.4s）、方案 D adb server 监听公网口（**比压缩隧道慢 4.5×**；且「隔离网」是运维状态非代码不变量）。旁证：VS Code Remote SSH 的 server **10+ 次启动无一例外绑 `127.0.0.1`** + 内嵌 `vscode-russh` 自带 SSH 栈转发 ⇒ 业界同样是「server 架构 + ssh 传输」
+  - 关键风险：**R10** forward 规则由 **server** 持有 ⇒ 本机进程死亡也不消失、`tcp:0` **每次调用新建一条**（实测连调 3 次得 3 条）⇒ 跨会话累积；缓解 = 显式 `--remove` + 保留 `ensure_forward` 查 list 复用逻辑 + **禁用 `--remove-all`**（全局生效会踢掉他人规则）。**R2 修正**：判据是 adb **协议**版本（`1.0.41`）而非 platform-tools 版本（36.0.2 连 36.0.0 实测安全）。**R11** `adb root` 后规则存活已实测 OK，但 adbd 真重启场景待 S6 复验
+  - 待实现：设计文档第 9 节 S1-S11（**S3 = 回归门槛**：本地模式 105 测试须全绿；**S2a** = hop#2 映射表；**S8a** = 多设备并行远程）
+
+
 ---
 
 ## 已完成
