@@ -106,15 +106,11 @@ impl CsvStream {
             ..Default::default()
         }
     }
-
-    /// 当前落盘根目录（None = 尚无样本写入）
-    pub fn root(&self) -> Option<&PathBuf> {
-        self.root.as_ref()
-    }
 }
 
-/// 懒打开目标文件（首次写表头）并追加一行 + flush。
+/// 懒打开目标文件（文件不存在或为空时写表头）并追加一行 + flush。
 /// map 按 key 每文件一个 writer；root 为会话时间戳目录（首个样本时创建）。
+/// append 模式：GUI 同包重启采样复用目录时续写前文（CLI 每运行新目录，行为不变）。
 #[allow(clippy::too_many_arguments)]
 fn stream_write<K: Eq + std::hash::Hash>(
     broken: &mut bool,
@@ -139,8 +135,16 @@ fn stream_write<K: Eq + std::hash::Hash>(
                 }
                 let dir = root.as_ref().expect("root just set").join(subdir);
                 fs::create_dir_all(&dir)?;
-                let mut w = BufWriter::new(fs::File::create(dir.join(filename))?);
-                writeln!(w, "{}", header)?;
+                // append 模式（不截断）：CLI 每次运行新目录，文件必然不存在，与旧
+                // File::create 行为一致；GUI 同包重启采样复用目录时续写不丢前文
+                let path = dir.join(filename);
+                let need_header =
+                    !path.exists() || fs::metadata(&path).map(|m| m.len() == 0).unwrap_or(true);
+                let mut w =
+                    BufWriter::new(fs::OpenOptions::new().create(true).append(true).open(path)?);
+                if need_header {
+                    writeln!(w, "{}", header)?;
+                }
                 v.insert(w)
             }
         };
@@ -278,5 +282,39 @@ impl CsvStream {
             "gpumem", format!("gpumem_{}_data.csv", pid),
             "Timestamp,Process GPU Mem (MB),Global GPU Mem (MB)", &row,
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// append 模式：同目录两个 CsvStream 实例（GUI 同包重启采样场景）续写同一文件，
+    /// 表头只写一次、数据不截断
+    #[test]
+    fn test_with_root_append_continuity() {
+        let dir = std::env::temp_dir().join(format!("xperf_csvtest_{}", std::process::id()));
+        let t = Local::now();
+        {
+            let mut csv = CsvStream::with_root(dir.clone());
+            csv.cpu_row("com.test", 100, t, 10.5);
+        }
+        {
+            let mut csv2 = CsvStream::with_root(dir.clone());
+            csv2.cpu_row("com.test", 100, t, 20.5);
+        }
+        let content = std::fs::read_to_string(dir.join("cpu/cpu_100_data.csv")).unwrap();
+        assert_eq!(content.matches("Timestamp,Process CPU (%)").count(), 1, "表头只写一次");
+        assert!(content.contains(",10.50\n"), "前文保留");
+        assert!(content.contains(",20.50\n"), "新行追加");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// with_root 在无样本时不建目录（懒创建）
+    #[test]
+    fn test_with_root_lazy_dir() {
+        let dir = std::env::temp_dir().join(format!("xperf_csvtest_lazy_{}", std::process::id()));
+        let _csv = CsvStream::with_root(dir.clone());
+        assert!(!dir.exists(), "无样本不落空目录");
     }
 }

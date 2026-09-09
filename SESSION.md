@@ -17,7 +17,7 @@
 - **蓝屏根因**：镜像 curl 下载 frontend_bundle.js 截断 4%（exit 18 被当可跳过失败留半截文件，完整性检查只查存在性 → 缓存永久中毒）。修复=原子下载（.part+rename）+ `--retry 2 --retry-all-errors` + `_mirror_complete` 完成标记校验（缺标记自动重镜像自愈）。真机重镜像 83s 通过（bundle 与上游 Content-Length 一致）。
 - **性能批次 A**：图表事件只标脏 150ms 合帧且仅绘激活页（原每事件全量重绘，极端 50ms×3PID 可达数百 draw/s/图）；updateTitle 从每事件 O(全设备点数) 改 5s 定时；uiColors 按主题缓存（原每 draw 两次 getComputedStyle）；面板 500ms 渲染加 dirty 检查；后端逐事件 eprintln 改 XPERF_DEBUG 门控。
 - **性能批次 B**：折线 draw 窗口起点二分只算一次（vMax 扫描复用）；`AgentStream::next_event_batch` 抽干读缓冲合并一轮 burst 为一次 sample emit（{serial, events[]}）——IPC ~260/s → ~20/s。
-- **流式落盘统一**：CsvStream 从 CLI 迁至 `xperf-core::csvstream`（CLI re-export 零改动），GUI 采样线程逐事件写 `<pkg>/<ts>-<serial>/`（同包重采复用目录，指标勾选重启不丢 CSV 连续性）；导出 CSV = 复制会话目录快照（不再前端回传全量）；前端 series/hist 加 pushCapped 抽稀（2×30000 每 2 取 1，同 CLI CHART_SERIES_CAP 口径）——GUI 内存有界，全分辨率数据在落盘 CSV。
+- **流式落盘统一**：CsvStream 从 CLI 迁至 `xperf-core::csvstream`（CLI re-export 零改动，写文件改 append 模式+空文件才写表头），GUI 采样线程逐事件写 `<pkg>/<ts>-<serial>/`；目录策略与前端会话语义对齐（`start_sampling` 带 fresh 参数：手动开始=新目录，指标勾选重启=同包复用续写不丢前文，换包=新目录）；导出 CSV = 复制会话目录快照（不再前端回传全量）；前端 series/hist 加 pushCapped 抽稀（2×30000 每 2 取 1，同 CLI CHART_SERIES_CAP 口径）——GUI 内存有界，全分辨率数据在落盘 CSV。
 - **验证**：全量 92 passed + 6 ignored 全绿，cargo doc 零告警；GUI --remote hppc 真机冒烟（SS3，cpu+memory@500ms）：CSV 逐行流式落盘，最后一行与事件流紧贴至停止。
 
 **遗留**：macOS 数据根目录实为 `$TMPDIR/xperf`（temp_dir 语义，非字面 /tmp/xperf——行为一直如此，文档措辞 /tmp 指系统临时目录）；GUI 无线程 CSV（无 --thread 开关，面板内存态）。

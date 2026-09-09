@@ -755,7 +755,7 @@ class DeviceSession {
     this.renderPidList();
     try {
       _diag('[' + this.serial + '] invoking start_sampling: pkg=' + f.package + ' interval=' + f.interval);
-      await invoke('start_sampling', f);
+      await invoke('start_sampling', { ...f, fresh: true });
       _diag('[' + this.serial + '] start_sampling RETURNED OK');
       this.samplingRunning = true;
       this.el('start-btn').disabled = true;
@@ -779,7 +779,7 @@ class DeviceSession {
     await invoke('stop_sampling', { serial: this.serial });
     const f = this.currentFlags();
     _diag('[' + this.serial + '] restart sampling with flags: ' + JSON.stringify(f));
-    await invoke('start_sampling', f);
+    await invoke('start_sampling', { ...f, fresh: false });
     this.setStatus('监控中: ' + f.package);
   }
   onMetricToggle() {
@@ -794,7 +794,8 @@ class DeviceSession {
     }, 500);
   }
 
-  // ---- 会话数据收集（导出 CSV / 基线保存与对比共用：前端持有的完整会话历史） ----
+  // ---- 会话数据收集（基线保存/对比用：前端持有的会话序列，长会话已抽稀；
+  //      全分辨率全量数据在后端流式落盘的 CSV 里，导出走 export_csv 目录快照） ----
   collectSessionData() {
     const cpu = {}, mem = {}, fps = {}, freq = {}, temp = {}, io = {}, gpumem = {}, gpuproc = {};
     for (const [k, pts] of Object.entries(this.charts.cpu.series)) cpu[k.replace('PID ', '')] = pts.map(p => [p.t, p.v]);

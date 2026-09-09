@@ -125,7 +125,7 @@ fn map_event(
 /// 采样在设备端 agent 进行，本线程只阻塞读事件流并转发给前端；
 /// 全部 adb 调用带 `-s <serial>` 路由到该设备（多设备并行互不干扰）。
 /// `sample` 事件 payload：`{serial, event}`（前端按 serial 分发到对应设备页）。
-fn spawn_sampling(app: tauri::AppHandle, serial: String, package: String, interval: u64, flags: MetricFlags, running: Arc<Mutex<bool>>) {
+fn spawn_sampling(app: tauri::AppHandle, serial: String, package: String, interval: u64, flags: MetricFlags, running: Arc<Mutex<bool>>, fresh: bool) {
     eprintln!("[sampling] 启动: device={} package={} interval={} flags={:?}", serial, package, interval, flags);
     // 记录当前采样包名与启动参数（startup_sessions 回查给前端回填输入框/勾选）
     if let Some(state) = app.try_state::<AppState>() {
@@ -177,7 +177,7 @@ fn spawn_sampling(app: tauri::AppHandle, serial: String, package: String, interv
         // 图表/基线，全量数据以落盘为准
         let csv_dir = app
             .try_state::<AppState>()
-            .map(|s| s.csv_dir_for(&serial, &package))
+            .map(|s| s.csv_dir_for(&serial, &package, fresh))
             .unwrap_or_else(|| gui_data_root().join(&package));
         let mut csv = xperf_core::csvstream::CsvStream::with_root(csv_dir);
         while *running.lock().unwrap() {
@@ -376,13 +376,16 @@ impl AppState {
         }
     }
 
-    /// 取采样会话的流式 CSV 目录：同包复用，换包/首次新建并记录
-    fn csv_dir_for(&self, serial: &str, package: &str) -> std::path::PathBuf {
+    /// 取采样会话的流式 CSV 目录：fresh（手动「开始监控」=前端已重置数据）→ 新目录；
+    /// 否则同包复用（指标勾选重启采样图表不重置，CSV 续写不丢连续性）、换包建新目录
+    fn csv_dir_for(&self, serial: &str, package: &str, fresh: bool) -> std::path::PathBuf {
         let session = self.session(serial);
         let mut guard = session.csv_dir.lock().unwrap();
-        if let Some((pkg, dir)) = &*guard {
-            if pkg == package {
-                return dir.clone();
+        if !fresh {
+            if let Some((pkg, dir)) = &*guard {
+                if pkg == package {
+                    return dir.clone();
+                }
             }
         }
         let dir = gui_data_root()
@@ -438,6 +441,7 @@ async fn start_sampling(
     gpu: bool,
     io: bool,
     net: bool,
+    fresh: bool,
     state: State<'_, AppState>,
     app: tauri::AppHandle,
 ) -> Result<(), String> {
@@ -462,7 +466,7 @@ async fn start_sampling(
     }
 
     let flags = MetricFlags { cpu, memory, fps, freq, thermal, gpu, io, net };
-    spawn_sampling(app, serial, package, interval, flags, session.running.clone());
+    spawn_sampling(app, serial, package, interval, flags, session.running.clone(), fresh);
 
     Ok(())
 }
@@ -1409,6 +1413,7 @@ fn main() {
                             auto_interval,
                             flags,
                             session.running.clone(),
+                            true,
                         );
                         // 深挖自动启动（--trace N，可与采样并行）
                         if let Some(n) = auto_trace {
@@ -1591,6 +1596,23 @@ Host hppc          # 重复别名去重
         assert!(copied.starts_with("Timestamp,Process CPU (%)\n"));
         assert!(copied.contains(",12.50\n"));
         std::fs::remove_dir_all(gui_data_root().join(&pkg)).ok();
+    }
+
+    #[test]
+    fn test_csv_dir_for_fresh_and_reuse() {
+        let state = AppState { sessions: Mutex::new(HashMap::new()) };
+        let pkg = format!("test_csvdir_{}", std::process::id());
+        // 同包 + 非 fresh（指标勾选重启）→ 复用同一目录
+        let d1 = state.csv_dir_for("devA", &pkg, false);
+        let d2 = state.csv_dir_for("devA", &pkg, false);
+        assert_eq!(d1, d2, "同包重启应复用目录");
+        // 同包 + fresh（手动开始，前端已重置数据）→ 新目录请求（目录名按秒，
+        // 同秒内可能重名——append 模式续写不丢数据，见 csvstream 实现）
+        let d3 = state.csv_dir_for("devA", &pkg, true);
+        assert!(d3.to_string_lossy().contains(&pkg));
+        // 换包 → 必为新目录（路径含包名）
+        let d4 = state.csv_dir_for("devA", &format!("{}_b", pkg), false);
+        assert_ne!(d1, d4, "换包须新目录");
     }
 
     #[test]
