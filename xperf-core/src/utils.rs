@@ -43,7 +43,7 @@ fn adb_command() -> Command {
     c
 }
 
-/// 执行 adb 命令（经 [`adb_command`] 构造：远程模式自动指向远端 server，
+/// 执行 adb 命令（经 `adb_command` 构造：远程模式自动指向远端 server，
 /// 本机模式与改造前逐字节一致）。语义同 [`run_command`]。
 pub fn run_adb(args: &[&str]) -> Result<ProcOutput> {
     run_command_inner(adb_command().args(args), "adb")
@@ -89,7 +89,7 @@ pub fn target_serial() -> Option<String> {
 /// 构造已注入 `-s <serial>` 的 adb 命令，显式指定目标设备（多设备并行会话用）。
 ///
 /// `serial`：`Some(s)` 注入 `-s s`（空串视同 `None`）；`None` 回退全局选择
-/// （[`target_serial`]）。基于 [`adb_command`] 构造，远程模式自动携带
+/// （[`target_serial`]）。基于 `adb_command` 构造，远程模式自动携带
 /// `ADB_SERVER_SOCKET`。所有 adb 调用统一经此构造，保证多设备场景命令路由到目标设备。
 pub fn adb_for(serial: Option<&str>) -> Command {
     let mut c = adb_command();
