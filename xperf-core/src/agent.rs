@@ -356,7 +356,18 @@ pub fn ensure_agent_built() -> Result<PathBuf> {
 /// 尝试 adb root（生产构建可能失败，静默忽略）。
 /// 不解析 adb root 文案（各版本不同），直接 `adb shell id` 验证 uid。
 /// `serial`：目标设备（多设备并行会话用，`None` 回退全局选择）。
+///
+/// 策略（2026-09-09）：**仅车机平台（SS2/SS3/SS4）自动 root**——车机是内部开发
+/// 设备，root 无副作用且 IO 等指标依赖它；非车机（普通 Android 手机等）跳过，
+/// 不在用户设备上默认提权（无 root 时各指标按能力降级，矩阵见 WORKSPACE G 节）。
+/// `XPERF_NO_AUTO_ROOT=1` 整体禁用自动 root（非 root 降级路径的回归测试用）。
 fn try_adb_root(serial: Option<&str>) {
+    if std::env::var_os("XPERF_NO_AUTO_ROOT").is_some() {
+        return;
+    }
+    if matches!(crate::platform::detect_platform_live(serial).id(), crate::platform::PlatformId::Android) {
+        return; // 非车机：不默认获取 root
+    }
     let adb = || crate::utils::adb_for(serial);
     let _ = adb().args(["root"]).output();
     // adbd 重启后等设备回来
@@ -365,7 +376,7 @@ fn try_adb_root(serial: Option<&str>) {
     if id.contains("uid=0") {
         eprintln!("adb root: 成功（uid=0）");
     } else {
-        eprintln!("adb root: 未生效（{}），IO/GPU 显存等指标不可用", id.trim());
+        eprintln!("adb root: 未生效（{}），无 root 指标按能力降级（IO 等不可用）", id.trim());
     }
 }
 
