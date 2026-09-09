@@ -2,7 +2,7 @@
 
 > 本文件记录跨会话的待办事项（backlog）。每次会话的历史总结见 `SESSION.md`。
 > 完成一项就把状态改为 ✅ 并注明完成的 commit；新增想法随时追加。
-> 最后更新：2026-09-09（新增 H：SS4 平台适配——交接新会话；同日：G 完成（非 root 设备支持全链路，feature/non-root-support 合 main，真机双机回归全通）；早前：GUI 性能优化两批 + 流式 CSV 落盘统一 + Perfetto UI 蓝屏修复，见 SESSION 当日条目）
+> 最后更新：2026-09-10（H：SS4 adb 桥接方案设计定稿 `docs/DESIGN-ss4-adb.md`——MindRT 双系统拓扑/自动桥接/S0 预验证与 S0-S6 实施计划，交接新会话从 S0 开始；2026-09-09：H 立项；G 完成（非 root 全链路）；早前：GUI 性能优化两批 + 流式 CSV 落盘统一 + Perfetto UI 蓝屏修复，见 SESSION 当日条目）
 
 ## 当前状态速览
 
@@ -93,7 +93,8 @@
 
 ## H. SS4 平台适配（待实施，交接新会话）
 
-- [ ] **SS4（SA8797P）真机 bring-up**（2026-09-09 立项，交接新会话）：平台检测（`HU_SS4`/`Smart_space_4` → Ss4，有单测）与 ligfx GPU 通道（agent `gpu/ligfx.rs`：PVM 侧 `logcat -s ligfxprofilerd`，Sys=每帧 Frequency/Busy/Utilization、Proc=`GVM_<comm>` busy）代码已在，但 `platform/ss4.rs` 仍是桩、**全链路从未真机验证**。参照 SS3/SS2MAX 的 bring-up 路径逐项落实：
+- [ ] **SS4（SA8797P）真机 bring-up**（2026-09-09 立项，交接新会话）：平台检测（`HU_SS4`/`Smart_space_4` → Ss4，有单测）与 ligfx GPU 通道（agent `gpu/ligfx.rs`：PVM 侧 `logcat -s ligfxprofilerd`，Sys=每帧 Frequency/Busy/Utilization、Proc=`GVM_<comm>` busy）代码已在，但 `platform/ss4.rs` 仍是桩、**全链路从未真机验证**。
+  **⇒ 连接方式已定案（2026-09-10）**：SS4 是 MindRT（Linux 主控）+ Android（GVM）双系统，USB adb 只见 MindRT，Android 须经 `forward tcp:5559 tcp:5557` + `adb connect localhost:5559` 桥接——**方案设计见 `docs/DESIGN-ss4-adb.md`**（含模块设计/S0 预验证清单 R1-R8/实施计划 S0-S6），新会话**从该文档的 S0 预验证开始**（hppc 手工 adb 验证关键假设，勿直接按本清单第 1 条手工连接）。
   1. **环境**：SS4 接 hppc（adb 可达）；确认 adbd 权限状态（车机平台 auto-root 已含 Ss4——`should_auto_root(Ss4)=true`；非 root 路径按 G 节矩阵复核）。
   2. **平台检测真机核对**：`adb devices -l` 的 product 字段实际值（桩按 `HU_SS4` 匹配，另防 `Smart_space_4` 变体）；Android 版本（影响 FPS 图层名格式：A11 `SurfaceView - ` vs A12+ BLAST）。
   3. **九项指标逐项实测**：CPU/内存/FPS/频率/温度/IO/网络/GPU/显存。重点：**ligfx 通道起流验证**（logcat 持续输出、Sys/Proc 解析命中、`GVM_<comm>` 15 字符截断归因）；**ligfx Frequency 单位核实（Hz vs MHz，E 节遗留）**——与场景对照（如已知 GPU 频率档位）后修正解析或文档；温度/热降频数据源探测（thermalservice 或 sysfs zones）；IO（root 后 /proc/pid/io）；显存（dumpsys gpu 有无 Memory snapshot 段）。

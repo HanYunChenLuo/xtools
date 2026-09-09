@@ -7,6 +7,24 @@
 
 ---
 
+## 2026-09-10 — SS4 adb 桥接方案设计（WORKSPACE H 前置，无代码）
+
+**任务**：读飞书《SS4.0 (8797) USB ADB调试指南》，设计 SS4（SA8797P）双系统拓扑的 adb 接入方案；一轮自 review 后定稿，交接新会话实施。
+
+**产出**：`docs/DESIGN-ss4-adb.md`（设计稿 v1.1）+ WORKSPACE H 节定案说明。无代码改动。
+
+**关键结论**：
+- SS4 = **MindRT（Linux PVM，USB 可见）+ Android（GVM，USB 不可见）**；Android 须经 `adb forward tcp:5559 tcp:5557`（建在 MindRT 上）+ `adb connect localhost:5559` 桥接成伪设备——标准 adb 即可（文档方法 2），厂商魔改 tool（mac 无现成包）非必需。
+- **方案 A（host 侧自动桥接）定案**：新模块 `xperf-core/src/bridge.rs` + `AdbDevice.is_gateway` + 四个集成点（`list_adb_devices` 尾部 hook / `device_online` 自愈 / `try_adb_root`+`acquire_root` Ss4 分支 / `pick_device` 过滤）；Android 以 `localhost:5559` 进入现有全链路，下游语义零变化（SSH 远程 adb-server-侧语义 / 多设备 `-s` 路由 / trace/stack/冷启动天然兼容）。SS2/SS3/手机混连零影响（网关探测只命中无 product 的 USB 设备）。
+- **root 链路**：`adb -s localhost:5559 root` 疑似被 TCP root 限制拒（⚠R3 待实测），主路径 = 经 MindRT `adb shell rootandroid.sh`；MindRT 自身 root 在 bootstrap 内 best-effort（XPERF_NO_AUTO_ROOT 门控）。
+- **review 修正五处**：冷却语义分离（bootstrap 探测失败 60s 冷却 vs 已知网关每 3s 重试）、GUI 网关过滤实为**三处** payload 且监视器须在 diff 之前过滤、serial 稳定性不变量（connect 目标串恒 `localhost:<port>` 字面，勿用 127.0.0.1）、§5.2 forward 规则存亡断言软化（两种结局 refresh 均收敛）、R8 并入 ligfx Frequency 单位核实。
+- **前端已核实零改动**：serial 只进 `dataset.serial` / `pkgList-<serial>` 元素 id（`.id=`/`setAttribute` 赋值，无动态 id 的 querySelector），`localhost:5559` 冒号安全。
+- **最高风险 R1**：`localabstract` forward 能否穿 5557 中继——S0 预验证定生死；fallback F1 = agent 加 `--tcp-port` 监听模式 + `forward tcp:0 tcp:PORT`。
+
+**遗留**：S0 预验证（hppc 手工 adb，R1-R5/R7/R8，结论回填设计文档）→ S1-S6 实施见设计文档 §9；九项指标/C 类回归按 WORKSPACE H 3-4 独立成会话。环境备忘：本机 lark-cli 不在 PATH（Doubao 沙盒内副本无 auth 子命令），可用版从 GitHub `larksuite/cli` releases 装并配 `~/.lark-cli`（appId cli_a943547e3e791bc8，keychain 存 secret）；用户 token 曾过期，本次已重新授权（docs 域）。
+
+---
+
 ## 2026-09-09(3) — 非 root 设备支持全链路（WORKSPACE G 闭环）
 
 **任务**：探索无 root 时各指标可用性并落地能力降级；加「获取 root」按钮（结果反馈）；auto-root 收敛为非车机不默认提权。
