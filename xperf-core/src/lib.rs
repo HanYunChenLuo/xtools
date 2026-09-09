@@ -26,6 +26,8 @@ pub mod platform;
 pub mod simpleperf;
 /// perfetto 深挖：录制、trace_processor SQL 归因、本地镜像 UI 自动加载。
 pub mod trace;
+/// adb 传输后端：本机 adb server 或经 SSH 隧道的远端 adb server（远程调试）。
+pub mod transport;
 /// 主机侧通用工具（adb 命令封装、中断标志、控制字符清洗）。
 pub mod utils;
 
