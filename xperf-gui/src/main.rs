@@ -173,16 +173,27 @@ fn spawn_sampling(app: tauri::AppHandle, serial: String, package: String, interv
         };
         let mut known_pids = std::collections::HashSet::new();
         while *running.lock().unwrap() {
-            match stream.next_event() {
-                Ok(Some(Ok(ev))) => {
-                    for sev in map_event(ev, &mut known_pids) {
-                        if debug_events {
-                            eprintln!("[sampling] {}", brief_event(&sev));
+            // 批量读取：一轮节拍的多条事件（多 PID/多指标）同 burst 到达，
+            // 合并为一次 emit（极端配置 50ms×3PID 下 IPC 从 ~260 次/s 降到 ~20 次/s）
+            match stream.next_event_batch() {
+                Ok(Some(batch)) => {
+                    let mut sevs = Vec::new();
+                    for ev in batch {
+                        match ev {
+                            Ok(ev) => sevs.extend(map_event(ev, &mut known_pids)),
+                            Err(e) => eprintln!("[sampling] 协议解析失败: {}", e),
                         }
-                        let _ = app.emit("sample", serde_json::json!({ "serial": serial, "event": sev }));
                     }
+                    if sevs.is_empty() {
+                        continue;
+                    }
+                    if debug_events {
+                        for sev in &sevs {
+                            eprintln!("[sampling] {}", brief_event(sev));
+                        }
+                    }
+                    let _ = app.emit("sample", serde_json::json!({ "serial": serial, "events": sevs }));
                 }
-                Ok(Some(Err(e))) => eprintln!("[sampling] 协议解析失败: {}", e),
                 // EOF/读错误：adb 长连接断开或 agent 退出 → 等待设备恢复并重连（不停止采样）
                 Ok(None) | Err(_) => {
                     eprintln!("[sampling] 连接断开，等待设备恢复…");

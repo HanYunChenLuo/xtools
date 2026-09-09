@@ -257,6 +257,33 @@ impl AgentStream {
         ))
     }
 
+    /// 批量读取：阻塞等首条，随后抽干读缓冲里已完整的行（不阻塞、不改协议）。
+    /// 一轮节拍的多条事件（多 PID/多指标）通常同 burst 到达，批量后宿主侧
+    /// 一次 emit/分发即可，显著降低 IPC 次数（GUI 热路径）。
+    /// 返回 None = 流结束；Some(vec) 至少含一条。
+    pub fn next_event_batch(&mut self) -> Result<Option<Vec<std::result::Result<AgentEvent, String>>>> {
+        let mut out = Vec::new();
+        match self.next_event()? {
+            None => return Ok(None),
+            Some(e) => out.push(e),
+        }
+        loop {
+            let buf = self.reader.buffer();
+            let Some(nl) = buf.iter().position(|b| *b == b'\n') else {
+                break; // 缓冲内无完整行：不阻塞等剩余部分
+            };
+            let line: Vec<u8> = buf[..=nl].to_vec();
+            self.reader.consume(nl + 1);
+            let line = String::from_utf8_lossy(&line);
+            let line = line.trim();
+            if line.is_empty() {
+                continue; // 心跳空行
+            }
+            out.push(serde_json::from_str(line).map_err(|e| format!("{} (行: {})", e, line)));
+        }
+        Ok(Some(out))
+    }
+
     /// 结束会话（停 ping + 断开 TCP；daemon 侧会话线程随连接断开收尾，daemon 本体常驻）
     pub fn kill(&mut self) {
         self.ping_stop.store(true, std::sync::atomic::Ordering::Relaxed);

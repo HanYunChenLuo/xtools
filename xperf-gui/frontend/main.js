@@ -95,11 +95,22 @@ class LineChart {
     if (pids.length === 0 || !isFinite(tMax)) { this.drawAxes(L, T, W - R, H - B); return; }
     let tMin = this.windowMode === 'all' ? tMinAll : Math.max(tMinAll, tMax - this.followMs);
     if (tMax - tMin < 1000) tMax = tMin + 1000;
-    // 可见窗口内的 vMax（Y 轴）与绘制点数统计
-    let vMax = 0;
+    // 每 series 预计算窗口起点（时间有序二分）——vMax 扫描与绘制共用，
+    // 窗口外前缀不再重复扫（长会话 'all' 模式下避免每次绘制 O(全量) 前缀比较）
+    const rows = [];
     for (const pid of pids) {
-      for (const p of this.series[pid]) {
-        if (p.t >= tMin && p.v > vMax) vMax = p.v;
+      const all = this.series[pid];
+      if (all.length === 0) continue;
+      let lo = 0, hi = all.length;
+      while (lo < hi) { const mid = (lo + hi) >> 1; if (all[mid].t < tMin) lo = mid + 1; else hi = mid; }
+      if (lo < all.length) rows.push({ pid, all, lo });
+    }
+    // 可见窗口内的 vMax（Y 轴）
+    let vMax = 0;
+    for (const { all, lo } of rows) {
+      for (let j = lo; j < all.length; j++) {
+        const v = all[j].v;
+        if (v > vMax) vMax = v;
       }
     }
     // Y 轴范围：固定下限（CPU=100，超出自动扩展）或自适应（内存，基于实际最大值）
@@ -128,16 +139,10 @@ class LineChart {
       ctx.fillText(ts.toTimeString().slice(0, 8), x - 22, H - 10);
     }
     this.drawAxes(L, T, W - R, H - B);
-    // 折线：窗口外点跳过（时间有序，二分找起点）；可见点超过 2×像素宽时按 stride 抽稀
+    // 折线：窗口外点跳过（起点二分已预算）；可见点超过 2×像素宽时按 stride 抽稀
     let legendX = W - R;
     const plotW = W - R - L;
-    pids.forEach((pid, i) => {
-      const all = this.series[pid];
-      if (all.length < 1) return;
-      // 二分：第一个 t >= tMin 的下标
-      let lo = 0, hi = all.length;
-      while (lo < hi) { const mid = (lo + hi) >> 1; if (all[mid].t < tMin) lo = mid + 1; else hi = mid; }
-      if (lo >= all.length) return;
+    rows.forEach(({ pid, all, lo }, i) => {
       const visLen = all.length - lo;
       const stride = Math.max(1, Math.ceil(visLen / (plotW * 2)));
       ctx.strokeStyle = C.series[i % C.series.length];
@@ -1071,10 +1076,11 @@ const app = {
 };
 
 // ---------- 全局事件（payload 带 serial 分发到设备会话） ----------
+// sample 为批量事件（一轮节拍的多条合并一次 IPC）：payload.events 数组逐条分发
 listen('sample', (e) => {
-  const { serial, event } = e.payload;
-  const s = app.sessions.get(serial);
-  if (s) s.handleSample(event);
+  const s = app.sessions.get(e.payload.serial);
+  if (!s) return;
+  for (const ev of e.payload.events || []) s.handleSample(ev);
 });
 listen('trace', (e) => {
   const s = app.sessions.get(e.payload.serial);
