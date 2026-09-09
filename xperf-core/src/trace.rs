@@ -832,6 +832,10 @@ pub fn analyze_and_report(rec: &RecordedTrace, package: &str) -> Result<String> 
 /// 镜像缓存目录（~/.cache/xperf/perfetto_ui）
 const UI_CACHE_SUBDIR: &str = ".cache/xperf/perfetto_ui";
 
+/// 镜像完成标记文件（内容 `assets=<n>`）：无标记 = 上次镜像中断/半截，
+/// 下次使用触发重镜像（半截 frontend_bundle.js 曾致浏览器 SyntaxError 蓝屏）
+const MIRROR_MARKER: &str = "_mirror_complete";
+
 /// 镜像过程进程内互斥：并发调用（如连点按钮）会交错写同一批缓存文件（curl -o 交错损坏）
 static MIRROR_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -899,11 +903,14 @@ fn ensure_perfetto_ui_mirror() -> Result<PathBuf> {
         .map(PathBuf::from)
         .unwrap_or_default()
         .join(UI_CACHE_SUBDIR);
-    // 完整性检查：index.html 声明的 stable 版本目录（data-perfetto_version JSON）
-    // 必须存在且含 frontend_bundle.js。混合/半截缓存（多次镜像运行交叠、index.html
-    // 引用的版本目录缺失）曾致页面停在主页，旧检查（任意 v 开头目录存在）认不出。
-    // index.html 无版本声明时退回旧检查。
-    if dir.join("index.html").is_file() {
+    // 完整性检查（三项全须满足，缺一重镜像）：
+    // ① 完成标记 `_mirror_complete`（上一版只查文件存在，curl 半截文件
+    //   （exit 18，~4% 截断实测）会被误认为完成 → 浏览器 SyntaxError 蓝屏）；
+    // ② index.html 声明的 stable 版本目录（data-perfetto_version JSON）
+    //   存在且含 frontend_bundle.js。混合/半截缓存（多次镜像运行交叠、index.html
+    //   引用的版本目录缺失）曾致页面停在主页，旧检查（任意 v 开头目录存在）认不出；
+    // ③ index.html 无版本声明时退回旧检查（仍需标记）。
+    if dir.join("index.html").is_file() && dir.join(MIRROR_MARKER).is_file() {
         let stable_bundle = std::fs::read_to_string(dir.join("index.html"))
             .ok()
             .and_then(|html| {
@@ -967,18 +974,24 @@ fn ensure_perfetto_ui_mirror() -> Result<PathBuf> {
         if let Some(parent) = local.parent() {
             std::fs::create_dir_all(parent)?;
         }
+        // 原子下载：落 .part 成功后 rename；失败删 .part 不留半截文件
+        // （半截 frontend_bundle.js 曾致浏览器 SyntaxError 蓝屏）。
+        // --retry-all-errors 覆盖 exit 18（传输截断）等网络错误重试 2 次
+        let part = local.with_extension("part");
         let ok_dl = Command::new("curl")
-            .args(["-fsSL", "-o"])
-            .arg(&local)
+            .args(["-fsSL", "--retry", "2", "--retry-all-errors", "-o"])
+            .arg(&part)
             .arg(url)
             .output()
             .map(|o| o.status.success())
             .unwrap_or(false);
-        if ok_dl {
+        if ok_dl && std::fs::rename(&part, &local).is_ok() {
             ok += 1;
-        } else if rel.is_empty() {
-            anyhow::bail!("下载 index.html 失败: {url}");
         } else {
+            let _ = std::fs::remove_file(&part);
+            if rel.is_empty() {
+                anyhow::bail!("下载 index.html 失败: {url}");
+            }
             // netlog 清单含浏览器探测性 404（如 /assets/assets/... 双层路径，浏览器会
             // fallback 到版本化路径），跳过即可；全部失败才算镜像失败
             eprintln!("[trace] 跳过不可用资源: {url}");
@@ -990,6 +1003,8 @@ fn ensure_perfetto_ui_mirror() -> Result<PathBuf> {
     if !dir.join("index.html").is_file() {
         anyhow::bail!("镜像不完整（缺 index.html）");
     }
+    // 完成标记：完整性检查的①（无标记 = 上次镜像中断/半截，下次使用重镜像）
+    std::fs::write(dir.join(MIRROR_MARKER), format!("assets={}\n", ok))?;
     Ok(dir)
 }
 
@@ -1200,6 +1215,38 @@ pub fn reveal_trace_and_open_ui(trace: &Path) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 镜像修复路径：缓存缺完成标记 → 重镜像 → bundle 大小与上游 Content-Length 一致
+    /// （半截文件回归测试：2026-09-09 实测 frontend_bundle.js 截断 4% 致 UI 蓝屏）
+    #[test]
+    #[ignore = "需联网 + Chrome；写真实 ~/.cache/xperf/perfetto_ui（~2min）"]
+    fn test_ui_mirror_repairs_truncated_cache() {
+        let dir = std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_default()
+            .join(UI_CACHE_SUBDIR);
+        // 模拟中毒现场：删完成标记（保留文件，验证重镜像覆盖修复）
+        let _ = std::fs::remove_file(dir.join(MIRROR_MARKER));
+        let dir = ensure_perfetto_ui_mirror().expect("镜像失败");
+        assert!(dir.join(MIRROR_MARKER).is_file(), "镜像后应有完成标记");
+        // index 声明的 stable bundle 存在且完整（与上游 Content-Length 一致）
+        let html = std::fs::read_to_string(dir.join("index.html")).unwrap();
+        let key = "\"stable\": \"";
+        let i = html.find(key).unwrap() + key.len();
+        let ver = &html[i..i + html[i..].find('"').unwrap()];
+        let bundle = dir.join(ver).join("frontend_bundle.js");
+        let local_size = std::fs::metadata(&bundle).unwrap().len();
+        let head = Command::new("curl")
+            .args(["-fsSI", &format!("https://ui.perfetto.dev/{ver}/frontend_bundle.js")])
+            .output()
+            .unwrap();
+        let remote_size: u64 = String::from_utf8_lossy(&head.stdout)
+            .lines()
+            .find_map(|l| l.to_ascii_lowercase().strip_prefix("content-length:").map(|v| v.trim().to_string()))
+            .and_then(|v| v.parse().ok())
+            .expect("上游无 Content-Length");
+        assert_eq!(local_size, remote_size, "bundle 大小须与上游一致（截断检测）");
+    }
 
     #[test]
     fn test_trace_config_fields() {
