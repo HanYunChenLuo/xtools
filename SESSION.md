@@ -94,6 +94,17 @@
   同 oid 免重传）；**本地保险分支 `backup-pre-lfs-migrate` 保留旧历史**（未推送）；
   **Linux 机同步须 `git fetch && git reset --hard origin/main`（或重 clone），不能直接 pull**
 
+### git 拓扑：hppc 作为中转远端（2026-09-08 晚）
+
+- **远端结构**：本机（Mac）→ `hppc:/home/han/code/tools/xtools`（SSH 别名 hppc，
+  Linux 开发机）→ GitHub（origin）。**向 GitHub 提交统一在 hppc 上执行**；
+  本机 `git push`（upstream 已设 hppc/main）推到 hppc 即可
+- hppc 侧 `receive.denyCurrentBranch=updateInstead`：推送到 checked-out 分支时
+  自动更新其工作区（要求 hppc 工作区无未提交变更）；git-lfs 3.4.1 已装，
+  LFS 对象经 SSH 直传 hppc（`git-lfs-authenticate` 协议）
+- LFS 内容已到位（dylib 25.4MB 实测在 hppc 工作区）；`git pull` 从 hppc 拉
+  （GitHub 侧变更经 hppc：hppc 上 `git pull origin` 后本机再 pull hppc）
+
 ---
 
 ## 2026-09-08（一）上午 — GUI「打开应用」后 NoProcess 排查（RemoteServer 崩溃，非工具问题）
