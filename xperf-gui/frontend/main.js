@@ -35,6 +35,19 @@ function uiColors() {
   return _colorCache;
 }
 
+// ---------- 内存序列抽稀（与 CLI CHART_SERIES_CAP 同口径） ----------
+// 超过 2×CAP 时每 2 取 1 原地抽稀：保完整时间范围，分辨率随会话时长降级；
+// 内存封顶 ~30k 点/series（全分辨率全量数据在流式 CSV 落盘里，不受影响）。
+const SERIES_CAP = 30000;
+function pushCapped(arr, item) {
+  if (arr.length >= 2 * SERIES_CAP) {
+    let w = 0;
+    for (let r = 0; r < arr.length; r += 2) arr[w++] = arr[r];
+    arr.length = w;
+  }
+  arr.push(item);
+}
+
 class LineChart {
   // canvas 直接传元素引用（多设备页并存，不再用全局 id 查找）
   constructor(canvas, title, unit, maxValue) {
@@ -67,7 +80,7 @@ class LineChart {
   }
   push(pid, t, v) {
     if (!this.series[pid]) this.series[pid] = [];
-    this.series[pid].push({ t, v });
+    pushCapped(this.series[pid], { t, v });
   }
   draw() {
     const { ctx } = this;
@@ -497,7 +510,7 @@ class DeviceSession {
       const t = new Date(timestamp).getTime();
       this.charts.fps.push(shortLayer, t, +fps.toFixed(1));
       if (!this.fpsHist[shortLayer]) this.fpsHist[shortLayer] = [];
-      this.fpsHist[shortLayer].push({ t, fps, jank: jank_count });
+      pushCapped(this.fpsHist[shortLayer], { t, fps, jank: jank_count });
       this.setLive('fps', 'FPS (' + shortLayer + ')', fps.toFixed(1), '', 'err');
       this.setLive('fps_jank', '  └ Jank', jank_count, '', 'dim');
       this.charts.fps.requestDraw();
@@ -527,7 +540,7 @@ class DeviceSession {
       for (const [name, , value] of sensors) {
         this.charts.temp.push(name, t, value);
         if (!this.tempHist[name]) this.tempHist[name] = [];
-        this.tempHist[name].push({ t, v: value, status });
+        pushCapped(this.tempHist[name], { t, v: value, status });
         this.setLive('temp_' + name, '温度 ' + name, value.toFixed(1), ' °C', 'orange');
       }
       this.setLive('temp_status', '  └ 热状态', status >= 0 ? status : '?', '', 'dim');
@@ -540,7 +553,7 @@ class DeviceSession {
       this.charts.gpu.title = maxmhz > 0 ? `GPU (%) — ${mhz}/${maxmhz} MHz` : `GPU Busy (%) — @ ${mhz} MHz`;
       this.charts.gpu.push('busy', t, +busy.toFixed(2));
       if (util > 0 || maxmhz > 0) this.charts.gpu.push('util', t, +util.toFixed(2));
-      this.gpuHist.push({ t, busy, util, mhz });
+      pushCapped(this.gpuHist, { t, busy, util, mhz });
       this.setLive('gpu_busy', 'GPU busy', busy.toFixed(1), '%', 'purple');
       if (maxmhz > 0) this.setLive('gpu_freq', '  └ 频率', mhz + '/' + maxmhz, ' MHz', 'dim');
       if (util > 0) this.setLive('gpu_util', '  └ util', util.toFixed(1), '%', 'dim');
@@ -553,7 +566,7 @@ class DeviceSession {
       const t = new Date(timestamp).getTime();
       this.charts.gpu.push('PID ' + pid, t, +busy.toFixed(2));
       if (!this.gpuprocHist[pid]) this.gpuprocHist[pid] = [];
-      this.gpuprocHist[pid].push({ t, busy });
+      pushCapped(this.gpuprocHist[pid], { t, busy });
       this.setLive('gpu_proc_' + pid, 'GPU busy (pid ' + pid + ')', busy.toFixed(1), '%', 'purple');
       this.charts.gpu.requestDraw();
     } else if (ev.GpuMemUpdate) {
@@ -566,7 +579,7 @@ class DeviceSession {
       this.charts.gpumem.push('PID ' + pid, t, +mb.toFixed(1));
       this.charts.gpumem.push('global', t, Math.round(global / 1e6));
       if (!this.gpumemHist[pid]) this.gpumemHist[pid] = [];
-      this.gpumemHist[pid].push({ t, mb, gmb: global / 1e6 });
+      pushCapped(this.gpumemHist[pid], { t, mb, gmb: global / 1e6 });
       this.setLive('gpumem_' + pid, 'GPU 显存 (pid ' + pid + ')', mb.toFixed(0), ' MB', 'teal');
       this.setLive('gpumem_global', '  └ 整机', (global / 1e6).toFixed(0), ' MB', 'dim');
       this.charts.gpumem.requestDraw();
@@ -578,7 +591,7 @@ class DeviceSession {
       this.charts.io.push(`PID ${pid} R`, t, +r.toFixed(2));
       this.charts.io.push(`PID ${pid} W`, t, +w.toFixed(2));
       if (!this.ioHist[pid]) this.ioHist[pid] = [];
-      this.ioHist[pid].push({ t, r, w, dr, dw });
+      pushCapped(this.ioHist[pid], { t, r, w, dr, dw });
       this.setLive('io_' + pid, 'IO 读/写 (pid ' + pid + ')', r.toFixed(1) + ' / ' + w.toFixed(1), ' KB/s', 'orange');
       this.charts.io.requestDraw();
     } else if (ev.NetUpdate) {
@@ -909,11 +922,10 @@ class DeviceSession {
     });
 
     // ---- 数据管理（导出/基线/清理；基线与 CLI --save-baseline 同一文件互通） ----
+    // 导出 = 复制后端流式落盘的会话 CSV 目录快照（全量数据在磁盘，无需前端回传）
     this.el('export-btn').addEventListener('click', async () => {
-      const pkg = this.package() || 'unknown';
-      const d = this.collectSessionData();
       try {
-        const dir = await invoke('export_csv', { package: pkg, cpu: d.cpu, mem: d.mem, fps: d.fps, freq: d.freq, temp: d.temp, gpu: d.gpu, io: d.io, net: d.net, gpumem: d.gpumem, gpuproc: d.gpuproc });
+        const dir = await invoke('export_csv', { serial: this.serial });
         this.setStatus('已导出: ' + dir);
       } catch (e) {
         this.setStatus('导出失败: ' + e);

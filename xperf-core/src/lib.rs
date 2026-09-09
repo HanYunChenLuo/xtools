@@ -14,6 +14,8 @@ pub mod baseline;
 pub mod coldstart;
 /// CPU 采样协议类型（线程级 CPU 信息）。
 pub mod cpu;
+/// 流式 CSV 落盘（边采边写，CLI/GUI 共用；GUI 每会话独立目录）。
+pub mod csvstream;
 /// FPS 采样协议类型（时序数据结构）。
 pub mod fps;
 /// 时间轴打点：Unix socket 监听与打点事件。

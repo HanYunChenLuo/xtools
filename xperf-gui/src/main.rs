@@ -172,6 +172,14 @@ fn spawn_sampling(app: tauri::AppHandle, serial: String, package: String, interv
             }
         };
         let mut known_pids = std::collections::HashSet::new();
+        // 流式 CSV 落盘（与 CLI 同根同格式）：目录 <pkg>/<ts>-<serial>，首个样本到达
+        // 时创建；同包重采复用（指标勾选重启不丢 CSV 连续性）；前端内存序列只服务
+        // 图表/基线，全量数据以落盘为准
+        let csv_dir = app
+            .try_state::<AppState>()
+            .map(|s| s.csv_dir_for(&serial, &package))
+            .unwrap_or_else(|| gui_data_root().join(&package));
+        let mut csv = xperf_core::csvstream::CsvStream::with_root(csv_dir);
         while *running.lock().unwrap() {
             // 批量读取：一轮节拍的多条事件（多 PID/多指标）同 burst 到达，
             // 合并为一次 emit（极端配置 50ms×3PID 下 IPC 从 ~260 次/s 降到 ~20 次/s）
@@ -186,6 +194,9 @@ fn spawn_sampling(app: tauri::AppHandle, serial: String, package: String, interv
                     }
                     if sevs.is_empty() {
                         continue;
+                    }
+                    for sev in &sevs {
+                        csv_write_event(&mut csv, &package, sev);
                     }
                     if debug_events {
                         for sev in &sevs {
@@ -220,6 +231,58 @@ fn spawn_sampling(app: tauri::AppHandle, serial: String, package: String, interv
             agent::qnx_stop_stats(&*platform, interval, Some(&serial));
         }
     });
+}
+
+/// 单事件流式落盘一行（与 CLI 的 CsvStream 行口径完全一致）。
+/// PidDiscovered/PidDisappeared/AgentHello/NoProcess/SampleError 无数值不落 CSV。
+/// GUI 无 --thread 开关，线程明细不写文件（Top 线程面板是内存态）。
+fn csv_write_event(csv: &mut xperf_core::csvstream::CsvStream, pkg: &str, ev: &SampleEvent) {
+    match ev {
+        SampleEvent::CpuUpdate { pid, timestamp, process_cpu, .. } => {
+            if let Ok(p) = pid.parse() {
+                csv.cpu_row(pkg, p, *timestamp, *process_cpu);
+            }
+        }
+        SampleEvent::MemoryUpdate { pid, timestamp, details, .. } => {
+            if let Ok(p) = pid.parse() {
+                csv.mem_row(pkg, p, *timestamp, details);
+            }
+        }
+        SampleEvent::FpsUpdate { pid, timestamp, layer, fps, jank_count, .. } => {
+            if let Ok(p) = pid.parse() {
+                csv.fps_row(pkg, p, *timestamp, layer, *fps, *jank_count);
+            }
+        }
+        SampleEvent::FreqUpdate { timestamp, khz } => {
+            let mhz: Vec<f32> = khz.iter().map(|k| *k as f32 / 1000.0).collect();
+            csv.freq_row(pkg, *timestamp, &mhz);
+        }
+        SampleEvent::TempUpdate { timestamp, status, sensors } => {
+            csv.temp_row(pkg, *timestamp, *status, sensors);
+        }
+        SampleEvent::GpuUpdate { timestamp, busy, util, mhz, maxmhz } => {
+            csv.gpu_row(pkg, *timestamp, *busy, *util, *mhz, *maxmhz);
+        }
+        SampleEvent::GpuProcUpdate { pid, timestamp, busy } => {
+            if let Ok(p) = pid.parse() {
+                csv.gpuproc_row(pkg, p, *timestamp, *busy);
+            }
+        }
+        SampleEvent::GpuMemUpdate { pid, timestamp, bytes, global } => {
+            if let Ok(p) = pid.parse() {
+                csv.gpumem_row(pkg, p, *timestamp, *bytes as f32 / 1e6, *global as f32 / 1e6);
+            }
+        }
+        SampleEvent::IoUpdate { pid, timestamp, r, w, dr, dw } => {
+            if let Ok(p) = pid.parse() {
+                csv.io_row(pkg, p, *timestamp, *r, *w, *dr, *dw);
+            }
+        }
+        SampleEvent::NetUpdate { timestamp, rx, tx } => {
+            csv.net_row(pkg, *timestamp, *rx, *tx);
+        }
+        _ => {}
+    }
 }
 
 /// 事件的单行摘要（替代 {:?} 全量 Debug——CpuUpdate 含全部线程列表，每轮数千字符）
@@ -271,6 +334,10 @@ struct DeviceSession {
     package: String,
     /// 采样启动参数（间隔 + 指标 flags，与 `package` 同一写入点；None = 非本进程启动）
     startup_extra: Option<(u64, MetricFlags)>,
+    /// 当前采样会话的流式 CSV 目录与所属包名（`<pkg>/<ts>-<serial>`，首个样本落盘时
+    /// 创建；导出 CSV = 复制该目录快照）。元组带包名：换包重采时判失配建新目录，
+    /// 同包重采复用（指标勾选重启采样不丢 CSV 连续性）
+    csv_dir: Arc<Mutex<Option<(String, std::path::PathBuf)>>>,
 }
 
 impl DeviceSession {
@@ -281,6 +348,7 @@ impl DeviceSession {
             stack_running: Arc::new(Mutex::new(false)),
             package: String::new(),
             startup_extra: None,
+            csv_dir: Arc::new(Mutex::new(None)),
         }
     }
 }
@@ -306,6 +374,22 @@ impl AppState {
             s.package = package.to_string();
             s.startup_extra = Some((interval, flags));
         }
+    }
+
+    /// 取采样会话的流式 CSV 目录：同包复用，换包/首次新建并记录
+    fn csv_dir_for(&self, serial: &str, package: &str) -> std::path::PathBuf {
+        let session = self.session(serial);
+        let mut guard = session.csv_dir.lock().unwrap();
+        if let Some((pkg, dir)) = &*guard {
+            if pkg == package {
+                return dir.clone();
+            }
+        }
+        let dir = gui_data_root()
+            .join(package)
+            .join(format!("{}-{}", Local::now().format("%Y%m%d_%H%M%S"), serial));
+        *guard = Some((package.to_string(), dir.clone()));
+        dir
     }
 }
 
@@ -1010,171 +1094,49 @@ fn startup_sessions(
 
 /// IO 导出行：(ms, r, w, dr, dw) KB/s
 type IoExportPoints = Vec<(f64, f64, f64, f64, f64)>;
-/// GPU 显存导出行：(ms, 进程 MB, 整机 MB)
-type GpuMemExportPoints = Vec<(f64, f64, f64)>;
 /// GPU 系统导出行：(ms, busy%, util%, mhz)
 type GpuExportPoints = Vec<(f64, f64, f64, u32)>;
 
-/// 导出前端持有的完整会话历史为 CSV（GUI 不流式落盘，数据在前端内存中）。
-/// 写到 `log/<pkg>/<导出时刻>/` 下的各指标子目录，返回目录路径。
-/// cpu/mem: pid -> [[ms, value]...]（mem 为 MB）；fps: 图层短名 -> [[ms, fps, jank]...]
-/// freq: 核名 -> [[ms, MHz]...]；temp: 传感器 -> [[ms, °C, status]...]；
-/// gpu: [[ms, busy%, mhz]...]；io: pid -> [[ms, r, w, dr, dw]...]；net: [[ms, rx, tx]...]
+/// 导出当前采样会话的流式 CSV：复制会话目录快照，返回新目录路径。
+/// 采样数据已逐事件流式落盘到 `<pkg>/<ts>-<serial>/`（与 CLI 同根同格式，全分辨率），
+/// 导出 = 复制该目录为 `<pkg>/<ts>-<serial>-export-<时刻>/`。复制而非直接返回原目录：
+/// 导出语义是快照（会话可能仍在追加写）。
 #[tauri::command]
-#[allow(clippy::too_many_arguments)]
-async fn export_csv(
-    package: String,
-    cpu: std::collections::HashMap<String, Vec<(f64, f64)>>,
-    mem: std::collections::HashMap<String, Vec<(f64, f64)>>,
-    fps: std::collections::HashMap<String, Vec<(f64, f64, u32)>>,
-    freq: std::collections::HashMap<String, Vec<(f64, f64)>>,
-    temp: std::collections::HashMap<String, Vec<(f64, f64, i32)>>,
-    gpu: GpuExportPoints,
-    io: std::collections::HashMap<String, IoExportPoints>,
-    net: Vec<(f64, f64, f64)>,
-    gpumem: std::collections::HashMap<String, GpuMemExportPoints>,
-    gpuproc: std::collections::HashMap<String, Vec<(f64, f64)>>,
-) -> Result<String, String> {
-    use std::io::Write;
-    // 包名拼入数据目录路径（/tmp/xperf/<pkg>/<ts>），须与 start_sampling 等同一校验
-    validate_package(&package)?;
-    let dir = gui_data_root()
-        .join(&package)
-        .join(Local::now().format("%Y%m%d_%H%M%S").to_string());
-    let fmt_ts = |ms: f64| {
-        DateTime::from_timestamp_millis(ms as i64)
-            .map(|t| t.with_timezone(&Local).format("%Y-%m-%d %H:%M:%S%.3f").to_string())
-            .unwrap_or_default()
-    };
-    let mut wrote = false;
-    if !cpu.is_empty() {
-        let d = dir.join("cpu");
-        std::fs::create_dir_all(&d).map_err(|e| e.to_string())?;
-        for (pid, pts) in &cpu {
-            let mut f = std::fs::File::create(d.join(format!("cpu_{}_data.csv", pid))).map_err(|e| e.to_string())?;
-            writeln!(f, "Timestamp,Process CPU (%)").map_err(|e| e.to_string())?;
-            for (t, v) in pts {
-                writeln!(f, "{},{:.2}", fmt_ts(*t), v).map_err(|e| e.to_string())?;
-            }
+async fn export_csv(serial: String, state: State<'_, AppState>) -> Result<String, String> {
+    let session = state.session(&serial);
+    export_session_csv(&session)
+}
+
+/// export_csv 的实现体（命令壳拆出便于单测）：复制会话 CSV 目录快照
+fn export_session_csv(session: &DeviceSession) -> Result<String, String> {
+    let (pkg, src) = session.csv_dir.lock().unwrap().clone()
+        .ok_or_else(|| "当前无采样会话（先开始监控）".to_string())?;
+    if !src.is_dir() {
+        return Err("暂无已落盘的数据（采样会话尚无样本）".into());
+    }
+    validate_package(&pkg)?;
+    let dst = src.with_file_name(format!(
+        "{}-export-{}",
+        src.file_name().and_then(|n| n.to_str()).unwrap_or("session"),
+        Local::now().format("%Y%m%d_%H%M%S")
+    ));
+    copy_dir_all(&src, &dst).map_err(|e| format!("导出失败: {}", e))?;
+    Ok(dst.to_string_lossy().into_owned())
+}
+
+/// 递归复制目录（导出快照用；dst 由调用方保证为本次新建）
+fn copy_dir_all(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let to = dst.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_dir_all(&entry.path(), &to)?;
+        } else {
+            std::fs::copy(entry.path(), &to)?;
         }
-        wrote = true;
     }
-    if !mem.is_empty() {
-        let d = dir.join("memory");
-        std::fs::create_dir_all(&d).map_err(|e| e.to_string())?;
-        for (pid, pts) in &mem {
-            // 前端 memChart 序列已按 MB 传入（单位统一，与实时面板/峰值一致）
-            let mut f = std::fs::File::create(d.join(format!("memory_{}_data.csv", pid))).map_err(|e| e.to_string())?;
-            writeln!(f, "Timestamp,Total PSS (MB)").map_err(|e| e.to_string())?;
-            for (t, v) in pts {
-                writeln!(f, "{},{:.1}", fmt_ts(*t), v).map_err(|e| e.to_string())?;
-            }
-        }
-        wrote = true;
-    }
-    if !fps.is_empty() {
-        let d = dir.join("fps");
-        std::fs::create_dir_all(&d).map_err(|e| e.to_string())?;
-        for (layer, pts) in &fps {
-            let safe = layer.replace(['/', '#'], "_");
-            let mut f = std::fs::File::create(d.join(format!("fps_data_{}.csv", safe))).map_err(|e| e.to_string())?;
-            writeln!(f, "Timestamp,FPS,Jank").map_err(|e| e.to_string())?;
-            for (t, v, jank) in pts {
-                writeln!(f, "{},{:.2},{}", fmt_ts(*t), v, jank).map_err(|e| e.to_string())?;
-            }
-        }
-        wrote = true;
-    }
-    if !freq.is_empty() {
-        let d = dir.join("freq");
-        std::fs::create_dir_all(&d).map_err(|e| e.to_string())?;
-        let mut f = std::fs::File::create(d.join("freq_data.csv")).map_err(|e| e.to_string())?;
-        // 核名按 cpuN 数值排序，列序稳定
-        let mut cores: Vec<&String> = freq.keys().collect();
-        cores.sort_by_key(|n| n.trim_start_matches("cpu").parse::<u32>().unwrap_or(u32::MAX));
-        writeln!(f, "Timestamp,{}", cores.iter().map(|c| format!("{} (MHz)", c)).collect::<Vec<_>>().join(","))
-            .map_err(|e| e.to_string())?;
-        let rows = cores.iter().map(|c| &freq[*c]).collect::<Vec<_>>();
-        let n = rows.iter().map(|r| r.len()).max().unwrap_or(0);
-        for i in 0..n {
-            let t = rows.iter().find_map(|r| r.get(i).map(|(t, _)| *t)).unwrap_or(0.0);
-            let cells: Vec<String> = rows.iter().map(|r| r.get(i).map(|(_, v)| format!("{:.0}", v)).unwrap_or_default()).collect();
-            writeln!(f, "{},{}", fmt_ts(t), cells.join(",")).map_err(|e| e.to_string())?;
-        }
-        wrote = true;
-    }
-    if !temp.is_empty() {
-        let d = dir.join("thermal");
-        std::fs::create_dir_all(&d).map_err(|e| e.to_string())?;
-        let mut f = std::fs::File::create(d.join("thermal_data.csv")).map_err(|e| e.to_string())?;
-        writeln!(f, "Timestamp,Status,Sensor,TempC").map_err(|e| e.to_string())?;
-        for (sensor, pts) in &temp {
-            for (t, v, status) in pts {
-                writeln!(f, "{},{},{},{:.1}", fmt_ts(*t), status, sensor, v).map_err(|e| e.to_string())?;
-            }
-        }
-        wrote = true;
-    }
-    if !gpu.is_empty() {
-        let d = dir.join("gpu");
-        std::fs::create_dir_all(&d).map_err(|e| e.to_string())?;
-        let mut f = std::fs::File::create(d.join("gpu_data.csv")).map_err(|e| e.to_string())?;
-        writeln!(f, "Timestamp,Busy (%),Util (%),Clock (MHz)").map_err(|e| e.to_string())?;
-        for (t, busy, util, mhz) in &gpu {
-            writeln!(f, "{},{:.2},{:.2},{}", fmt_ts(*t), busy, util, mhz).map_err(|e| e.to_string())?;
-        }
-        wrote = true;
-    }
-    if !gpuproc.is_empty() {
-        let d = dir.join("gpu");
-        std::fs::create_dir_all(&d).map_err(|e| e.to_string())?;
-        for (pid, pts) in &gpuproc {
-            let mut f = std::fs::File::create(d.join(format!("gpu_proc_{}_data.csv", pid))).map_err(|e| e.to_string())?;
-            writeln!(f, "Timestamp,Busy (%)").map_err(|e| e.to_string())?;
-            for (t, busy) in pts {
-                writeln!(f, "{},{:.2}", fmt_ts(*t), busy).map_err(|e| e.to_string())?;
-            }
-        }
-        wrote = true;
-    }
-    if !io.is_empty() {
-        let d = dir.join("io");
-        std::fs::create_dir_all(&d).map_err(|e| e.to_string())?;
-        for (pid, pts) in &io {
-            let mut f = std::fs::File::create(d.join(format!("io_{}_data.csv", pid))).map_err(|e| e.to_string())?;
-            writeln!(f, "Timestamp,Read (KB/s),Write (KB/s),Disk Read (KB/s),Disk Write (KB/s)").map_err(|e| e.to_string())?;
-            for (t, r, w, dr, dw) in pts {
-                writeln!(f, "{},{:.2},{:.2},{:.2},{:.2}", fmt_ts(*t), r, w, dr, dw).map_err(|e| e.to_string())?;
-            }
-        }
-        wrote = true;
-    }
-    if !net.is_empty() {
-        let d = dir.join("net");
-        std::fs::create_dir_all(&d).map_err(|e| e.to_string())?;
-        let mut f = std::fs::File::create(d.join("net_data.csv")).map_err(|e| e.to_string())?;
-        writeln!(f, "Timestamp,RX (KB/s),TX (KB/s)").map_err(|e| e.to_string())?;
-        for (t, rx, tx) in &net {
-            writeln!(f, "{},{:.2},{:.2}", fmt_ts(*t), rx, tx).map_err(|e| e.to_string())?;
-        }
-        wrote = true;
-    }
-    if !gpumem.is_empty() {
-        let d = dir.join("gpumem");
-        std::fs::create_dir_all(&d).map_err(|e| e.to_string())?;
-        for (pid, pts) in &gpumem {
-            let mut f = std::fs::File::create(d.join(format!("gpumem_{}_data.csv", pid))).map_err(|e| e.to_string())?;
-            writeln!(f, "Timestamp,Process GPU Mem (MB),Global GPU Mem (MB)").map_err(|e| e.to_string())?;
-            for (t, mb, gmb) in pts {
-                writeln!(f, "{},{:.1},{:.0}", fmt_ts(*t), mb, gmb).map_err(|e| e.to_string())?;
-            }
-        }
-        wrote = true;
-    }
-    if !wrote {
-        return Err("暂无可导出的数据".into());
-    }
-    Ok(dir.to_string_lossy().into_owned())
+    Ok(())
 }
 
 /// 前端持有的会话序列 → 基线汇总（`export_csv` 同源数据结构，多 PID 合并，
@@ -1608,73 +1570,38 @@ Host hppc          # 重复别名去重
         assert!(map.get("devB").unwrap().startup_extra.is_none());
     }
 
-    #[tokio::test]
-    async fn test_export_csv_writes_files() {
+    #[test]
+    fn test_export_csv_snapshot_copies_session_dir() {
+        // 造会话：csv_dir 指向临时会话目录（内含嵌套子目录与 CSV 文件）
         let pkg = format!("test_export_{}", std::process::id());
-        let mut cpu = std::collections::HashMap::new();
-        cpu.insert("1234".to_string(), vec![(1700000000000.0, 12.5), (1700000001000.0, 30.0)]);
-        let mut fps = std::collections::HashMap::new();
-        fps.insert("SVM Container_0".to_string(), vec![(1700000000000.0, 30.0, 1u32)]);
-        let mut freq = std::collections::HashMap::new();
-        freq.insert("cpu0".to_string(), vec![(1700000000000.0, 2592.0)]);
-        freq.insert("cpu1".to_string(), vec![(1700000000000.0, 2246.0)]);
-        let mut temp = std::collections::HashMap::new();
-        temp.insert("soc0".to_string(), vec![(1700000000000.0, 42.5, 0i32)]);
-        let gpu = vec![(1700000000000.0, 37.5, 33.8, 585u32)];
-        let mut io = std::collections::HashMap::new();
-        io.insert("1234".to_string(), vec![(1700000000000.0, 12.0, 3.0, 0.0, 1.0)]);
-        let net = vec![(1700000000000.0, 123.0, 45.0)];
-        let mut gpumem = std::collections::HashMap::new();
-        gpumem.insert("1234".to_string(), vec![(1700000000000.0, 154.4, 2639.1)]);
-        let mut gpuproc = std::collections::HashMap::new();
-        gpuproc.insert("1234".to_string(), vec![(1700000000000.0, 14.4)]);
-        let dir = export_csv(pkg.clone(), cpu, Default::default(), fps, freq, temp, gpu, io, net, gpumem, gpuproc).await.unwrap();
-        let cpu_csv = std::fs::read_to_string(format!("{}/cpu/cpu_1234_data.csv", dir)).unwrap();
-        assert!(cpu_csv.starts_with("Timestamp,Process CPU (%)\n"));
-        assert!(cpu_csv.contains(",12.50\n"));
-        let fps_csv = std::fs::read_to_string(format!("{}/fps/fps_data_SVM Container_0.csv", dir)).unwrap();
-        assert!(fps_csv.starts_with("Timestamp,FPS,Jank\n"));
-        assert!(fps_csv.contains(",30.00,1\n"));
-        let freq_csv = std::fs::read_to_string(format!("{}/freq/freq_data.csv", dir)).unwrap();
-        assert!(freq_csv.starts_with("Timestamp,cpu0 (MHz),cpu1 (MHz)\n"));
-        assert!(freq_csv.contains(",2592,2246\n"));
-        let temp_csv = std::fs::read_to_string(format!("{}/thermal/thermal_data.csv", dir)).unwrap();
-        assert!(temp_csv.starts_with("Timestamp,Status,Sensor,TempC\n"));
-        assert!(temp_csv.contains(",0,soc0,42.5\n"));
-        let gpu_csv = std::fs::read_to_string(format!("{}/gpu/gpu_data.csv", dir)).unwrap();
-        assert!(gpu_csv.starts_with("Timestamp,Busy (%),Util (%),Clock (MHz)\n"));
-        assert!(gpu_csv.contains(",37.50,33.80,585\n"));
-        let gpuproc_csv = std::fs::read_to_string(format!("{}/gpu/gpu_proc_1234_data.csv", dir)).unwrap();
-        assert!(gpuproc_csv.starts_with("Timestamp,Busy (%)\n"));
-        assert!(gpuproc_csv.contains(",14.40\n"));
-        let io_csv = std::fs::read_to_string(format!("{}/io/io_1234_data.csv", dir)).unwrap();
-        assert!(io_csv.starts_with("Timestamp,Read (KB/s),Write (KB/s),Disk Read (KB/s),Disk Write (KB/s)\n"));
-        assert!(io_csv.contains(",12.00,3.00,0.00,1.00\n"));
-        let net_csv = std::fs::read_to_string(format!("{}/net/net_data.csv", dir)).unwrap();
-        assert!(net_csv.starts_with("Timestamp,RX (KB/s),TX (KB/s)\n"));
-        assert!(net_csv.contains(",123.00,45.00\n"));
-        let gpumem_csv = std::fs::read_to_string(format!("{}/gpumem/gpumem_1234_data.csv", dir)).unwrap();
-        assert!(gpumem_csv.starts_with("Timestamp,Process GPU Mem (MB),Global GPU Mem (MB)\n"));
-        assert!(gpumem_csv.contains(",154.4,2639\n"));
+        let src_dir = gui_data_root().join(&pkg).join("20260101_000000-devX");
+        let cpu_dir = src_dir.join("cpu");
+        std::fs::create_dir_all(&cpu_dir).unwrap();
+        std::fs::write(
+            cpu_dir.join("cpu_1234_data.csv"),
+            "Timestamp,Process CPU (%)\n2026-01-01 00:00:00.000,12.50\n",
+        ).unwrap();
+        let mut session = DeviceSession::new();
+        session.package = pkg.clone();
+        *session.csv_dir.lock().unwrap() = Some((pkg.clone(), src_dir));
+        // 导出 = 复制快照（<ts>-<serial>-export-<时刻>），内容与源一致
+        let dst = export_session_csv(&session).unwrap();
+        assert!(dst.contains("-export-"), "快照目录命名: {}", dst);
+        let copied = std::fs::read_to_string(format!("{}/cpu/cpu_1234_data.csv", dst)).unwrap();
+        assert!(copied.starts_with("Timestamp,Process CPU (%)\n"));
+        assert!(copied.contains(",12.50\n"));
         std::fs::remove_dir_all(gui_data_root().join(&pkg)).ok();
     }
 
-    #[tokio::test]
-    async fn test_export_csv_empty_errors() {
-        let r = export_csv(
-            "x".into(),
-            Default::default(),
-            Default::default(),
-            Default::default(),
-            Default::default(),
-            Default::default(),
-            Default::default(),
-            Default::default(),
-            Default::default(),
-            Default::default(),
-            Default::default(),
-        ).await;
-        assert!(r.is_err());
+    #[test]
+    fn test_export_csv_no_session_errors() {
+        // 无 csv_dir（从未采样）→ 报错；csv_dir 目录不存在（尚无样本落盘）→ 报错
+        let mut session = DeviceSession::new();
+        session.package = "x".into();
+        assert!(export_session_csv(&session).is_err());
+        *session.csv_dir.lock().unwrap() =
+            Some(("x".to_string(), gui_data_root().join("nonexistent-xyz-qe")));
+        assert!(export_session_csv(&session).is_err());
     }
 
     #[test]
