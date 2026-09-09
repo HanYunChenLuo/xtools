@@ -2,7 +2,7 @@
 
 > 本文件记录跨会话的待办事项（backlog）。每次会话的历史总结见 `SESSION.md`。
 > 完成一项就把状态改为 ✅ 并注明完成的 commit；新增想法随时追加。
-> 最后更新：2026-09-09（新增 G：非 root 设备权限矩阵探索——交接新会话；同日：GUI 性能优化两批 + 流式 CSV 落盘统一 + Perfetto UI 蓝屏修复，见 SESSION 当日条目）
+> 最后更新：2026-09-09（G：非 root 权限矩阵双机实测完成（SS3/SS2MAX 重启掉 root 以 shell 逐项验证），设计方向已录入 G 节，待实现；早前：GUI 性能优化两批 + 流式 CSV 落盘统一 + Perfetto UI 蓝屏修复，见 SESSION 当日条目）
 
 ## 当前状态速览
 
@@ -65,12 +65,29 @@
 - [x] **SSH 远程后端**（2026-09-09，`feature/ssh-remote` 分支合 main；设计 `docs/DESIGN-ssh-remote.md` v2 + 实现 S1-S11 全步骤）：真机接在 hppc 上，本机跑 GUI/CLI 经 SSH 调试采样/perfetto/simpleperf。commit 链：f45d44b（设计）→ c156141（S1 transport 基础）→ e520787（S2 隧道）→ 759d72d（S2a hop#2 映射表）→ cd81a37+b578b9f（S3 utils 注入）→ ea61e05（S4 init/shutdown）→ e4ae289（S5 CLI + S6 agent hop#2）→ b5c179a（S9 断连重连）→ f2a58a9（S10 GUI）。真机回归：远程采样/trace/simpleperf/断连重连/并发会话/退出零残留全通（详见 CLAUDE.md「SSH 远程后端」节）
 
 
-## G. 非 root 设备支持（待探索）
+## G. 非 root 设备支持（矩阵已实测，待实现）
 
-- [ ] **权限矩阵探索 + 无 root 机器支持**（2026-09-09 立项，交接新会话）：当前 agent 按「adbd 已 root」假设运行（CLAUDE.md：需要 root 读他进程 /proc 与 smaps_rollup）；`deploy_agent` 自动 try `adb root` 失败仅静默。无 root 时哪些路径实际挂掉、哪些其实不依赖 root，未经系统核实。
-  - **待核实矩阵（逐指标实测，勿凭印象）**：CPU/线程（他进程 `/proc/<pid>/stat`，受 hidepid 挂载 flag 与同 uid 限制；debuggable 应用可 `run-as`）／内存（smaps_rollup 需 root 或同 uid；`dumpsys meminfo` shell 权限即可，可作无 root 低频兜底）／FPS（`dumpsys SurfaceFlinger --latency` shell 应可用）／频率（`scaling_cur_freq` 通常 0444 shell 可读）／温度（`dumpsys thermalservice` shell）／IO（`/proc/<pid>/io` 同 hidepid 限制）／网络（`/proc/net/dev` 整机 shell 可读）／GPU（kgsl sysfs 权限视机器；`dumpsys gpu` shell；QNX telnet 与 root 无关）／simpleperf（`--app` 非 debuggable 应用需 root；debuggable 可 run-as 采）／perfetto（shell 可录，部分 data source 字段需 root）／冷启动 am start/force-stop（shell）。
-  - **设计方向（探索后定）**：agent 首握手探测能力集（如 /proc 他进程可读性）→ hello 带 capabilities → host/GUI 按能力集灰显不可用指标并如实标注「需 root」，可用指标照常；dumpsys 类指标在无 root 下自动兜底。
-  - **验证环境**：需一台无 root Android 机（SS2PRO 或未 root 手机）；现有 SS3/SS2MAX 均 adbd root，无法回归无 root 路径。
+- [ ] **权限矩阵探索 + 无 root 机器支持**（2026-09-09 立项；**同日矩阵实测完成**——SS3(A12)/SS2MAX(A11) 重启掉 root 后以 shell 逐项验证，测试对象 gltf viewer 非 debuggable）：
+
+  | 指标 | 数据源 | 非 root 可用性 |
+  |---|---|---|
+  | CPU/线程 | `/proc/<pid>/stat` + `task/*/stat` | ✅ 两机（/proc 挂载 `hidepid=2,gid=3009`，shell 在 readproc 组） |
+  | 内存明细 | `dumpsys meminfo <pid>`（App Summary 全分类） | ✅ 两机（可作 smaps 兜底，~100ms 故限频 ≥500ms） |
+  | 内存快采 | `/proc/<pid>/smaps_rollup` | ❌ 两机 Permission denied（PTRACE 检查） |
+  | FPS | `dumpsys SurfaceFlinger --list/--latency/全量` | ✅ 两机（SS3 全量 dump 0.03s 含 ownerPID；SS2MAX A11 全量无 ownerPID 元数据，走 --list 包名匹配兜底） |
+  | 频率 | `scaling_cur_freq` | ✅ 两机 |
+  | 温度 | `dumpsys thermalservice` / sysfs thermal zones | ✅ 两机（SS2MAX sysfs zones shell 可读 44°C/47°C） |
+  | IO | `/proc/<pid>/io` | ❌ 两机 Permission denied（0400 owner-only，无兜底） |
+  | 网络 | `/proc/net/dev` | ✅ 两机 |
+  | GPU busy | kgsl `gpubusy` | ✅ SS2MAX（shell 可读窗口语义值）；SS3 无 kgsl |
+  | GPU QNX | telnet 172.31.101.52 | ⚠️ SS3：**网络 shell 可达（ping 通）**，但 `/vendor/bin/busybox` shell 不可执行（SELinux）→ 需 agent 内嵌极简 telnet/TCP client 替代 busybox 即可解锁 |
+  | GPU 显存 | `dumpsys gpu` Memory snapshot | ✅ SS3（per-proc 段 shell 可读）；❌ SS2MAX（平台无数据，已知） |
+  | simpleperf | `--app` | ❌ 两机（非 debuggable/profileable；run-as 同拒） |
+  | perfetto | `perfetto -c -` 经 traced 服务 | ✅ 两机（shell 录 1s ftrace 出 1MB trace，落 /data/misc/perfetto-traces 属 shell） |
+  | 冷启动 | `am start -W` / `force-stop` | ✅ 两机（SS3 实测 TotalTime 451ms） |
+  | 部署 | push /data/local/tmp + 执行 | ✅ 两机（shell 可写可执行） |
+
+- [ ] **实现（设计方向，按实测定）**：① hello 增 `root: bool` + 会话首探（smaps/io 以目标 pid 实测一次）→ host 按能力降级：IO 发 err 禁用并标注「需 root」；内存 smaps 失败自动退 dumpsys meminfo（低间隔档位同步限频 ≥500ms 并提示）；GUI 灰显不可用项。② SS3 QNX 通道内嵌 TCP client（去 busybox 依赖）后无 root 可用。③ perfetto/冷启动/FPS/CPU/频率/温度/网络/显存（SS3）现状零改动可用。④ simpleperf 非 root 仅支持 debuggable 应用（检测到非 debuggable 时如实报错）。
 
 ---
 
