@@ -112,8 +112,8 @@ impl LineReader for ChildLines {
 
 /// 公共读线程骨架：逐行读行源 → parse → 发 gpu/gpuproc 事件。
 /// cleanup：EOF/stop 退出时的资源回收（kill 子进程 / 断开 TCP），只执行一次。
-/// keepalive：QNX telnet 的写半须移交线程持有保活（Arc 计数归零即断连风险无——
-/// 语义是防止线程存活期间写半被独占回收；watchdog/teardown 另持 Arc）。
+/// keepalive：旧 busybox 时代的保活语义（子进程 stdin drop 即 EOF）——TCP Arc 化后
+/// 已无实质必要（shutdown 由 cleanup 显式执行），保留参数位仅为三通道调用形态统一。
 /// eof_err：流断开时的 err 文案（None 则静默退出）。
 /// io/stop：daemon 会话的输出通道（TLS 挂接）与停止标志（会话结束线程即收）；
 /// stdout 模式 io=None（直写 stdout）/ stop 永不置位。

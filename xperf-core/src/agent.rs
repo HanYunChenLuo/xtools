@@ -426,7 +426,7 @@ pub fn acquire_root(serial: Option<&str>) -> Result<String> {
 /// 大小+修改时间双判：同尺寸不同版本（改代码但恰好等长）也能被更新。
 /// `serial`：目标设备（多设备并行会话用，`None` 回退全局选择）。
 pub fn deploy_agent(local: &Path, serial: Option<&str>) -> Result<()> {
-    // 自动尝试 root（生产构建会静默失败，不影响后续流程）
+    // 自动尝试 root（仅车机平台，见 try_adb_root；生产构建会静默失败，不影响后续流程）
     try_adb_root(serial);
     let local_meta = std::fs::metadata(local)?;
     let local_size = local_meta.len();

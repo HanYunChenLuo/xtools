@@ -27,7 +27,7 @@
 - 非 root SS2MAX @50ms：内存 dumpsys 降级（PSS 629MB/RSS 741MB，~500ms 周期，dumpsys 开销致每 10 轮 2 轮 overrun——已知的降级代价）；kgsl 74.7%@585MHz shell 直读；IO err 禁用。
 - root 回归 SS3 @50ms：无 XPERF_NO_AUTO_ROOT → 车机 auto-root 生效（hello root=true），smaps 50ms 快路 + IO + QNX 全恢复。
 - GUI 冒烟（XPERF_NO_AUTO_ROOT + SS2MAX）：AgentHello{root:false} 到前端，徽章/灰显链路通（diag 佐证）。
-- 静态：全量测试 95 绿（core 80+6ignored/gui 8/cli 5/xrm 2）、clippy 0、cargo doc 0。
+- 静态：全量测试 96 绿（core 81+7ignored/gui 8/cli 5/xrm 2）、clippy 0、cargo doc 0。
 
 **残留**：GUI「获取 root」按钮的 DOM 点击绑定为唯一未自动化部分（一行 addEventListener）；其后端 `acquire_root` 已真机闭合验证（bf50bbc：SS2MAX reboot 掉 root 后 `test_acquire_root_hppc` 3.46s 完成 shell→root 全迁移）；auto-root 平台守卫已抽纯函数 `should_auto_root` 单测锁定（泛型 Android 分支无非车机真机，策略由单测+detect 测试覆盖）；agent 单测无法在主机跑（compile_error 限 Android 目标，历史如此）。
 

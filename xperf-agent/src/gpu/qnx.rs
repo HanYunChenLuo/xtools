@@ -73,49 +73,57 @@ impl QnxTelnet {
     }
 
     /// 读一个数据字节（滤除 IAC 序列并应答协商）。None = EOF/错误/读超时
-    /// （超时置 timed_out，其余失败清零——调用方据此区分「暂无数据」与「连接死」）。
+    /// （超时置 timed_out，其余失败清零——调用方据此区分「暂无数据」与「连接死」；
+    /// IAC 序列中途的续读同样按此分类，否则登录期高延迟链路会被误判为连接死）。
     fn read_byte(&mut self) -> Option<u8> {
+        // 读一个原始字节（首字节与 IAC 序列续读共用）：超时/失败统一分类
+        macro_rules! raw {
+            ($buf:expr) => {
+                match self.reader.read_exact($buf) {
+                    Ok(()) => {}
+                    Err(e)
+                        if matches!(
+                            e.kind(),
+                            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                        ) =>
+                    {
+                        self.timed_out = true;
+                        return None;
+                    }
+                    Err(_) => {
+                        self.timed_out = false;
+                        return None;
+                    }
+                }
+            };
+        }
         loop {
             let mut b = [0u8; 1];
-            match self.reader.read_exact(&mut b) {
-                Ok(()) => self.timed_out = false,
-                Err(e)
-                    if matches!(
-                        e.kind(),
-                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-                    ) =>
-                {
-                    self.timed_out = true;
-                    return None;
-                }
-                Err(_) => {
-                    self.timed_out = false;
-                    return None;
-                }
-            }
+            raw!(&mut b);
+            self.timed_out = false; // 本次调用已有数据到达（此前可能的超时作废）
             if b[0] != telnet::IAC {
                 return Some(b[0]);
             }
             let mut c = [0u8; 1];
-            self.reader.read_exact(&mut c).ok()?;
+            raw!(&mut c);
             match c[0] {
                 telnet::IAC => return Some(telnet::IAC), // 0xFF 字面转义
                 telnet::DO | telnet::WILL => {
                     let mut opt = [0u8; 1];
-                    self.reader.read_exact(&mut opt).ok()?;
+                    raw!(&mut opt);
                     let resp = if c[0] == telnet::DO { telnet::WONT } else { telnet::DONT };
                     self.write_raw(&[telnet::IAC, resp, opt[0]]).ok()?;
                 }
                 telnet::DONT | telnet::WONT => {
                     let mut opt = [0u8; 1];
-                    self.reader.read_exact(&mut opt).ok()?;
+                    raw!(&mut opt);
                 }
                 telnet::SB => {
                     // 子协商：吞到 IAC SE
                     let mut prev = 0u8;
                     loop {
                         let mut x = [0u8; 1];
-                        self.reader.read_exact(&mut x).ok()?;
+                        raw!(&mut x);
                         if prev == telnet::IAC && x[0] == telnet::SE {
                             break;
                         }

@@ -15,8 +15,8 @@
 - **C 类验证能力**：阈值告警（--threshold，静止界面不误报）+ 退出验证报告 + 冷启动（--cold-start / GUI 打开/重启应用，模块 core/coldstart.rs）+ **simpleperf 函数热点**（--stack N：调用栈录制 + 线程/self/children 三视图报告，CLI 独立/并行两模式 + GUI 独立 tab）+ **基线对比**（--save-baseline/--compare-baseline：两次运行 diff 回归判定，CLI/GUI 共用，详见 CLAUDE.md「基线对比模式」）
 - 落盘：数据根 `/tmp/xperf`（CLI 流式 CSV + 退出图表；GUI 完整历史 + CSV 导出，共用同根；GUI 深挖目录 `<pkg>/<ts>-<serial>/` 防双设备撞名）；清理走 CLI `--clean-cache` / GUI 按钮（~/.cache/xperf + /tmp/xperf，2bd6bca）
 - GUI：9 张折线图 + 实时数值面板 + Top 线程 + 峰值 + 冷启动面板 + 间隔档位下拉 + 实际周期标注 + 勾选即时生效（自动重启会话）+ Perfetto 分析（独立 tab 报告 + 浏览器自动加载 + 每秒录制进度）+ **函数热点**（独立 tab + 每秒录制进度 + 浏览器火焰图）+ 暗/亮双主题
-- agent 部署：自动尝试 adb root（IO 等需 root）；src 树内任一 .rs mtime 变化自动重建
-- 测试：**全量全绿**（core 78+5 ignored（3 条 hppc 集成）：协议/transport/trace/simpleperf/baseline/coldstart/设备 diff；xperformance 5：alerts；GUI 6：export_csv×2 + 基线×2 + 多会话隔离 + 远程配置；xrm 2），clippy 零警告，**cargo doc 零 warning**（默认 lint 集 + missing_docs 三 crate）
+- agent 部署：自动尝试 adb root（**仅车机平台**，XPERF_NO_AUTO_ROOT=1 旁路；hello 带 root 标志，非 root 按能力降级——WORKSPACE G 节矩阵）；src 树内任一 .rs mtime 变化自动重建
+- 测试：**全量全绿**（core 81+7 ignored（4 条 hppc 集成：隧道×2/init+acquire_root）：协议/transport/trace/simpleperf/baseline/coldstart/设备 diff/auto-root 守卫；xperformance 5：alerts；GUI 6：export_csv×2 + 基线×2 + 多会话隔离 + 远程配置；xrm 2），clippy 零警告，**cargo doc 零 warning**（默认 lint 集 + missing_docs 三 crate）
 - **SSH 远程后端（feature/ssh-remote 已合 main）**：`--remote hppc` 经 SSH 隧道连远端 adb server（hop#1 承载 adb 协议 + hop#2 每设备一条承载 agent 流），采样/trace/simpleperf/断连重连/GUI 连接切换全通；详见 CLAUDE.md「SSH 远程后端」与 `docs/DESIGN-ssh-remote.md`
 - 设备：SS3 6eb792dfb0f（adbd root，QNX GPU 通道 + 多设备并行已真机回归）；SS2MAX d1f39648c1f（adb root 可用；**多设备并行 + 冷启动 COLD 874ms 已真机验证**）
 - **测试对象（555ffab 起统一）**：`example/apk/filament-gltf-viewer-v1.76.0-android.apk`（git-lfs 管理，包名 `com.google.android.filament.gltf`，入口 `.MainActivity`）——真机测试一律用它，不再用 svm。已装 SS3 + SS2MAX
