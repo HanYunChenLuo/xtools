@@ -39,6 +39,11 @@
   <template id="devicePageTpl">
     <div class="device-page">
       <aside class="sidebar">
+        <h3>设备权限</h3>
+        <div class="sidebar-row">
+          <span class="perm-badge">未知</span>
+          <button class="small flex-fill root-btn" title="adb root（重启 adbd，设备短暂离线；生产构建可能被拒）。车机采样时本就会自动 root，此按钮用于显式确认/恢复">获取 root</button>
+        </div>
         <h3>应用管理</h3>
         <label>Package:
           <input class="package-input" type="text" placeholder="输入或选择包名" autocomplete="off" />

@@ -258,6 +258,8 @@ class DeviceSession {
     this.gpumemHist = {};   // pid -> [{t, mb, gmb}]
     this.gpuprocHist = {};  // pid -> [{t, busy}]
     this.maxkhz = [];       // AgentHello 带的每核最大频率（KHz）
+    this.rooted = null;     // AgentHello 带的权限身份：true=root / false=shell / null=未知（未握手）
+    this._lastAgentErr = ''; // agent err 状态栏去重（防同文案反复刷）
     this.liveData = {};     // 实时数值面板数据
     this.coldStarts = [];   // 冷启动记录 [{time, action, total, wait}]（最近 5 次）
     this.liveDirty = false;    // liveData 有未渲染变更（500ms 面板渲染器据此跳过）
@@ -284,6 +286,55 @@ class DeviceSession {
       .filter(Boolean).join('，');
     return (extra ? this.serial + '（' + extra + '）' : this.serial)
       + (this.offline ? ' — 已断开，插回自动恢复采样' : '');
+  }
+
+  // ---- 设备权限徽章 + IO 灰显（AgentHello.root / 获取 root 按钮成功后更新） ----
+  updatePermBadge() {
+    const badge = this.el('perm-badge');
+    const btn = this.el('root-btn');
+    const ioBox = this.metricBox('io');
+    if (this.rooted === true) {
+      badge.textContent = 'root';
+      badge.className = 'perm-badge perm-ok';
+      btn.disabled = true;
+      ioBox.disabled = false;
+      ioBox.closest('label').title = '';
+    } else if (this.rooted === false) {
+      badge.textContent = 'shell（非 root）';
+      badge.className = 'perm-badge perm-warn';
+      btn.disabled = false;
+      // IO 数据源 /proc/<pid>/io 仅 owner/root 可读（非 root 实测拒读，无兜底）——
+      // 灰显防误勾（agent 侧也会 err 拒绝，双保险）；已勾选则取消（disabled 的
+      // checked 仍会进 start 参数）
+      if (ioBox.checked) { ioBox.checked = false; this.toggleCharts(); }
+      ioBox.disabled = true;
+      ioBox.closest('label').title = '需 root 权限（/proc/<pid>/io 仅 owner/root 可读）';
+    } else {
+      badge.textContent = '未知';
+      badge.className = 'perm-badge';
+      btn.disabled = false;
+      ioBox.disabled = false;
+      ioBox.closest('label').title = '';
+    }
+  }
+
+  // ---- 获取 root（adb root 重启 adbd；采样中会话走重连恢复，新 hello 更新徽章） ----
+  async acquireRoot() {
+    const btn = this.el('root-btn');
+    btn.disabled = true;
+    this.setStatus('正在获取 root（adb root 重启 adbd，设备短暂离线）…');
+    _diag('[' + this.serial + '] rootBtn: acquire_root');
+    try {
+      const msg = await invoke('acquire_root', { serial: this.serial });
+      this.rooted = true; // adbd 已确认 uid=0；daemon 重建后 hello 会再次确认
+      this.updatePermBadge();
+      this.setStatus(msg + '（下次采样/重连后全指标生效）');
+      _diag('[' + this.serial + '] rootBtn: OK');
+    } catch (e) {
+      this.setStatus('获取 root 失败: ' + (e && e.message ? e.message : e));
+      _diag('[' + this.serial + '] rootBtn ERROR: ' + (e && e.message ? e.message : JSON.stringify(e)));
+      this.updatePermBadge(); // 失败回恢复按 rooted 状态决定按钮可用性
+    }
   }
 
   // ---- 状态栏（顶栏显示当前激活设备的状态；非激活设备暂存自己的状态） ----
@@ -520,6 +571,24 @@ class DeviceSession {
       if (this.statusProgress === null) this.setStatus('无进程: ' + ev.NoProcess.error);
     } else if (ev.AgentHello) {
       this.maxkhz = ev.AgentHello.maxkhz || [];
+      // 权限身份（v3 协议）：更新徽章 + IO 灰显；root 状态变化（获取 root 后重连）实时生效
+      const rooted = !!ev.AgentHello.root;
+      if (rooted !== this.rooted) {
+        this.rooted = rooted;
+        this.updatePermBadge();
+        if (!rooted && this.statusProgress === null) {
+          this.setStatus('设备非 root（shell）：IO 不可用，低间隔内存降级为 ≥500ms dumpsys 明细');
+        }
+      }
+    } else if (ev.SampleError) {
+      // agent 能力/降级类提示（overrun 类高频警告后端已过滤）：去重防刷状态栏；
+      // 录制进度态不打断（等 progress 事件恢复）
+      const m = 'agent: ' + ev.SampleError.error;
+      if (m !== this._lastAgentErr) {
+        this._lastAgentErr = m;
+        if (this.statusProgress === null) this.setStatus(m);
+        _diag('[' + this.serial + '] agent err: ' + ev.SampleError.error);
+      }
     } else if (ev.FreqUpdate) {
       const { timestamp, khz } = ev.FreqUpdate;
       // 勾选框未同步（自动启动带 --freq）时自动展开
@@ -872,6 +941,7 @@ class DeviceSession {
     this.el('start-btn').addEventListener('click', () => this.start());
     this.el('stop-btn').addEventListener('click', () => this.stop());
     this.el('refresh-pkgs').addEventListener('click', () => this.loadPackages());
+    this.el('root-btn').addEventListener('click', () => this.acquireRoot());
     this.el('launch-btn').addEventListener('click', () => this.launchOrRestart('打开'));
     this.el('restart-btn').addEventListener('click', () => this.launchOrRestart('重启'));
     this.el('interval-select').addEventListener('change', () => this.updateEffectiveRates());

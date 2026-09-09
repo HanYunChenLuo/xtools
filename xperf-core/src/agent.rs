@@ -384,6 +384,38 @@ fn try_adb_root(serial: Option<&str>) {
     }
 }
 
+/// 显式获取 root 权限（GUI「获取 root」按钮用；用户显式动作，任意平台都执行——
+/// 与 try_adb_root 的「仅车机自动 root」策略不同，这里是用户明确要求）。
+/// `adb root` 会重启 adbd：设备短暂离线、设备端 daemon 被杀，采样中会话走既有
+/// 重连恢复（新 daemon 继承 root 身份，新 hello root=true）。轮询 `id` 确认
+/// （adbd 重启需数秒），上限 15s；生产构建拒 root 时透传 adb 原文报错。
+/// `serial`：目标设备（多设备并行会话用，`None` 回退全局选择）。
+pub fn acquire_root(serial: Option<&str>) -> Result<String> {
+    use std::time::{Duration, Instant};
+    let out = crate::utils::adb_for(serial)
+        .args(["root"])
+        .output()
+        .context("adb root 执行失败")?;
+    let msg = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(500));
+        let id = crate::utils::run_adb_command_for(serial, &["shell", "id"]).map(|o| o.stdout).unwrap_or_default();
+        if id.contains("uid=0") {
+            return Ok("已获取 root 权限（uid=0）".to_string());
+        }
+        // adbd 已回来但仍 shell 且 adb root 明确拒绝（生产构建）：fail-fast 报原文
+        if id.contains("uid=") && msg.contains("cannot") {
+            anyhow::bail!("{}", msg.trim());
+        }
+    }
+    if msg.trim().is_empty() {
+        anyhow::bail!("adb root 超时（15s 内设备未以 root 回来）")
+    } else {
+        anyhow::bail!("{}（15s 未生效）", msg.trim())
+    }
+}
+
 /// 推送 agent 到设备（设备上不存在或大小/mtime 不一致时）
 /// 大小+修改时间双判：同尺寸不同版本（改代码但恰好等长）也能被更新。
 /// `serial`：目标设备（多设备并行会话用，`None` 回退全局选择）。
