@@ -19,7 +19,7 @@
 //!
 //! 事件协议（每行一个 JSON 对象）：
 //! ```text
-//! {"t":"hello","ncores":8,"maxkhz":[...],"version":2}
+//! {"t":"hello","ncores":8,"maxkhz":[...],"version":3,"root":true}   // root: agent 进程是否 uid=0（继承 adbd 权限身份）
 //! {"t":"cpu","ts":<wall_ms>,"pid":29697,"cpu":15.4,"th":[[29697,"main",5.1],...]}
 //! {"t":"mem","ts":<wall_ms>,"pid":29697,"pss":484880,"rss":612000,
 //!  "java":..,"native":..,"code":..,"stack":..,"gfx":..,"other":..,"sys":..}
@@ -47,8 +47,9 @@
 //! 与主机侧 adb 模式的差异：
 //! - CPU 口径相同（jiffies 差值 ×核数，单核基准），但窗口是相邻两轮之间
 //!   （agent 常驻保有上一轮状态，无需主机侧 phase1/phase2 结构）
-//! - 内存：interval ≥ 500ms 用本地 dumpsys meminfo（全分类明细，同轮询模式）；
-//!   低间隔改读 `/proc/<pid>/smaps_rollup`（Pss/Rss，~1ms）
+//! - 内存：interval ≥ 500ms 用本地 dumpsys meminfo（全分类明细，shell 可用）；
+//!   低间隔优先读 `/proc/<pid>/smaps_rollup`（Pss/Rss，~1ms），**非 root 不可读时
+//!   降级为 dumpsys meminfo 限频 ≥500ms**（发 err 行告知，分类明细反而齐全）
 //! - FPS：设备端本地 dumpsys SurfaceFlinger（无 adb 中转，图层名无需引号转义）；
 //!   限频至 ≥500ms 周期（每 fps_every_n_rounds 轮一次），与 CPU/内存节拍解耦——
 //!   低间隔下每轮跑 dumpsys SurfaceFlinger 会拖垮节拍（实测 50ms 间隔约半数轮次 overrun）
@@ -79,7 +80,8 @@ use proc::PidState;
 
 /// 协议版本：host（xperf-core 的 `AGENT_PROTOCOL_VERSION` 常量）校验，
 /// 不一致则 suicide + 重推二进制。改动 wire 协议/命令时两侧同步 bump。
-const PROTOCOL_VERSION: u32 = 2;
+/// v3：hello 增加 `root` 字段（agent 进程是否 uid=0）。
+const PROTOCOL_VERSION: u32 = 3;
 
 /// daemon 模式的最大并发会话（host）数
 const MAX_SESSIONS: usize = 10;
@@ -370,11 +372,24 @@ fn run_stdio_session(args: Args) -> ! {
 
 fn hello_line(ncores: u32, maxkhz: &[u64]) -> String {
     format!(
-        "{{\"t\":\"hello\",\"ncores\":{},\"maxkhz\":[{}],\"version\":{}}}",
+        "{{\"t\":\"hello\",\"ncores\":{},\"maxkhz\":[{}],\"version\":{},\"root\":{}}}",
         ncores,
         maxkhz.iter().map(u64::to_string).collect::<Vec<_>>().join(","),
-        PROTOCOL_VERSION
+        PROTOCOL_VERSION,
+        running_as_root()
     )
+}
+
+/// 当前进程是否 uid=0（读 /proc/self/status 的 Uid 行；daemon 继承 adbd 的权限身份，
+/// `adb root` 后 daemon 重建即变 true）。host/GUI 据此标注能力降级（IO/smaps 需 root）。
+fn running_as_root() -> bool {
+    fs::read_to_string("/proc/self/status")
+        .ok()
+        .and_then(|s| {
+            s.lines()
+                .find_map(|l| l.strip_prefix("Uid:").and_then(|r| r.split_whitespace().next().map(|u| u == "0")))
+        })
+        .unwrap_or(false)
 }
 
 /// daemon 模式：监听抽象 socket，每连接一个会话（上限 MAX_SESSIONS），
@@ -610,8 +625,11 @@ fn run_session(args: Args, io: Option<SessionIo>, stop: Arc<AtomicBool>) {
     let mut gpu_busy_calc = gpu::GpuBusyCalc::new(); // kgsl gpubusy 占比（累计/窗口语义自适应）
     let mut active_pids: Vec<u32> = args.pids.clone();
 
-    // 内存分类明细仅在间隔 ≥500ms 时启用（dumpsys meminfo ~100ms，低间隔下太重）
-    let full_meminfo = args.memory && args.interval_ms >= 500;
+    // 内存采样路径：会话内首个被采 PID 出现时决定一次（decide_mode 需活 PID 探测
+    // smaps_rollup 可读性）；DumpsysFallback（非 root 低间隔）限频 ≥500ms
+    // （dumpsys meminfo ~100ms，低间隔下每轮跑太重）
+    let mut mem_mode: Option<mem::MemMode> = None;
+    let mut mem_every = 1u64;
     // --pid 模式下 FPS 兜底匹配需要包名：从 /proc/<pid>/cmdline 反查（一次性缓存）
     let mut pkg_cache: HashMap<u32, String> = HashMap::new();
 
@@ -797,9 +815,22 @@ fn run_session(args: Args, io: Option<SessionIo>, stop: Arc<AtomicBool>) {
                 }
             }
 
-            // 内存：≥500ms 用 dumpsys meminfo（全分类明细）；低间隔用 smaps_rollup（Pss/Rss）
+            // 内存：≥500ms dumpsys meminfo 全分类；低间隔 smaps_rollup（~1ms），
+            // 非 root 不可读时降级 dumpsys 限频 ≥500ms（decide_mode 探测并发 err 告知）
             if args.memory {
-                mem::sample_memory(pid, ts, full_meminfo);
+                if mem_mode.is_none() {
+                    let (m, warn) = mem::decide_mode(pid, args.interval_ms);
+                    if matches!(m, mem::MemMode::DumpsysFallback) {
+                        mem_every = 500u64.div_ceil(args.interval_ms).max(1);
+                    }
+                    if let Some(w) = warn {
+                        emit(&format!("{{\"t\":\"err\",\"msg\":\"{}\"}}", json_escape(&w)));
+                    }
+                    mem_mode = Some(m);
+                }
+                if round.is_multiple_of(mem_every) {
+                    mem::sample_memory(pid, ts, mem_mode.as_ref().unwrap());
+                }
             }
 
             // IO：/proc/<pid>/io 计数器差值 → KB/s（首轮建基线不出数）
@@ -894,12 +925,13 @@ mod tests {
         assert!(parse_args(&["--package".to_string()]).is_err());
     }
 
-    /// hello 行含版本号（host 探活协议契约）
+    /// hello 行含版本号与 root 标志（host 探活/能力标注的协议契约）
     #[test]
     fn test_hello_line() {
         let h = hello_line(8, &[1785600, 2841600]);
         assert!(h.contains("\"t\":\"hello\""));
         assert!(h.contains(&format!("\"version\":{}", PROTOCOL_VERSION)));
         assert!(h.contains("\"maxkhz\":[1785600,2841600]"));
+        assert!(h.contains("\"root\":"));
     }
 }

@@ -1,6 +1,8 @@
-//! 内存采样：低间隔走 `/proc/<pid>/smaps_rollup`（Pss/Rss，~1ms），
+//! 内存采样：低间隔优先 `/proc/<pid>/smaps_rollup`（Pss/Rss，~1ms），
 //! interval ≥500ms 用本地 dumpsys meminfo（App Summary 全分类明细）。
-//! 低间隔下 dumpsys meminfo 太重（~100ms），退化到 smaps_rollup（只有 Pss/Rss）。
+//! 低间隔下 dumpsys meminfo 太重（~100ms），故优先 smaps_rollup（只有 Pss/Rss）。
+//! **非 root 降级**：smaps_rollup 受 PTRACE 限制 shell 不可读（两平台实测），
+//! 此时降级为 dumpsys meminfo（shell 可用）并由主循环限频 ≥500ms（[decide_mode]）。
 
 use crate::{dumpsys, emit};
 use std::fs;
@@ -37,6 +39,8 @@ struct MemBreakdown {
     other: u64,
     sys: u64,
     total: u64,
+    /// TOTAL RSS（smaps_rollup 不可读时的 Rss 兜底；0 = dumpsys 输出未携带）
+    rss: u64,
 }
 
 /// 解析 dumpsys meminfo 的 App Summary（与 xperf-core/memory.rs 同逻辑）。
@@ -77,11 +81,18 @@ fn parse_meminfo_summary(output: &str) -> Option<MemBreakdown> {
                 }
             }
         }
-        // 兜底：TOTAL PSS 在 App Summary 空行之后（区块外）
+        // 兜底：TOTAL PSS 在 App Summary 空行之后（区块外）；同行还有 TOTAL RSS
+        // （smaps_rollup 不可读时的 Rss 兜底数据源）
         if !in_summary {
             if let Some(rest) = line.strip_prefix("TOTAL PSS:") {
                 if let Some(Ok(kb)) = rest.split_whitespace().next().map(|s| s.parse::<u64>()) {
                     bd.total = kb;
+                }
+                if let Some(rpos) = rest.find("TOTAL RSS:") {
+                    let after = &rest[rpos + "TOTAL RSS:".len()..];
+                    if let Some(Ok(kb)) = after.split_whitespace().next().map(|s| s.parse::<u64>()) {
+                        bd.rss = kb;
+                    }
                 }
             }
         }
@@ -89,25 +100,61 @@ fn parse_meminfo_summary(output: &str) -> Option<MemBreakdown> {
     (bd.total > 0).then_some(bd)
 }
 
-/// 一轮内存采样并 emit。full=true：dumpsys meminfo 全分类 + smaps_rollup 补 Rss；
-/// false：只读 smaps_rollup（分类字段全 0）。
-pub(crate) fn sample_memory(pid: u32, ts: u64, full: bool) {
-    if full {
-        if let Some(bd) = dumpsys(&["meminfo", &pid.to_string()])
-            .and_then(|s| parse_meminfo_summary(&s))
-        {
-            // rss 不在 App Summary 里，从 smaps_rollup 补（~1ms）
-            let rss = read_smaps_rollup(pid).map(|(_, r)| r).unwrap_or(0);
-            emit(&format!(
-                "{{\"t\":\"mem\",\"ts\":{},\"pid\":{},\"pss\":{},\"rss\":{},\"java\":{},\"native\":{},\"code\":{},\"stack\":{},\"gfx\":{},\"other\":{},\"sys\":{}}}",
-                ts, pid, bd.total, rss, bd.java, bd.native_, bd.code, bd.stack, bd.gfx, bd.other, bd.sys
-            ));
+/// 内存采样路径（会话内首个被采 PID 出现时由 [decide_mode] 决定一次）
+pub(crate) enum MemMode {
+    /// interval ≥500ms：dumpsys meminfo 全分类明细（shell 可用，无 root 依赖）
+    Full,
+    /// 低间隔快路：只读 smaps_rollup（Pss/Rss，~1ms；分类字段全 0）
+    Smaps,
+    /// 低间隔 + 非 root（smaps_rollup 不可读）降级：dumpsys meminfo，主循环限频 ≥500ms
+    DumpsysFallback,
+}
+
+/// 决定内存采样路径（会话内决定一次，需一个活 PID 探测 smaps_rollup 可读性）。
+/// 返回 (模式, 降级提示)——仅降级路径带提示（主循环发 err 行告知 host/用户）。
+pub(crate) fn decide_mode(pid: u32, interval_ms: u64) -> (MemMode, Option<String>) {
+    if interval_ms >= 500 {
+        return (MemMode::Full, None);
+    }
+    if read_smaps_rollup(pid).is_some() {
+        (MemMode::Smaps, None)
+    } else {
+        (
+            MemMode::DumpsysFallback,
+            Some(format!(
+                "pid {} 的 smaps_rollup 不可读（需 root），内存降级为 dumpsys meminfo（有效周期 ≥500ms）",
+                pid
+            )),
+        )
+    }
+}
+
+/// 一轮内存采样并 emit。
+/// - Full / DumpsysFallback：dumpsys meminfo 全分类；Rss 优先 smaps_rollup（~1ms
+///   精确），不可读（非 root）时用 App Summary 的 TOTAL RSS 兜底
+/// - Smaps：只读 smaps_rollup（分类字段全 0）
+pub(crate) fn sample_memory(pid: u32, ts: u64, mode: &MemMode) {
+    match mode {
+        MemMode::Full | MemMode::DumpsysFallback => {
+            if let Some(bd) = dumpsys(&["meminfo", &pid.to_string()])
+                .and_then(|s| parse_meminfo_summary(&s))
+            {
+                // rss 不在 App Summary 分类表里（同块 TOTAL 行另有 TOTAL RSS）
+                let rss = read_smaps_rollup(pid).map(|(_, r)| r).unwrap_or(bd.rss);
+                emit(&format!(
+                    "{{\"t\":\"mem\",\"ts\":{},\"pid\":{},\"pss\":{},\"rss\":{},\"java\":{},\"native\":{},\"code\":{},\"stack\":{},\"gfx\":{},\"other\":{},\"sys\":{}}}",
+                    ts, pid, bd.total, rss, bd.java, bd.native_, bd.code, bd.stack, bd.gfx, bd.other, bd.sys
+                ));
+            }
         }
-    } else if let Some((pss, rss)) = read_smaps_rollup(pid) {
-        emit(&format!(
-            "{{\"t\":\"mem\",\"ts\":{},\"pid\":{},\"pss\":{},\"rss\":{},\"java\":0,\"native\":0,\"code\":0,\"stack\":0,\"gfx\":0,\"other\":0,\"sys\":0}}",
-            ts, pid, pss, rss
-        ));
+        MemMode::Smaps => {
+            if let Some((pss, rss)) = read_smaps_rollup(pid) {
+                emit(&format!(
+                    "{{\"t\":\"mem\",\"ts\":{},\"pid\":{},\"pss\":{},\"rss\":{},\"java\":0,\"native\":0,\"code\":0,\"stack\":0,\"gfx\":0,\"other\":0,\"sys\":0}}",
+                    ts, pid, pss, rss
+                ));
+            }
+        }
     }
 }
 
@@ -152,6 +199,8 @@ mod tests {
         assert_eq!(bd.java, 8296);
         assert_eq!(bd.native_, 117492);
         assert_eq!(bd.code, 36100);
+        // TOTAL RSS 与 TOTAL PSS 同行（smaps_rollup 不可读时的 Rss 兜底）
+        assert_eq!(bd.rss, 639384);
     }
 
     #[test]

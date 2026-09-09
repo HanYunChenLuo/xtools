@@ -70,6 +70,9 @@ pub enum AgentEvent {
         /// 协议版本（host 校验：不符则 suicide + 重推二进制）
         #[serde(default)]
         version: u32,
+        /// agent 进程是否 uid=0（v3 起；无 root 时 IO/smaps_rollup 等路径降级）
+        #[serde(default)]
+        root: bool,
     },
     /// ts: 墙钟毫秒；cpu: 单核口径 %；th: [tid, 线程名, cpu%]（仅 >0.05% 的线程）
     Cpu {
@@ -222,7 +225,8 @@ pub enum AgentEvent {
 
 /// 与 agent 的协议版本：与 xperf-agent 的 PROTOCOL_VERSION 同步 bump（改 wire 协议/命令时）。
 /// host 连接时校验 hello 的 version，不一致则通知 suicide + 强杀重推。
-pub const AGENT_PROTOCOL_VERSION: u32 = 2;
+/// v3：hello 增加 `root` 字段。
+pub const AGENT_PROTOCOL_VERSION: u32 = 3;
 
 /// daemon 的抽象 socket 名（设备端 `localabstract:xperf-agent`）
 const AGENT_ABSTRACT_SOCK: &str = "xperf-agent";
@@ -894,18 +898,23 @@ mod tests {
     /// hello 版本字段解析（daemon 探活的路径依赖：probe_daemon 据此判版本）
     #[test]
     fn test_hello_version() {
-        let ev: AgentEvent = serde_json::from_str(r#"{"t":"hello","ncores":8,"maxkhz":[1785600],"version":2}"#).unwrap();
+        let ev: AgentEvent =
+            serde_json::from_str(r#"{"t":"hello","ncores":8,"maxkhz":[1785600],"version":3,"root":true}"#).unwrap();
         match ev {
-            AgentEvent::Hello { ncores, maxkhz, version } => {
-                assert_eq!((ncores, version), (8, 2));
+            AgentEvent::Hello { ncores, maxkhz, version, root } => {
+                assert_eq!((ncores, version), (8, 3));
                 assert_eq!(maxkhz, vec![1785600]);
+                assert!(root);
             }
             _ => panic!("应为 Hello 事件"),
         }
-        // 旧版 agent（无 version 字段）兼容解析为 0
+        // 旧版 agent（无 version/root 字段）兼容解析：version=0、root=false（按非 root 标注）
         let ev: AgentEvent = serde_json::from_str(r#"{"t":"hello","ncores":8}"#).unwrap();
         match ev {
-            AgentEvent::Hello { version, .. } => assert_eq!(version, 0),
+            AgentEvent::Hello { version, root, .. } => {
+                assert_eq!(version, 0);
+                assert!(!root);
+            }
             _ => panic!("应为 Hello 事件"),
         }
     }
