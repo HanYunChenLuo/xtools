@@ -5,7 +5,7 @@
 //! 协议见 xperf-agent/main.rs 头注释。
 
 use crate::platform::Platform;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -430,7 +430,7 @@ pub fn spawn_agent(
     Ok(AgentStream { writer, reader, ping_stop })
 }
 
-/// 确保设备端 daemon 在跑且协议版本匹配，返回 host 侧转发端口。
+/// 确保设备端 daemon 在跑且协议版本匹配，返回 **host 本机可直连**的端口。
 ///
 /// - 无 daemon：强杀残留（老版 stdout agent/泄漏 daemon）→ 强制重推 → 启动 → 探活
 /// - 版本不符：经 probe 连接发 `suicide` 通知 + `pkill` 强杀兜底 → 强制重推 → 重启
@@ -438,10 +438,22 @@ pub fn spawn_agent(
 /// 强制重推（绕过 size/mtime 快检）：同秒重建的同尺寸二进制会被快检误判「已是最新」
 /// （2026-09-07 实测：v99/v2 两构建同秒落地同尺寸，快检跳推导致版本协商死循环）。
 /// `serial`：目标设备（多设备并行会话用，`None` 回退全局选择）。
+///
+/// 端口来源按 Transport 分流（SSH 远程后端，设计 §4.4）：
+/// - `Local`：`adb forward` 监听在本机 server，端口直接可用；
+/// - `Ssh`：forward 监听在**远端** server（本机直连必 refused），经 hop#2
+///   （[`crate::transport::SshTunnel::add_forward`]）映射回本机端口。
+///   映射表按 remote_port 复用：重连/重试不产生重复转发。
 fn ensure_daemon(serial: Option<&str>) -> Result<u16> {
     let mut last_err = String::new();
     for _ in 0..2 {
-        let port = ensure_forward(serial)?;
+        let remote_port = ensure_forward(serial)?;
+        let port = match crate::transport::transport() {
+            crate::transport::Transport::Local => remote_port,
+            crate::transport::Transport::Ssh(_) => crate::transport::tunnel()
+                .context("远程模式但隧道不存在（init_remote 未调用？）")?
+                .add_forward(remote_port)?,
+        };
         match probe_daemon(port) {
             Ok(v) if v == AGENT_PROTOCOL_VERSION => return Ok(port),
             Ok(old) => {

@@ -37,6 +37,7 @@ pub use fps::FpsTimeSeriesData;
 pub use marker::{send_marker, start_marker_listener, Marker};
 pub use memory::{MemoryDetails, MemoryTimeSeriesData};
 pub use platform::{detect_platform, detect_platform_live, from_id, Platform, PlatformId};
+pub use transport::{init_remote, shutdown_remote, transport, SshTarget, Transport};
 pub use utils::{
     adb_for, diff_devices, list_adb_devices, parse_adb_devices, pick_device,
     resolve_serial, run_adb, run_adb_command_for, set_target_serial, target_serial,

@@ -33,6 +33,19 @@ struct Args {
     #[arg(short = 'd', long, value_name = "SERIAL")]
     device: Option<String>,
 
+    /// SSH 远程后端：真机接在远端机（如 `--remote hppc`），本机 adb 客户端经 SSH 隧道
+    /// 连远端 adb server，采样/perfetto/simpleperf 全功能（需 ssh_config 免密配置）
+    #[arg(long, value_name = "HOST")]
+    remote: Option<String>,
+
+    /// 远端 adb 可执行路径（远端 PATH 常不含 adb，如 ~/Android/Sdk/platform-tools/adb）
+    #[arg(long, value_name = "PATH", requires = "remote")]
+    remote_adb: Option<String>,
+
+    /// 远端 adb server 监听端口（默认 5037）
+    #[arg(long, value_name = "PORT", requires = "remote")]
+    remote_adb_port: Option<u16>,
+
     /// Monitor CPU usage
     #[arg(long)]
     cpu: bool,
@@ -1424,13 +1437,38 @@ async fn main() -> Result<()> {
         eprintln!("❌ 包名不合法: {}", e);
         std::process::exit(1);
     }
+    // 远程后端（--remote）须在任何 adb 调用之前建立：设备枚举/选择都指向远端 server
+    if let Some(host) = &args.remote {
+        let mut target = xperf_core::SshTarget::new(host);
+        if let Some(p) = &args.remote_adb {
+            target = target.with_adb_path(p);
+        }
+        if let Some(port) = args.remote_adb_port {
+            target = target.with_remote_port(port);
+        }
+        match xperf_core::init_remote(target) {
+            Ok(devices) => println!(
+                "远程后端: {}（SSH 隧道已建立，远端在线 {} 台）",
+                host,
+                devices.len()
+            ),
+            Err(e) => {
+                eprintln!("❌ 远程后端初始化失败: {:#}", e);
+                std::process::exit(1);
+            }
+        }
+    }
     // 设备选择（--device > 单台自动）须在冷启动/采样前完成：后续 adb 调用全部带 -s
     if let Err(e) = select_device(args.device.as_deref()) {
+        xperf_core::shutdown_remote();
         eprintln!("❌ {}", e);
         std::process::exit(1);
     }
     let cold_start_ms = run_cold_start(&args);
-    if let Err(e) = monitor_process(&args, cold_start_ms).await {
+    let result = monitor_process(&args, cold_start_ms).await;
+    // 退出前关远程隧道（process::exit 不跑析构，须显式清理：R9/R10）
+    xperf_core::shutdown_remote();
+    if let Err(e) = result {
         eprintln!("Monitor error: {}", e);
         std::process::exit(1);
     }
