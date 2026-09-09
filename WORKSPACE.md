@@ -2,7 +2,7 @@
 
 > 本文件记录跨会话的待办事项（backlog）。每次会话的历史总结见 `SESSION.md`。
 > 完成一项就把状态改为 ✅ 并注明完成的 commit；新增想法随时追加。
-> 最后更新：2026-09-07 晚（agent daemon 化：socket 服务 + 多 host + 版本握手 + 空载自杀，孤儿泄漏根治，见 SESSION 当日条目）
+> 最后更新：2026-09-09（SSH 远程后端全量落地：两跳隧道 + transport.rs + CLI/GUI 接入，见 SESSION 当日条目）
 
 ## 当前状态速览
 
@@ -16,7 +16,8 @@
 - 落盘：数据根 `/tmp/xperf`（CLI 流式 CSV + 退出图表；GUI 完整历史 + CSV 导出，共用同根；GUI 深挖目录 `<pkg>/<ts>-<serial>/` 防双设备撞名）；清理走 CLI `--clean-cache` / GUI 按钮（~/.cache/xperf + /tmp/xperf，2bd6bca）
 - GUI：9 张折线图 + 实时数值面板 + Top 线程 + 峰值 + 冷启动面板 + 间隔档位下拉 + 实际周期标注 + 勾选即时生效（自动重启会话）+ Perfetto 分析（独立 tab 报告 + 浏览器自动加载 + 每秒录制进度）+ **函数热点**（独立 tab + 每秒录制进度 + 浏览器火焰图）+ 暗/亮双主题
 - agent 部署：自动尝试 adb root（IO 等需 root）；src 树内任一 .rs mtime 变化自动重建
-- 测试：**105 全绿**（agent 27：解析 + watchdog_step 决策 + GpuBusyCalc 双语义；core 66+2 ignored：协议/trace/simpleperf/baseline/coldstart/设备 diff/孤儿流解析与判定；xperformance 5：alerts；GUI 5：export_csv×2 + 基线×2 + 多会话隔离 1；xrm 2），clippy 零警告，**cargo doc 零 warning**（默认 lint 集 + missing_docs 三 crate）
+- 测试：**全量全绿**（core 78+5 ignored（3 条 hppc 集成）：协议/transport/trace/simpleperf/baseline/coldstart/设备 diff；xperformance 5：alerts；GUI 6：export_csv×2 + 基线×2 + 多会话隔离 + 远程配置；xrm 2），clippy 零警告，**cargo doc 零 warning**（默认 lint 集 + missing_docs 三 crate）
+- **SSH 远程后端（feature/ssh-remote 已合 main）**：`--remote hppc` 经 SSH 隧道连远端 adb server（hop#1 承载 adb 协议 + hop#2 每设备一条承载 agent 流），采样/trace/simpleperf/断连重连/GUI 连接切换全通；详见 CLAUDE.md「SSH 远程后端」与 `docs/DESIGN-ssh-remote.md`
 - 设备：SS3 6eb792dfb0f（adbd root，QNX GPU 通道 + 多设备并行已真机回归）；SS2MAX d1f39648c1f（adb root 可用；**多设备并行 + 冷启动 COLD 874ms 已真机验证**）
 - **测试对象（555ffab 起统一）**：`example/apk/filament-gltf-viewer-v1.76.0-android.apk`（git-lfs 管理，包名 `com.google.android.filament.gltf`，入口 `.MainActivity`）——真机测试一律用它，不再用 svm。已装 SS3 + SS2MAX
 
@@ -59,18 +60,9 @@
 - marker 每连接线程无界（有 10s 读超时兜底）
 - GUI 基线/应用操作按钮与设备 tab 切换的点击渲染为人工目验项（后端链路由命令级测试锁定：save/compare 端到端 + build_summary 口径 + 多会话隔离；真机日志已验手动开始/勾选重启/trace 录制全链路）
 
-## F. SSH 远程调试（新 feature，设计 v2 待实现）
+## F. SSH 远程调试（已完成）
 
-- [ ] **SSH 远程后端**（设计文档 `docs/DESIGN-ssh-remote.md` **v2**，2026-09-09）：真机接在 hppc 上，本机跑 GUI/CLI 经 SSH 调试采样/perfetto/simpleperf。
-  - **架构**：adb server 前移 + SSH 隧道（本机恒为 adb **客户端**，连 hppc 的 adb server）。**两跳隧道**：hop#1 = 本机端口 → hppc:5037（承载全部 adb 命令，恒 1 条）；**hop#2 = 本机端口 → hppc 上 `adb forward` 分配的端口**（承载 agent NDJSON 流，**每设备 1 条**，经 ControlMaster `-O forward` 动态增删）
-  - **核心机制（真实拓扑实测，设备接 hppc）**：`pull` 落 **client(Mac)** ✅ / `push` 读 **client** ✅ / stdin 管道透传 ✅ / 退出码保真 ✅ ⇒ `trace_processor`/`report_html.py`/落盘/桌面打开**全零改动**；**唯一例外 `adb forward` 监听在 server(hppc) 侧** ⇒ 需 hop#2（v1 曾误判为客户端侧，见下）
-  - **v2 修订（review 发现的设计缺陷）**：v1 据**反向隧道**推断「forward 端口在客户端侧监听」——**结论错误**（反向拓扑下 Mac 扮演的是 *server* 而非 client；`pull`/`push` 看的是对侧故正确，`forward` 看的是 Mac 侧角色恰好翻转）。真实拓扑复验：Mac 连 hppc 的 forward 端口 `Connection refused`，按 v1 实现 agent 通道**必然连不上**。已补 hop#2 并实测打通：读到真实 `hello` + 下发 start 后 5s 收 18 事件（freq 10 + cpu 8，CPU 40.40%，真机真包）。**教训：角色对称的实验必须逐项确认「这一侧此刻扮演什么角色」**
-  - **多设备并行 + perfetto/simpleperf 全支持**：隧道位于 adb client↔server 之间，比「设备」低一层 ⇒ `-s` 路由/GUI 每设备 tab/深挖并发**全零改动**（每设备 hop#2 一条）。队头阻塞实测不成立：200ms 采样节拍在并发 3×47MB 拉取（141MB）下 p50 仍 **200ms**（ssh channel 独立流控）；24 条并发 `direct-tcpip` channel 全通（`MaxSessions` 默认 10 **不约束**转发 channel，无需改 sshd）。唯一并行代价 = 带宽共享（总吞吐守恒）
-  - **带宽（真实 47MB pftrace，非 `/dev/zero`）**：直连裸 TCP 12.18s ≈ 隧道无压缩 11.17s（链路 ~31Mbps 是瓶颈，ssh 开销测不出）→ **隧道 `Compression=yes` 2.68s（4.2×）**，与 zstd 最优 2.24s 仅差 0.4s ⇒ **隧道参数必带 `Compression=yes`**
-  - 改造面：`utils.rs:19`/`:72` 两个 adb 构造点注入 `ADB_SERVER_SOCKET` + 新增 `transport.rs`（`Transport`/`SshTarget`/`SshTunnel` 含 hop#2 映射表）+ `ensure_daemon` 按 Transport 分流端口；CLI `--remote/--remote-adb/--remote-adb-port`，GUI 连接切换 UI + 4 命令
-  - **已否决方案**（附录 B 留档）：方案 A 命令包装（`pull`/`push` 落点全搬走 + 转义地狱）、方案 C 自研远端 server（「远端 server + client」**正是 adb 自身架构**，自研等于重写 `adb server`；带宽只快 0.4s）、方案 D adb server 监听公网口（**比压缩隧道慢 4.5×**；且「隔离网」是运维状态非代码不变量）。旁证：VS Code Remote SSH 的 server **10+ 次启动无一例外绑 `127.0.0.1`** + 内嵌 `vscode-russh` 自带 SSH 栈转发 ⇒ 业界同样是「server 架构 + ssh 传输」
-  - 关键风险：**R10** forward 规则由 **server** 持有 ⇒ 本机进程死亡也不消失、`tcp:0` **每次调用新建一条**（实测连调 3 次得 3 条）⇒ 跨会话累积；缓解 = 显式 `--remove` + 保留 `ensure_forward` 查 list 复用逻辑 + **禁用 `--remove-all`**（全局生效会踢掉他人规则）。**R2 修正**：判据是 adb **协议**版本（`1.0.41`）而非 platform-tools 版本（36.0.2 连 36.0.0 实测安全）。**R11** `adb root` 后规则存活已实测 OK，但 adbd 真重启场景待 S6 复验
-  - 待实现：设计文档第 9 节 S1-S11（**S3 = 回归门槛**：本地模式 105 测试须全绿；**S2a** = hop#2 映射表；**S8a** = 多设备并行远程）
+- [x] **SSH 远程后端**（2026-09-09，`feature/ssh-remote` 分支合 main；设计 `docs/DESIGN-ssh-remote.md` v2 + 实现 S1-S11 全步骤）：真机接在 hppc 上，本机跑 GUI/CLI 经 SSH 调试采样/perfetto/simpleperf。commit 链：f45d44b（设计）→ c156141（S1 transport 基础）→ e520787（S2 隧道）→ 759d72d（S2a hop#2 映射表）→ cd81a37+b578b9f（S3 utils 注入）→ ea61e05（S4 init/shutdown）→ e4ae289（S5 CLI + S6 agent hop#2）→ b5c179a（S9 断连重连）→ f2a58a9（S10 GUI）。真机回归：远程采样/trace/simpleperf/断连重连/并发会话/退出零残留全通（详见 CLAUDE.md「SSH 远程后端」节）
 
 
 ---

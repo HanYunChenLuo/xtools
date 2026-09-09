@@ -7,6 +7,47 @@
 
 ---
 
+## 2026-09-09 — SSH 远程后端全量落地（feature/ssh-remote → main）
+
+**任务**：按 `docs/DESIGN-ssh-remote.md` v2 实现 SSH 远程后端（真机接 hppc，本机跑 CLI/GUI）。
+
+### 完成内容（commit 链，均在 feature/ssh-remote 分支验收后合 main）
+
+| 步 | commit | 内容 |
+|---|---|---|
+| 设计 | f45d44b | 设计文档 v2 + WORKSPACE F 节入库 |
+| S1 | c156141 | `transport.rs`：Transport/SshTarget + 全局存取 |
+| S2 | e520787 | SshTunnel establish/is_alive/Drop + 端口自选重试 + R9 无主 socket 清理 |
+| S2a | 759d72d | hop#2 add_forward/remove_forward + 映射表复用 |
+| S3 | cd81a37+b578b9f | utils.rs 唯一构造点 `adb_command()` 注入 `ADB_SERVER_SOCKET`；run_adb |
+| S4 | ea61e05 | init_remote（R2 协议版本 banner 校验）/shutdown_remote（R10 逐条清规则） |
+| S5+S6 | e4ae289 | CLI 三参数 + ensure_daemon 端口分流（Ssh → hop#2 映射） |
+| S9 | b5c179a | reconnect_agent 隧道判别 + rebuild_tunnel（指数退避 1s→30s） |
+| S10 | f2a58a9 | GUI 顶栏连接控件 + 5 命令 + remote-status 事件 + 监视器隧道死短路 |
+| 追加 | （见 git log） | GUI 下拉读 `~/.ssh/config` Host 别名免录入 + 远端 adb 路径自动解析（默认 `adb` → 退 `~/Android/Sdk/platform-tools/adb`） |
+
+### 关键结论与基线（真机 Mac←SSH→hppc→SS2MAX d1f39648c1f，gltf viewer）
+
+- 远程采样 `--cpu --interval 500`：hello 8 核/maxkhz ✓，CPU ~42% 与本地口径一致，CSV 流式 500ms 节拍，退出图表正常
+- `--trace 10`：44MB pftrace 落**本机**（pull 客户端侧语义），trace_processor SQL 报告正常；`--stack 10`：5.1MB .data + 三视图报告
+- 断连重连：`-O exit` 杀隧道 → 「连接断开→SSH 隧道已重建→已重连，恢复采样」，~12s 断档后连续
+- 并发：双 CLI 进程（各自隧道）采样+trace 并行，节拍无退化（佐证设计 #22-24 队头阻塞不成立）
+- 退出零残留：优雅退出后 hppc `forward --list` 空、`~/.ssh/cm` 空；SIGTERM/SIGKILL 残留的 control socket 由下次 establish（R9 pid 判活）实测回收，远端 forward 规则由 ensure_forward 查 list 复用消化（不累积）
+- hppc 集成测试 3 条（#[ignore] 手动跑）：隧道生命周期 / hop#2 生命周期 / init+shutdown 全绿
+
+### 遗留问题
+
+- **S8a 双真机远程并行未验证**：hppc 仅挂一台设备；已用「双进程并发会话（采样+trace）」替代验证，机制上与本地多设备同层（-s 路由在隧道之下）。待 hppc 挂两台设备后补验
+- R11「首次 adb root 真重启 adbd」场景：SS2MAX adbd 已持久 root 无法制造；ensure_daemon 两轮重试结构理论上覆盖（root 后规则死→下轮 ensure_forward 重建），待自然出现时确认
+- GUI 连接切换的点击交互为人工目验项（命令级测试覆盖配置 upsert/ssh config 解析；真机冒烟已验 --remote 自动启动）
+
+### 工程备忘
+
+- 本机测试工具 shell 对含全角字符命令输出偶发整段丢行/重复刷屏——重定向文件后 grep 判读，勿信空输出
+- macOS 无 `timeout` 命令：用 `perl -e 'alarm N; exec @ARGV' ...` 限时
+
+---
+
 ## 2026-09-08（一）午后 — perfetto 解析/浏览器打开 与 simpleperf 火焰图修复（Apple Silicon）
 
 **现象**：GUI 上 perfetto 分析失败、perfetto UI 浏览器打开失败、simpleperf 火焰图浏览器打开失败——三连挂的根因各不相同，均为 **macOS（Apple Silicon）环境差异**。

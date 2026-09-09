@@ -239,12 +239,17 @@ pub(crate) fn clear_tunnel() {
 
 use crate::utils::AdbDevice;
 
-/// 初始化远程后端：建 hop#1 → 校验 adb 协议版本（R2）→ 返回远端设备列表。
+/// 初始化远程后端：解析远端 adb 路径 → 校验 adb 协议版本（R2）→
+/// 建 hop#1 → 返回远端设备列表。
 ///
 /// 顺序是硬约束：本函数必须早于**任何** adb 调用。成功后 [`transport`] 切到
 /// `Ssh`，全部 adb 命令经 hop#1 指向远端 server。
 /// 任一步失败：隧道回收、传输保持 `Local`，不产生残留。
 pub fn init_remote(target: SshTarget) -> Result<Vec<AdbDevice>> {
+    // 远端 adb 路径解析：GUI 从 ssh_config 载入的主机不带 adb 路径（默认 "adb"），
+    // 远端 PATH 常不含 → 自动退到标准 SDK 位置
+    let adb_path = resolve_remote_adb_path(&target)?;
+    let target = target.with_adb_path(adb_path);
     // R2 协议版本校验先于一切 adb 客户端调用：版本不符时 adb 客户端会
     // kill 远端 server（可能正被他人共用），故先用两侧 CLI banner 比对。
     check_protocol_version(&target)?;
@@ -293,6 +298,42 @@ pub fn rebuild_tunnel() -> Result<()> {
     let t = SshTunnel::establish(&target)?;
     install_tunnel(t);
     Ok(())
+}
+
+/// 探测远端 adb 可用路径：先试配置值，失败再试标准 SDK 位置
+/// `~/Android/Sdk/platform-tools/adb`（远端 PATH 常不含 adb，附录 A #12）。
+/// 返回第一个 `version` 子命令跑通的路径。
+fn resolve_remote_adb_path(target: &SshTarget) -> Result<String> {
+    const SDK_FALLBACK: &str = "~/Android/Sdk/platform-tools/adb";
+    let mut candidates = vec![target.adb_path.clone()];
+    if target.adb_path != SDK_FALLBACK {
+        candidates.push(SDK_FALLBACK.to_string());
+    }
+    let mut errs = Vec::new();
+    for cand in candidates {
+        let out = Command::new("ssh")
+            .args(ssh_base_opts())
+            .arg(&target.host)
+            .arg(format!("{cand} version"))
+            .output();
+        match out {
+            Ok(o) if o.status.success()
+                && String::from_utf8_lossy(&o.stdout).contains("Android Debug Bridge") =>
+            {
+                return Ok(cand)
+            }
+            Ok(o) => errs.push(format!(
+                "{cand}: 退出码非零（{}）",
+                String::from_utf8_lossy(&o.stderr).trim()
+            )),
+            Err(e) => errs.push(format!("{cand}: {e}")),
+        }
+    }
+    bail!(
+        "远端 adb 不可用（{}）：{}——用 --remote-adb 或 GUI 连接配置指定路径",
+        target.host,
+        errs.join("；")
+    )
 }
 
 /// R2：adb 协议版本校验（判据是**协议**版本而非 platform-tools 版本，

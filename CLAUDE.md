@@ -224,6 +224,37 @@ Platform trait + `adb devices -l` product 字段自动检测（HU_SS3/HU_SS2MAXF
 - **重连**：`device_online` 只认目标设备（`adb -s X get-state` = "device"）——多台同连时其他设备在线不算"回来了"
 - **QNX 收尾**：`qnx_stop_stats` 的 pgrep 多会话保护/probe/停链均带 `-s`（语义不变，作用域收敛到目标设备）
 
+### SSH 远程后端（`--remote`，xperf-core/src/transport.rs，CLI 与 GUI 共用）
+
+**为什么**：真机接在远端 Linux 机（hppc）时，本机（Mac）跑 GUI/CLI 经 SSH 完成采样/perfetto/simpleperf 全部功能。完整设计与逐条实测依据：`docs/DESIGN-ssh-remote.md`。
+
+**架构**：adb server 前移 + SSH 隧道——本机恒为 adb **客户端**（`ADB_SERVER_SOCKET` 指向 hop#1 本机端口），`pull`/`push` 落点、trace_processor/report_html.py、`/tmp/xperf` 落盘全留本机零改动；唯一例外是 `adb forward` 的监听端口在**远端 server** 侧（v1 曾误判为客户端侧，真实拓扑复验推翻）⇒ agent NDJSON 流需第二跳隧道：
+
+```
+hop#1: 本机 P_srv → 远端 127.0.0.1:5037（全部 adb 命令，恒 1 条）
+hop#2: 本机 P_loc → 远端 adb forward 分配端口（agent 事件流，每设备 1 条，
+       ssh -S <ctl> -O forward/cancel 动态增删，不新起 ssh 进程）
+单条 ssh ControlMaster（-M -S ~/.ssh/cm/xperf-<host>-<pid>-<n>）承载两跳；
+必带 Compression=yes（实测 47MB 真实 trace 11.17s → 2.68s，4.2×，与 zstd 最优仅差 0.4s）
+```
+
+**改造面**（极小）：
+- `transport.rs`：`Transport::{Local, Ssh(SshTarget)}` 进程级全局 + `SshTunnel`（establish 四步：远端 `start-server`（**绝不 kill-server**——远端 server 可能被共用，R2）→ 清无主 control socket（R9：pid+序号文件名 + `kill -0` 判活）→ 自选本机端口建 master（`ExitOnForwardFailure` 快速失败换端口重试 3 次，R4）→ adb `host:version` 原始协议握手探活；Drop = `-O exit` 带走全部转发）
+- `utils.rs::adb_command()` 唯一 adb 构造点：Ssh 模式注入 `ADB_SERVER_SOCKET` **环境变量**（不用 `-H/-P`：不参与 argv 顺序，不与调用方追加的 `-s`/子命令冲突）；`run_adb`/`run_adb_command_for`/`adb_for`/`list_adb_devices` 全经此，Local 模式零注入（逐字节一致）
+- `agent.rs::ensure_daemon` 端口分流：`Local` 直连 forward 端口；`Ssh` 经 `tunnel.add_forward(remote_port)` 换本机端口——连接/探活/协议代码零改动；映射表按 remote_port 复用（重连/重试不重复建）
+- 生命周期：`init_remote`（R2 协议版本校验=两侧 `adb version` banner 协议串比对，**先于一切 adb 客户端调用**——版本不符客户端会 kill 远端 server；不符报错中止）/ `shutdown_remote`（逐条 `forward --remove` 本工具注册的规则=hop#2 映射表键集，**禁用 `--remove-all`** 会踢他人规则，R10）/ `rebuild_tunnel`（S9：`reconnect_agent` 先判 `tunnel.is_alive()` 再判 `device_online`，隧道死则指数退避 1s→30s 重建；远端 forward 规则 server 持有跨隧道存活，`ensure_forward` 查 list 复用）
+- CLI `--remote/--remote-adb/--remote-adb-port`（init 接在 `select_device` **之前**；正常/错误退出路径显式 `shutdown_remote`——`process::exit` 不跑析构）；GUI 顶栏「连接」下拉（数据源 = `~/.config/xperf/remotes.json` 已存配置 ∪ `~/.ssh/config` 的 Host 别名，免手工录入）+＋配置浮层 + 5 命令（list_remotes/list_ssh_hosts/save_remote/connect_remote/remote_status）+ `remote-status` 事件 + 热插拔监视器隧道死短路（边沿触发，防每 3s 刷错）
+- 远端 adb 路径解析（`resolve_remote_adb_path`）：先试配置值，失败自动退标准 SDK 位置 `~/Android/Sdk/platform-tools/adb`（远端 PATH 常不含 adb，附录 A #12）——ssh_config 来源的主机默认 `adb` 也能直连
+- 多设备并行天然支持：隧道位于 adb client↔server 之间，比「设备」低一层——`-s` 路由/GUI 每设备 tab/深挖并发零改动（每设备 hop#2 一条）；队头阻塞实测不成立（并发 3×47MB 拉取下 200ms 节拍 p50 不退化）
+
+**要点与实测基线**：
+- forward 规则由 **server** 持有、跨会话存活（本机进程死亡也不消失）⇒ `ensure_forward` 查 `--list` 复用同名规则是防泄漏关键（`tcp:0` 每次调用新建，实测连调 3 次得 3 条）
+- 远端 adb 常不在 PATH（hppc 在 `~/Android/Sdk/platform-tools/adb`）⇒ `--remote-adb` 可配
+- 真机回归（Mac←SSH→hppc→SS2MAX，gltf viewer）：`--cpu --interval 500` 采样（hello 8 核/CPU ~42%/线程明细/CSV 节拍）✓、`--trace 10`（44MB 落本机 + SQL 报告）✓、`--stack 10`（5.1MB .data + 三视图）✓、杀隧道断连恢复（重建→重连→采样继续）✓、双进程并发（采样+trace 节拍无退化）✓、优雅退出后 hppc forward 规则与 control socket 零残留 ✓
+- 已知边界：多真机远程并行未经双设备验证（hppc 仅挂一台，机制上与本地多设备同层）；SIGKILL 残留的远端 forward 规则由下次会话复用消化
+
+---
+
 ### perfetto 深挖模式（`--trace N`，xperf-core/src/trace.rs，CLI 与 GUI 共用）
 
 「录制-分析」模式，与实时采样互补：采样回答"什么时候高"，trace 回答"为什么高"。CLI 侧可与采样指标并行（`--cpu --trace 10`：后台线程录制 + 采样限时同窗口，到点自动结束）或单独使用（无指标 flag 时只录 trace）；GUI 侧深挖按钮与采样会话并行（采样不限时，窗口对照靠时间戳）。core 模块不打印不建目录：输出目录由调用方传入，报告以文本返回（CLI println / GUI 走 Tauri `trace` 事件 `{stage: recording|progress|recorded|done|error, message}`——progress 为每秒录制进度（elapsed/Ns，core `record` 的 `progress` 回调），done 的 message 即完整报告）。

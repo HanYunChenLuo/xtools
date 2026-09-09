@@ -1138,10 +1138,15 @@ const remoteUI = {
 
   async populate(currentHost) {
     const sel = document.getElementById('remoteSelect');
-    let remotes = [];
+    let remotes = [], sshHosts = [];
     try { remotes = await invoke('list_remotes'); } catch (e) { _diag('list_remotes ERROR: ' + JSON.stringify(e)); }
+    try { sshHosts = await invoke('list_ssh_hosts'); } catch (e) { _diag('list_ssh_hosts ERROR: ' + JSON.stringify(e)); }
+    // 已保存配置优先；ssh_config 主机补充（跳过与已保存条目同 host/name 的）
+    const savedKeys = new Set(remotes.flatMap(r => [r.host, r.name]));
+    const extra = sshHosts.filter(h => !savedKeys.has(h));
     sel.innerHTML = '<option value="">本机</option>' +
-      remotes.map(r => `<option value="${r.host}">${r.name}</option>`).join('');
+      remotes.map(r => `<option value="${r.host}">${r.name}</option>`).join('') +
+      extra.map(h => `<option value="${h}">${h}（ssh）</option>`).join('');
     sel.value = currentHost || '';
     if (currentHost && sel.value !== currentHost) {
       // 未保存的临时目标（--remote 启动）：补一个选项显示

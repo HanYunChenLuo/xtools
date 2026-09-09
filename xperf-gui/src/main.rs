@@ -781,6 +781,37 @@ fn list_remotes() -> Vec<RemoteConfig> {
     load_remotes()
 }
 
+/// 从 `~/.ssh/config` 解析 Host 别名（连接下拉的数据源之一——已配置的远端机
+/// 免手工录入）。跳过含通配符（`*`/`?`/`!`）的模式行与注释；`Host` 关键字
+/// 大小写不敏感，一行可带多个别名。
+fn parse_ssh_config_hosts(content: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for line in content.lines() {
+        let line = line.split('#').next().unwrap_or("").trim(); // 去行内注释
+        let mut fields = line.split_whitespace();
+        let Some(kw) = fields.next() else { continue };
+        if !kw.eq_ignore_ascii_case("host") {
+            continue;
+        }
+        for alias in fields {
+            if !alias.contains(['*', '?', '!']) && !out.iter().any(|h| h == alias) {
+                out.push(alias.to_string());
+            }
+        }
+    }
+    out
+}
+
+/// `~/.ssh/config` 中配置的 Host 别名列表（无该文件时为空）
+#[tauri::command]
+fn list_ssh_hosts() -> Vec<String> {
+    std::env::var_os("HOME")
+        .map(|h| std::path::PathBuf::from(h).join(".ssh").join("config"))
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .map(|s| parse_ssh_config_hosts(&s))
+        .unwrap_or_default()
+}
+
 /// 增/改远程连接配置（按 name upsert 后落盘）
 #[tauri::command]
 fn save_remote(cfg: RemoteConfig) -> Result<(), String> {
@@ -1446,6 +1477,7 @@ fn main() {
             compare_baseline,
             list_devices,
             list_remotes,
+            list_ssh_hosts,
             save_remote,
             connect_remote,
             remote_status,
@@ -1486,6 +1518,28 @@ mod tests {
     use super::*;
 
     // ---- SSH 远程连接配置（save_remote/list_remotes；XDG_CONFIG_HOME 隔离到临时目录） ----
+
+    #[test]
+    fn test_parse_ssh_config_hosts() {
+        let cfg = r#"
+# 注释行
+Host hppc
+  HostName 10.0.0.2
+  User han
+
+Host lab dev-lab   # 一行多别名 + 行内注释
+  HostName 192.168.1.10
+
+Host *             # 通配符跳过
+  ServerAliveInterval 30
+Host *.corp !jump  # 含通配/否定整行跳过
+HOST Upper         # 大小写不敏感
+Host hppc          # 重复别名去重
+"#;
+        assert_eq!(parse_ssh_config_hosts(cfg), vec!["hppc", "lab", "dev-lab", "Upper"]);
+        assert!(parse_ssh_config_hosts("").is_empty());
+        assert!(parse_ssh_config_hosts("Host *\n").is_empty());
+    }
 
     #[test]
     fn test_remote_config_upsert() {
