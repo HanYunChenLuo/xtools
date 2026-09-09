@@ -662,6 +662,11 @@ pub fn qnx_stop_stats(platform: &dyn crate::platform::Platform, interval_ms: u64
 /// `is_running` 返回 false（用户停止 / Ctrl-C）时返回 None；重连成功返回新事件流。
 /// 调用方持有的采样状态（时序、峰值等）不受影响，新 agent 的首轮仅重建基线。
 /// `serial`：目标设备（多设备并行会话用，`None` 回退全局选择）。
+///
+/// SSH 远程模式（S9）：隧道本身可能断（网络抖动/远端重启），此时 `device_online`
+/// 的 adb 调用也失败——先判隧道再判设备：隧道死则指数退避重建（1s→2s→…→30s 上限），
+/// 重建后 hop#2 映射表随新隧道清空（旧映射指向死端口），远端 forward 规则由
+/// server 持有跨隧道存活，`ensure_forward` 查 list 复用（R10 不累积）。
 pub fn reconnect_agent(
     package: Option<&str>,
     interval_ms: u64,
@@ -670,9 +675,27 @@ pub fn reconnect_agent(
     is_running: &dyn Fn() -> bool,
     serial: Option<&str>,
 ) -> Option<AgentStream> {
+    let mut rebuild_backoff = std::time::Duration::from_secs(1);
     loop {
         if !is_running() {
             return None;
+        }
+        // 远程模式：先确认隧道存活（隧道死则 adb 全灭，等设备无意义）
+        if matches!(crate::transport::transport(), crate::transport::Transport::Ssh(_))
+            && !crate::transport::tunnel().map(|t| t.is_alive()).unwrap_or(false)
+        {
+            match crate::transport::rebuild_tunnel() {
+                Ok(()) => {
+                    eprintln!("SSH 隧道已重建");
+                    rebuild_backoff = std::time::Duration::from_secs(1);
+                }
+                Err(e) => {
+                    eprintln!("SSH 隧道重建失败：{:#}，{:?} 后重试…", e, rebuild_backoff);
+                    std::thread::sleep(rebuild_backoff);
+                    rebuild_backoff = (rebuild_backoff * 2).min(std::time::Duration::from_secs(30));
+                }
+            }
+            continue;
         }
         if device_online(serial) {
             match ensure_agent_built()

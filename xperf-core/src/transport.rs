@@ -276,6 +276,19 @@ pub fn shutdown_remote() {
     set_transport(Transport::Local);
 }
 
+/// 重建 SSH 隧道（断线重连，S9）：旧隧道丢弃（Drop `-O exit` 尽力清理）→
+/// 同一 target 重新 establish + 安装。hop#2 映射表随新隧道清空（旧映射指向
+/// 死端口，必须废弃）；远端 forward 规则由 server 持有、跨隧道存活，
+/// `ensure_forward` 查 list 复用不重复创建（R10）。版本已在 init 校验过，不重复。
+/// 非远程模式调用为空操作。
+pub fn rebuild_tunnel() -> Result<()> {
+    let Transport::Ssh(target) = transport() else { return Ok(()) };
+    clear_tunnel();
+    let t = SshTunnel::establish(&target)?;
+    install_tunnel(t);
+    Ok(())
+}
+
 /// R2：adb 协议版本校验（判据是**协议**版本而非 platform-tools 版本，
 /// 附录 A #30：36.0.2 连 36.0.0 安全，因协议同为 1.0.41）。
 /// 比对本机 `adb version` 与远端 `<adb_path> version` 的 banner 协议串；
