@@ -188,6 +188,51 @@ impl SshTunnel {
     }
 }
 
+#[cfg(test)]
+impl SshTunnel {
+    /// 构造仅含端口信息的伪隧道（注入测试用；control_path 指向不存在路径，
+    /// 任何 `-O` 操作都会失败，不能用于真实转发）
+    pub(crate) fn for_test(server_port: u16) -> Self {
+        Self {
+            host: "test".into(),
+            control_path: PathBuf::from("/nonexistent/xperf-test"),
+            server_port,
+            forwards: Mutex::new(HashMap::new()),
+        }
+    }
+}
+
+/// 当前远程隧道（仅 [`Transport::Ssh`] 模式存在；由 `init_remote`/`shutdown_remote`
+/// 安装与清理，S4）
+static TUNNEL: Mutex<Option<std::sync::Arc<SshTunnel>>> = Mutex::new(None);
+
+/// 当前隧道（远程模式下 agent 通道建 hop#2 用；非远程模式或无隧道为 `None`）
+pub fn tunnel() -> Option<std::sync::Arc<SshTunnel>> {
+    TUNNEL
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+}
+
+/// hop#1 本机端口（adb 命令注入 `ADB_SERVER_SOCKET` 用；无隧道为 `None`）
+pub fn tunnel_server_port() -> Option<u16> {
+    tunnel().map(|t| t.server_port())
+}
+
+/// 安装当前隧道（`init_remote` 建隧成功后调用）
+// TODO(S4)：init_remote/shutdown_remote 落地后去掉 cfg(test)
+#[cfg(test)]
+pub(crate) fn install_tunnel(t: SshTunnel) {
+    *TUNNEL.lock().unwrap_or_else(|e| e.into_inner()) = Some(std::sync::Arc::new(t));
+}
+
+/// 摘除当前隧道（`shutdown_remote` 调用；摘除后 Drop 触发 `-O exit` 关隧道）
+// TODO(S4)：同上
+#[cfg(test)]
+pub(crate) fn clear_tunnel() {
+    let _ = TUNNEL.lock().unwrap_or_else(|e| e.into_inner()).take();
+}
+
 impl Drop for SshTunnel {
     /// 关隧道：`-O exit` 带走 hop#1 与全部 hop#2（实测可靠，附录 A #31）
     fn drop(&mut self) {
@@ -401,6 +446,11 @@ impl SshTarget {
 /// 当前传输后端（进程级全局，与既有 `utils::TARGET_SERIAL` 同款模式）。
 static TRANSPORT: Mutex<Transport> = Mutex::new(Transport::Local);
 
+/// 传输全局状态（TRANSPORT/TUNNEL）测试串行化锁：所有读写这两个全局的测试
+/// 必须先持有它，防同进程并行测试互踩
+#[cfg(test)]
+pub(crate) static TRANSPORT_TEST_LOCK: Mutex<()> = Mutex::new(());
+
 /// 当前传输后端（默认 [`Transport::Local`]）
 pub fn transport() -> Transport {
     TRANSPORT
@@ -442,6 +492,7 @@ mod tests {
     // 全局 TRANSPORT 的读写集中在单个测试函数内，避免同进程并行测试互踩
     #[test]
     fn test_transport_global_roundtrip() {
+        let _serial = TRANSPORT_TEST_LOCK.lock().unwrap();
         assert_eq!(transport(), Transport::Local); // 默认本机
         let target = SshTarget::new("hppc");
         set_transport(Transport::Ssh(target.clone()));

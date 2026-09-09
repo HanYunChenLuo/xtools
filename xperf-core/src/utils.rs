@@ -16,15 +16,37 @@ pub struct ProcOutput {
 ///
 /// 仅当子进程无法启动时返回 `Err`；退出码非零不返回 `Err`，`stdout` 照常返回。
 pub fn run_command(program: &str, args: &[&str]) -> Result<ProcOutput> {
-    let output = Command::new(program)
-        .args(args)
+    run_command_inner(Command::new(program).args(args), program)
+}
+
+fn run_command_inner(cmd: &mut Command, label: &str) -> Result<ProcOutput> {
+    let output = cmd
         .env("TERM", "dumb")
         .output()
-        .with_context(|| format!("Failed to execute command: {}", program))?;
+        .with_context(|| format!("Failed to execute command: {}", label))?;
 
     Ok(ProcOutput {
         stdout: clean_control_chars(&String::from_utf8_lossy(&output.stdout)),
     })
+}
+
+/// 构造 adb 命令。本机恒为 adb **客户端**；远程模式经环境变量指向远端 server
+/// （`ADB_SERVER_SOCKET`，见 `crate::transport`；环境变量不参与 argv 顺序，
+/// 不与调用方追加的 `-s`/子命令位置冲突——这是不用 `-H/-P` 参数的原因）。
+fn adb_command() -> Command {
+    let mut c = Command::new("adb"); // 恒本机 adb 二进制
+    if matches!(crate::transport::transport(), crate::transport::Transport::Ssh(_)) {
+        if let Some(p) = crate::transport::tunnel_server_port() {
+            c.env("ADB_SERVER_SOCKET", format!("tcp:127.0.0.1:{p}"));
+        }
+    }
+    c
+}
+
+/// 执行 adb 命令（经 [`adb_command`] 构造：远程模式自动指向远端 server，
+/// 本机模式与改造前逐字节一致）。语义同 [`run_command`]。
+pub fn run_adb(args: &[&str]) -> Result<ProcOutput> {
+    run_command_inner(adb_command().args(args), "adb")
 }
 
 /// 执行 adb 命令，显式指定目标设备（多设备并行会话用）。
@@ -39,9 +61,9 @@ pub fn run_adb_command_for(serial: Option<&str>, args: &[&str]) -> Result<ProcOu
                 .chain(args.iter().map(|s| s.to_string()))
                 .collect();
             let refs: Vec<&str> = full.iter().map(|s| s.as_str()).collect();
-            run_command("adb", &refs)
+            run_adb(&refs)
         }
-        None => run_command("adb", args),
+        None => run_adb(args),
     }
 }
 
@@ -67,9 +89,10 @@ pub fn target_serial() -> Option<String> {
 /// 构造已注入 `-s <serial>` 的 adb 命令，显式指定目标设备（多设备并行会话用）。
 ///
 /// `serial`：`Some(s)` 注入 `-s s`（空串视同 `None`）；`None` 回退全局选择
-/// （[`target_serial`]）。所有 adb 调用统一经此类构造，保证多设备场景命令路由到目标设备。
+/// （[`target_serial`]）。基于 [`adb_command`] 构造，远程模式自动携带
+/// `ADB_SERVER_SOCKET`。所有 adb 调用统一经此构造，保证多设备场景命令路由到目标设备。
 pub fn adb_for(serial: Option<&str>) -> Command {
-    let mut c = Command::new("adb");
+    let mut c = adb_command();
     if let Some(s) = resolve_serial(serial) {
         c.args(["-s", &s]);
     }
@@ -134,10 +157,10 @@ pub fn parse_adb_devices(output: &str) -> Vec<AdbDevice> {
 /// 并逐台 `getprop ro.build.version.release` 补 Android 版本（采集方式与版本相关，
 /// 如 BLAST 合成层是 12+ 特性；取失败标 `?`）
 pub fn list_adb_devices() -> Result<Vec<AdbDevice>> {
-    let out = run_command("adb", &["devices", "-l"]).context("执行 adb devices -l 失败")?;
+    let out = run_adb(&["devices", "-l"]).context("执行 adb devices -l 失败")?;
     let mut devices = parse_adb_devices(&out.stdout);
     for d in &mut devices {
-        let ver = run_command("adb", &["-s", &d.serial, "shell", "getprop", "ro.build.version.release"])
+        let ver = run_adb(&["-s", &d.serial, "shell", "getprop", "ro.build.version.release"])
             .ok()
             .map(|o| o.stdout.trim().to_string())
             .filter(|v| !v.is_empty())
@@ -316,6 +339,49 @@ mod tests {
 
     fn dev(serial: &str) -> AdbDevice {
         AdbDevice { serial: serial.into(), product: String::new(), model: String::new(), android_version: String::new() }
+    }
+
+    // ---- adb_command 传输注入（S3）----
+    // 读写 TRANSPORT/TUNNEL 全局 ⇒ 全程持 TRANSPORT_TEST_LOCK 防并行互踩
+
+    #[test]
+    fn test_adb_command_transport_env() {
+        use crate::transport::{
+            install_tunnel, clear_tunnel, set_transport, SshTarget, SshTunnel, Transport,
+            TRANSPORT_TEST_LOCK,
+        };
+        use std::ffi::OsStr;
+        const ENV_KEY: &str = "ADB_SERVER_SOCKET";
+        let _serial = TRANSPORT_TEST_LOCK.lock().unwrap();
+
+        // Local（默认）：不注入 ADB_SERVER_SOCKET（与本机既有行为逐字节一致）
+        set_transport(Transport::Local);
+        let c = adb_command();
+        assert!(
+            c.get_envs().all(|(k, _)| k != ENV_KEY),
+            "Local 模式不应注入 ADB_SERVER_SOCKET"
+        );
+
+        // Ssh + 隧道：注入 tcp:127.0.0.1:<hop#1 端口>
+        set_transport(Transport::Ssh(SshTarget::new("hppc")));
+        install_tunnel(SshTunnel::for_test(54321));
+        let c = adb_command();
+        let v = c
+            .get_envs()
+            .find(|&(k, _)| k == OsStr::new(ENV_KEY))
+            .and_then(|(_, v)| v)
+            .expect("Ssh 模式应注入 ADB_SERVER_SOCKET");
+        assert_eq!(v, "tcp:127.0.0.1:54321");
+
+        // adb_for：env 注入与 -s 参数共存不冲突
+        let c = adb_for(Some("dev1"));
+        assert!(c.get_envs().any(|(k, _)| k == ENV_KEY));
+
+        // 复位
+        clear_tunnel();
+        set_transport(Transport::Local);
+        let c = adb_command();
+        assert!(c.get_envs().all(|(k, _)| k != ENV_KEY));
     }
 
     #[test]
