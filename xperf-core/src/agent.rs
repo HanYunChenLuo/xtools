@@ -658,13 +658,15 @@ fn device_online(serial: Option<&str>) -> bool {
 /// QNX kgsl 统计链停止（CLI/GUI 会话结束由 host 兜底调用）。
 ///
 /// daemon 化（2026-09-07）后的语义：正常路径下链清理由 daemon 的会话 teardown
-/// 完成（先停链后收 telnet，顺序确定），本函数只是**daemon 异常死亡**（SIGKILL
+/// 完成（先停链后断 TCP，顺序确定），本函数只是**daemon 异常死亡**（SIGKILL
 /// 等，teardown 无机会执行）时的兜底。故门控极简单：
 /// - daemon 进程在（pgrep ≥1）→ teardown 已处理（或别的会话正在采样，停链会
 ///   杀掉对方的流），直接返回，不等待不探测；
-/// - daemon 不在（异常死亡）→ 先纯观察探测（只读 slog，不动 kgsl-control），
-///   frame 流在跑才发 echo>（死写入者）停止——对已停链写入会将其全部复活
-///   （真机实测 toggle 语义），故不可无条件执行。
+/// - daemon 不在（异常死亡）→ 调设备端 agent `--qnx-stop` 一次性模式：纯观察
+///   frame 流（只读 slog 不写 kgsl-control），在跑才发 echo>（死写入者）停止
+///   （对已停链写入会将其全部复活——toggle 语义真机实测，不可无条件执行）。
+///   2026-09-09 起走 agent 内嵌 telnet（无 busybox 依赖，shell 身份可执行）；
+///   旧版设备端二进制无 --qnx-stop 会报错退出，best-effort 忽略。
 pub fn qnx_stop_stats(platform: &dyn crate::platform::Platform, interval_ms: u64, serial: Option<&str>) {
     let Some(ip) = platform.qnx_host() else { return };
     // `[n]` 正则防检测命令载体自匹配。pgrep 在目标设备上执行，多设备并行时
@@ -681,22 +683,17 @@ pub fn qnx_stop_stats(platform: &dyn crate::platform::Platform, interval_ms: u64
         return; // daemon 在：会话 teardown 已停链（或他人在采样）
     }
     let period = interval_ms.clamp(100, 1000);
-    // 探测：~5s 纯观察（只读 slog 不写 kgsl-control，无副作用）
-    let probe = format!(
-        "({{ sleep 1; echo root; sleep 1; echo 'slog2info -W | grep frame &'; sleep 3; }} | busybox telnet {})",
-        ip
-    );
-    let Ok(out) = adb().arg("shell").arg(&probe).output() else { return };
-    let flowing = String::from_utf8_lossy(&out.stdout).matches("frame ").count();
-    if flowing < 2 {
-        return; // 链未在流：不写，死写入者撞停链会复活
+    // adb 调用本身失败：best-effort 忽略
+    if let Ok(o) = adb()
+        .arg("shell")
+        .arg(format!("{} --qnx-stop {} {}", DEVICE_AGENT_PATH, ip, period))
+        .output()
+    {
+        let out = String::from_utf8_lossy(&o.stdout).trim().to_string();
+        let err = String::from_utf8_lossy(&o.stderr).trim().to_string();
+        // 诊断留痕（正常路径 teardown 已停链时这里会打印「未在跑，不动链」）
+        eprintln!("qnx-stop: {}{}", out, if err.is_empty() { String::new() } else { format!(" | stderr: {}", err) });
     }
-    // 停链：echo>（死写入者）式写入对流链 = 停止全部（真机实测，fd3 活连接存在时亦有效）
-    let kill = format!(
-        "({{ sleep 1; echo root; sleep 1; echo 'echo gpubusystats {} > /dev/kgsl-control'; sleep 2; }} | busybox telnet {})",
-        period, ip
-    );
-    let _ = adb().arg("shell").arg(&kill).output();
 }
 
 /// 断连恢复：事件流 EOF（adb 长连接断开 / agent 进程退出）后调用。

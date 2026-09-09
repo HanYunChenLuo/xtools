@@ -6,7 +6,7 @@
 //! ```
 //! 业务侧只需关注 Utilization 字段。
 
-use super::{spawn_stream_parser, GpuEvent};
+use super::{spawn_stream_parser, ChildLines, GpuEvent};
 use crate::emit;
 use std::collections::HashMap;
 use std::process::{Command, Stdio};
@@ -78,7 +78,9 @@ pub(super) fn start(
     stop: Arc<std::sync::atomic::AtomicBool>,
 ) {
     match spawn() {
-        Some((child, reader)) => spawn_stream_parser(child, reader, None, None, pid_names, io, stop, parse_line),
+        Some((mut child, reader)) => {
+            spawn_stream_parser(ChildLines(reader), move || { let _ = child.kill(); }, None, None, pid_names, io, stop, parse_line)
+        }
         None => emit("{\"t\":\"err\",\"msg\":\"ligfxprofilerd logcat 启动失败，--gpu 停止\"}"),
     }
 }

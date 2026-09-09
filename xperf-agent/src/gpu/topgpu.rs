@@ -5,7 +5,7 @@
 //!   sys gpu: 20.0%
 //!   pid 1234 'com.app' gpu: 16.0% (80.0% of sys)
 
-use super::{spawn_stream_parser, GpuEvent};
+use super::{spawn_stream_parser, ChildLines, GpuEvent};
 use crate::emit;
 use std::collections::HashMap;
 use std::fs;
@@ -68,7 +68,9 @@ pub(super) fn start(
 ) {
     let period_s = (interval_ms / 1000).max(1);
     match spawn(period_s) {
-        Some((child, reader)) => spawn_stream_parser(child, reader, None, None, pid_names, io, stop, parse_line),
+        Some((mut child, reader)) => {
+            spawn_stream_parser(ChildLines(reader), move || { let _ = child.kill(); }, None, None, pid_names, io, stop, parse_line)
+        }
         None => emit("{\"t\":\"err\",\"msg\":\"topgpu 启动失败，--gpu 停止\"}"),
     }
 }

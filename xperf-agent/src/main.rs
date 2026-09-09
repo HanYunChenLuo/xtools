@@ -318,6 +318,15 @@ fn package_of(args: &Args, pkg_cache: &mut HashMap<u32, String>, pid: u32) -> St
 
 fn main() {
     let argv: Vec<String> = std::env::args().skip(1).collect();
+    // 一次性 QNX 停链模式：`xperf-agent --qnx-stop [ip] [period_ms]`
+    // （host qnx_stop_stats 兜底路径的设备端载体——daemon 异常死亡后由 host 经
+    // `adb shell` 调起；内嵌 telnet 无 busybox 依赖，shell 身份可执行）
+    if let Some(pos) = argv.iter().position(|a| a == "--qnx-stop") {
+        let ip = argv.get(pos + 1).filter(|s| !s.starts_with('-')).cloned();
+        let period = argv.get(pos + 2).and_then(|s| s.parse().ok()).unwrap_or(500);
+        gpu::qnx_stop_once(ip.as_deref(), period);
+        return;
+    }
     if argv.iter().any(|a| a == "--daemon") {
         run_daemon();
     }

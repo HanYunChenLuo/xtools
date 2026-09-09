@@ -1,7 +1,7 @@
 //! SS3 / SA8295P 平台实现（当前唯一完整实现）。
 //!
 //! GPU 由 QNX host 管理，Android GVM 内无 kgsl sysfs/设备节点/ftrace 事件。
-//! 通过 busybox telnet 连接 QNX host（172.31.101.52），写 /dev/kgsl-control
+//! 通过内嵌 telnet client 连接 QNX host（172.31.101.52），写 /dev/kgsl-control
 //! 开统计，slog2info -W 流式读 kgsl slog 行。
 //! 同时每秒补采 dumpsys gpu 显存（GVM 侧可用）。
 
