@@ -101,7 +101,9 @@
   本机 `git push`（upstream 已设 hppc/main）推到 hppc 即可
 - hppc 侧 `receive.denyCurrentBranch=updateInstead`：推送到 checked-out 分支时
   自动更新其工作区（要求 hppc 工作区无未提交变更）；git-lfs 3.4.1 已装，
-  LFS 对象经 SSH 直传 hppc（`git-lfs-authenticate` 协议）
+  LFS 对象经 SSH 直传 hppc（实测 `git lfs push hppc main` 握手可用；hppc 无锁 API，
+  已按提示设 `lfs.<url>.locksverify=false` 消噪；真正的 LFS 内容传输待 dylib 变更时
+  自然验证，失败兜底：ensure 按 >1MB 判缺自动从 AOSP 重下）
 - LFS 内容已到位（dylib 25.4MB 实测在 hppc 工作区）；`git pull` 从 hppc 拉
   （GitHub 侧变更经 hppc：hppc 上 `git pull origin` 后本机再 pull hppc）
 

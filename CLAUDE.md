@@ -8,6 +8,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **会话历史**：`SESSION.md` —— 每个会话结束前追加一条总结（最新在最上）：日期/任务/commit 列表/关键结论与基线/遗留问题。新会话开始先读它获取近期上下文。
 - 一个会话聚焦一个任务线，多会话通过这两个文件同步。
 - **代码规则（强制）**：写代码必须同时考虑 `cargo doc`——新增/修改的所有 pub 项（crate/mod/struct/enum/fn/字段/变体）都要有规范完整的 doc 注释（含单位/语义/无值字段要写明），路径/参数/日志样例包反引号或 code block；交付前必须跑完整 `cargo doc` 并做到**零 warning 零 error**（默认 lint 集 + missing_docs，命令见 Commands 节）。
+- **git 拓扑**：本机（Mac）→ `hppc`（Linux 机中转远端）→ GitHub。本机 `git push` 推 hppc
+  （main 的 upstream 已设 hppc/main）；**向 GitHub 的 push 统一在 hppc 上执行**
+  （`ssh hppc 'cd /home/han/code/tools/xtools && git push origin main'`）；LFS 对象随
+  push 经 SSH 直传 hppc（locksverify 已关）。拉取：GitHub 变更先在 hppc pull origin，
+  本机再 pull hppc。
 
 ## Commands
 
