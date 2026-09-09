@@ -357,6 +357,12 @@ pub fn ensure_agent_built() -> Result<PathBuf> {
     Ok(bin)
 }
 
+/// 部署时是否自动尝试 adb root（纯函数，策略由单测锁定）：仅车机平台
+/// （SS2/SS3/SS4 内部开发设备）；泛型 Android（手机等用户设备）不默认提权。
+fn should_auto_root(id: crate::platform::PlatformId) -> bool {
+    !matches!(id, crate::platform::PlatformId::Android)
+}
+
 /// 尝试 adb root（生产构建可能失败，静默忽略）。
 /// 不解析 adb root 文案（各版本不同），直接 `adb shell id` 验证 uid。
 /// `serial`：目标设备（多设备并行会话用，`None` 回退全局选择）。
@@ -369,7 +375,7 @@ fn try_adb_root(serial: Option<&str>) {
     if std::env::var_os("XPERF_NO_AUTO_ROOT").is_some() {
         return;
     }
-    if matches!(crate::platform::detect_platform_live(serial).id(), crate::platform::PlatformId::Android) {
+    if !should_auto_root(crate::platform::detect_platform_live(serial).id()) {
         return; // 非车机：不默认获取 root
     }
     let adb = || crate::utils::adb_for(serial);
@@ -922,6 +928,36 @@ mod tests {
             }
             _ => panic!("应为 Mem 事件"),
         }
+    }
+
+    /// auto-root 平台守卫（2026-09-09 策略）：车机平台自动 root，泛型 Android 不提权
+    #[test]
+    fn test_should_auto_root() {
+        use crate::platform::PlatformId;
+        assert!(should_auto_root(PlatformId::Ss2Max));
+        assert!(should_auto_root(PlatformId::Ss2Pro));
+        assert!(should_auto_root(PlatformId::Ss3));
+        assert!(should_auto_root(PlatformId::Ss4));
+        assert!(!should_auto_root(PlatformId::Android));
+    }
+
+    /// 真机显式获取 root（GUI「获取 root」按钮的后端函数）：shell→root 全迁移
+    /// （adb root → adbd 重启 → 轮询 id 确认）。前置：SS2MAX 接 hppc 且当前
+    /// **非 root**（`adb -s d1f39648c1f reboot` 掉 root 后跑本测试）。
+    #[test]
+    #[ignore = "需要 hppc + SS2MAX(d1f39648c1f)（任意权限状态均可，已 root 时幂等成功）"]
+    fn test_acquire_root_hppc() {
+        let target = crate::transport::SshTarget::new("hppc")
+            .with_adb_path("~/Android/Sdk/platform-tools/adb");
+        crate::transport::init_remote(target).expect("init_remote 失败");
+        let r = acquire_root(Some("d1f39648c1f"));
+        // 二次确认：返回值成功之外，设备当前 id 应为 uid=0
+        let id = crate::utils::run_adb_command_for(Some("d1f39648c1f"), &["shell", "id"])
+            .map(|o| o.stdout)
+            .unwrap_or_default();
+        crate::transport::shutdown_remote();
+        assert!(r.is_ok(), "acquire_root 应成功: {:?}", r.err());
+        assert!(id.contains("uid=0"), "acquire_root 后 id 应为 root: {}", id.trim());
     }
 
     /// hello 版本字段解析（daemon 探活的路径依赖：probe_daemon 据此判版本）
