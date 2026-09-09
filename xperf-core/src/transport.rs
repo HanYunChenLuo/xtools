@@ -7,14 +7,14 @@
 //!
 //! 完整设计与实测依据见 `docs/DESIGN-ssh-remote.md`。
 
-use std::sync::Mutex;
-
 // ---------- SSH 隧道（hop#1：本机端口 → 远端 adb server）----------
 
+use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
+use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
@@ -22,7 +22,7 @@ use anyhow::{bail, Context, Result};
 /// UNIX socket 路径长度上限（`sockaddr_un.sun_path`：macOS 104 / Linux 108），留余量取 100
 const MAX_CONTROL_PATH_LEN: usize = 100;
 
-/// 一条 SSH ControlMaster 连接，承载 hop#1（adb server 转发；hop#2 见 S2a）。
+/// 一条 SSH ControlMaster 连接，承载 hop#1（adb server）与 N 条 hop#2（agent 通道）。
 ///
 /// 生命周期由本工具全权管理：Drop 时 `-O exit` 关隧道；进程被 SIGKILL 时
 /// control socket 文件名带 pid，下次 [`SshTunnel::establish`] 清理无主残留（R9）。
@@ -33,6 +33,9 @@ pub struct SshTunnel {
     control_path: PathBuf,
     /// hop#1 本机端口（→ 远端 `127.0.0.1:<remote_port>` adb server）
     server_port: u16,
+    /// hop#2 映射表：远端 forward 端口 → 本机端口。复用防泄漏
+    /// （`adb forward tcp:0` 每次调用新建规则，附录 A #32；同 remote_port 只建一条）
+    forwards: Mutex<HashMap<u16, u16>>,
 }
 
 impl SshTunnel {
@@ -91,6 +94,7 @@ impl SshTunnel {
                             host: target.host.clone(),
                             control_path,
                             server_port: port,
+                            forwards: Mutex::new(HashMap::new()),
                         });
                     }
                     Err(e) => {
@@ -124,6 +128,63 @@ impl SshTunnel {
                 .status()
                 .map(|s| s.success())
                 .unwrap_or(false)
+    }
+
+    /// 为远端 forward 端口新增 hop#2，返回**本机**端口；已映射则复用（防泄漏，R10）。
+    ///
+    /// `ssh -S <ctl> -O forward -L <P_loc>:127.0.0.1:<remote> <host>`（不新起 ssh 进程，
+    /// 单连接多 channel 复用，附录 A #31）。映射表锁全程持有（含 ssh 调用，~100ms），
+    /// 防多线程并发为同一 `remote_port` 建重复转发。
+    pub fn add_forward(&self, remote_port: u16) -> Result<u16> {
+        let mut map = self.lock_forwards();
+        if let Some(&local) = map.get(&remote_port) {
+            return Ok(local);
+        }
+        let mut last_err = anyhow::anyhow!("端口自选失败");
+        for _ in 0..3 {
+            let local = pick_free_port()?;
+            if self.ssh_control("forward", local, remote_port) {
+                map.insert(remote_port, local);
+                return Ok(local);
+            }
+            last_err = anyhow::anyhow!("-O forward 失败（本机端口 {local} → 远端 {remote_port}）");
+        }
+        Err(last_err.context("建立 hop#2 失败（已重试 3 次）"))
+    }
+
+    /// 移除 hop#2（会话结束）。`ssh -S <ctl> -O cancel -L <与建立时完全相同的 spec>`
+    pub fn remove_forward(&self, remote_port: u16) -> Result<()> {
+        let mut map = self.lock_forwards();
+        let Some(local) = map.remove(&remote_port) else {
+            return Ok(()); // 未建立过，幂等
+        };
+        // cancel 失败（隧道已断等）不算错误：映射已移除，残留由隧道关闭兜底
+        let _ = self.ssh_control("cancel", local, remote_port);
+        Ok(())
+    }
+
+    /// `-O forward/cancel` 控制操作（返回是否成功；spec 与建立时逐字节一致才可 cancel）。
+    /// `ExitOnForwardFailure=yes` 使 `-O forward` 端口占用时返回非零（R4 重试的前提）。
+    fn ssh_control(&self, op: &str, local: u16, remote: u16) -> bool {
+        Command::new("ssh")
+            .arg("-S")
+            .arg(&self.control_path)
+            .arg("-O")
+            .arg(op)
+            .arg("-o")
+            .arg("ExitOnForwardFailure=yes")
+            .arg("-L")
+            .arg(fwd_spec(local, remote))
+            .arg(&self.host)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
+
+    fn lock_forwards(&self) -> MutexGuard<'_, HashMap<u16, u16>> {
+        self.forwards.lock().unwrap_or_else(|e| e.into_inner())
     }
 }
 
@@ -188,6 +249,11 @@ fn pick_free_port() -> Result<u16> {
     Ok(l.local_addr()?.port())
 }
 
+/// 端口转发 spec（`-L` 参数值）：建立与 cancel 必须逐字节一致
+fn fwd_spec(local_port: u16, remote_port: u16) -> String {
+    format!("{local_port}:127.0.0.1:{remote_port}")
+}
+
 /// 探活 adb server：原始 adb 协议 `host:version` 握手，返回版本 payload。
 ///
 /// 协议：发 `000c`（长度 12 的十六进制）+ `host:version`；收 `OKAY` +
@@ -223,10 +289,14 @@ fn sanitize_host(host: &str) -> String {
         .collect()
 }
 
-/// ControlMaster socket 路径：`~/.ssh/cm/xperf-<host>-<pid>`（pid 防多实例互踩，R9）；
-/// 超 UNIX 路径上限依次退化 `temp_dir()` → `/tmp`（极端长 host 截断）。
+/// ControlMaster socket 路径：`~/.ssh/cm/xperf-<host>-<pid>-<n>`（pid 防跨实例互踩、
+/// n 防同进程多隧道互踩（并行测试等场景），R9）；超 UNIX 路径上限退化
+/// `temp_dir()` → `/tmp`（极端长 host 截断）。
 fn control_socket_path(host: &str) -> PathBuf {
-    let fname = |h: &str| format!("xperf-{}-{}", sanitize_host(h), std::process::id());
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static TUNNEL_SEQ: AtomicU64 = AtomicU64::new(0);
+    let seq = TUNNEL_SEQ.fetch_add(1, Ordering::Relaxed);
+    let fname = |h: &str| format!("xperf-{}-{}-{}", sanitize_host(h), std::process::id(), seq);
     let mut candidates: Vec<PathBuf> = Vec::new();
     if let Some(home) = std::env::var_os("HOME") {
         candidates.push(PathBuf::from(home).join(".ssh").join("cm").join(fname(host)));
@@ -238,13 +308,15 @@ fn control_socket_path(host: &str) -> PathBuf {
     candidates
         .into_iter()
         .find(|p| p.as_os_str().len() <= MAX_CONTROL_PATH_LEN)
-        .unwrap_or_else(|| PathBuf::from(format!("/tmp/xperf-{}", std::process::id())))
+        .unwrap_or_else(|| PathBuf::from(format!("/tmp/xperf-{}-{}", std::process::id(), seq)))
 }
 
-/// 从残留 socket 文件名解析宿主 pid（`xperf-<host>-<pid>` → pid）
+/// 从残留 socket 文件名解析宿主 pid（`xperf-<host>-<pid>-<n>` → pid）
 fn parse_stale_pid(filename: &str, host: &str) -> Option<u32> {
     filename
         .strip_prefix(&format!("xperf-{}-", sanitize_host(host)))?
+        .split('-')
+        .next()?
         .parse()
         .ok()
 }
@@ -393,7 +465,9 @@ mod tests {
         assert!(p.as_os_str().len() <= MAX_CONTROL_PATH_LEN);
         let fname = p.file_name().unwrap().to_string_lossy();
         assert!(fname.starts_with("xperf-hppc-"));
-        assert!(fname.ends_with(&std::process::id().to_string()));
+        assert!(fname.contains(&format!("-{}-", std::process::id())));
+        // 同进程多次调用生成不同路径（并行测试/多隧道不互踩）
+        assert_ne!(control_socket_path("hppc"), control_socket_path("hppc"));
         // 极端长 host 也必须在上限内（退化路径）
         let long = "a".repeat(200);
         let p = control_socket_path(&long);
@@ -402,9 +476,10 @@ mod tests {
 
     #[test]
     fn test_parse_stale_pid() {
-        assert_eq!(parse_stale_pid("xperf-hppc-12345", "hppc"), Some(12345));
-        assert_eq!(parse_stale_pid("xperf-hppc-abc", "hppc"), None);
-        assert_eq!(parse_stale_pid("xperf-other-12345", "hppc"), None); // 别的 host 不匹配
+        assert_eq!(parse_stale_pid("xperf-hppc-12345-0", "hppc"), Some(12345));
+        assert_eq!(parse_stale_pid("xperf-hppc-12345", "hppc"), Some(12345)); // 兼容无序号
+        assert_eq!(parse_stale_pid("xperf-hppc-abc-0", "hppc"), None);
+        assert_eq!(parse_stale_pid("xperf-other-12345-0", "hppc"), None); // 别的 host 不匹配
         assert_eq!(parse_stale_pid("unrelated", "hppc"), None);
     }
 
@@ -438,6 +513,11 @@ mod tests {
         TcpListener::bind(("127.0.0.1", p1)).unwrap();
     }
 
+    #[test]
+    fn test_fwd_spec() {
+        assert_eq!(fwd_spec(51234, 5037), "51234:127.0.0.1:5037");
+    }
+
     // ---- 集成测试（需 hppc SSH 可达 + 远端 adb，标 #[ignore]，手动跑） ----
 
     /// 隧道全生命周期：establish → is_alive → hop#1 探活 → Drop 后端口拒绝连接
@@ -455,5 +535,28 @@ mod tests {
             TcpStream::connect(("127.0.0.1", port)).is_err(),
             "Drop 后端口 {port} 应拒绝连接"
         );
+    }
+
+    /// hop#2 全生命周期：add_forward（以远端 adb server 5037 为假想 forward 目标，
+    /// 免设备依赖）→ 复用同端口 → remove_forward 后拒绝连接
+    #[test]
+    #[ignore = "需要 hppc：SSH 免密可达 + 远端 adb（~/Android/Sdk/platform-tools/adb）"]
+    fn test_hop2_forward_lifecycle_hppc() {
+        let target = SshTarget::new("hppc").with_adb_path("~/Android/Sdk/platform-tools/adb");
+        let tun = SshTunnel::establish(&target).expect("establish 失败");
+        // add：hop#2 把远端 5037（adb server）映射回本机，握手应成功
+        let local = tun.add_forward(SshTarget::DEFAULT_ADB_PORT).expect("add_forward 失败");
+        let v = probe_adb_server(local).expect("hop#2 探活失败");
+        assert!(!v.is_empty());
+        // 复用：同 remote_port 返回同一本机端口，不新建
+        assert_eq!(tun.add_forward(SshTarget::DEFAULT_ADB_PORT).unwrap(), local);
+        // remove：cancel 后本机端口拒绝连接
+        tun.remove_forward(SshTarget::DEFAULT_ADB_PORT).unwrap();
+        assert!(
+            TcpStream::connect(("127.0.0.1", local)).is_err(),
+            "cancel 后端口 {local} 应拒绝连接"
+        );
+        // remove 幂等
+        tun.remove_forward(SshTarget::DEFAULT_ADB_PORT).unwrap();
     }
 }
