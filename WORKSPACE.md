@@ -68,8 +68,8 @@
 ## G. 非 root 设备支持（已完成）
 
 - [x] **权限矩阵探索 + 无 root 机器支持**（2026-09-09 完成，`feature/non-root-support` 合 main）：commit 链 19ecef9（auto-root 收敛仅车机 + XPERF_NO_AUTO_ROOT 旁路）→ ea3986f（协议 v3 hello.root + 内存降级 + RSS 兜底 + CLI 提示）→ 9c34b23（QNX 内嵌 telnet 去 busybox + --qnx-stop 模式 + host 换道）→ ec2de2b（GUI 权限徽章 + 获取 root 按钮 + 降级提示透传）。矩阵实测（两机 shell 逐项验证）见下表；**真机回归全通**：非 root SS3 @500ms 九项指标（QNX 内嵌 telnet shell 起流 20.3% busy + 每进程归因）、非 root SS2MAX @50ms（内存 dumpsys 降级 500ms 周期 + RSS TOTAL RSS 兜底 + kgsl 74.7%）、root 回归 SS3 @50ms（auto-root 恢复全指标）、--qnx-stop 守卫语义（不动已停链）真机验证。
-  - **残留目验项**：GUI「获取 root」按钮点击交互为人工目验（后端 acquire_root 的 adb 序列已在 SS2MAX 真机验证 ~0.5s 生效；徽章/hello 链路有 diag 冒烟）。
-  - **泛型 Android 跳过 auto-root** 的分支逻辑验证 + detect 单测锁定（手头无非车机设备真机）。
+  - **残留目验项**：仅 GUI「获取 root」按钮的 DOM 点击绑定（一行 addEventListener，invoke 注册编译期锁定）；后端 `acquire_root` 已真机闭合（bf50bbc `test_acquire_root_hppc`：SS2MAX reboot 掉 root 后 3.46s shell→root 全迁移）。
+  - **泛型 Android 跳过 auto-root**：策略由纯函数 `should_auto_root` 单测 + detect 测试锁定（手头无非车机设备真机）。
 
   | 指标 | 数据源 | 非 root 可用性 |
   |---|---|---|

@@ -29,7 +29,7 @@
 - GUI 冒烟（XPERF_NO_AUTO_ROOT + SS2MAX）：AgentHello{root:false} 到前端，徽章/灰显链路通（diag 佐证）。
 - 静态：全量测试 95 绿（core 80+6ignored/gui 8/cli 5/xrm 2）、clippy 0、cargo doc 0。
 
-**遗留**：GUI「获取 root」按钮点击交互人工目验（acquire_root 的 adb 序列 SS2MAX 真机 ~0.5s 生效）；泛型 Android 跳过 auto-root 分支无非车机真机（逻辑+detect 单测锁定）；agent 单测无法在主机跑（compile_error 限 Android 目标，历史如此）。
+**残留**：GUI「获取 root」按钮的 DOM 点击绑定为唯一未自动化部分（一行 addEventListener）；其后端 `acquire_root` 已真机闭合验证（bf50bbc：SS2MAX reboot 掉 root 后 `test_acquire_root_hppc` 3.46s 完成 shell→root 全迁移）；auto-root 平台守卫已抽纯函数 `should_auto_root` 单测锁定（泛型 Android 分支无非车机真机，策略由单测+detect 测试覆盖）；agent 单测无法在主机跑（compile_error 限 Android 目标，历史如此）。
 
 ---
 
