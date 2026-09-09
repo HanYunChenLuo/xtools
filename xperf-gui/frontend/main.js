@@ -8,12 +8,18 @@ const { invoke } = window.__TAURI__.core;
 _diag('__TAURI__ ok');
 
 // ---------- 轻量 Canvas 折线图（替代 ECharts，无外部依赖） ----------
-// 主题色从 CSS 变量动态读取（data-theme 切换后 draw/redraw 自动跟随）
+// 主题色从 CSS 变量动态读取（data-theme 切换后 draw/redraw 自动跟随）。
+// 按主题缓存：getComputedStyle 每次 draw 调用太贵（绘制频率可达每秒数百次），
+// 主题一天才切几次——applyTheme 换 dataset.theme 后缓存自然失效。
+let _colorCache = null;
+let _colorTheme = '';
 function uiColors() {
+  const theme = document.documentElement.dataset.theme || '';
+  if (_colorCache && theme === _colorTheme) return _colorCache;
   const cs = getComputedStyle(document.documentElement);
   const v = (n) => cs.getPropertyValue(n).trim();
-  const light = document.documentElement.dataset.theme === 'light';
-  return {
+  const light = theme === 'light';
+  _colorCache = {
     bg: v('--bg-card'),
     text: v('--text'),
     dim: v('--text-dim'),
@@ -25,6 +31,8 @@ function uiColors() {
       ? ['#1e66f5', '#40a02b', '#df8e1d', '#d20f39', '#8839ef', '#179299', '#fe640b', '#209fb5', '#ea76cb', '#7c7f93']
       : ['#89b4fa', '#a6e3a1', '#f9e2af', '#f38ba8', '#cba6f7', '#94e2d5', '#fab387', '#74c7ec', '#f5c2e7', '#a6adc8'],
   };
+  _colorTheme = theme;
+  return _colorCache;
 }
 
 class LineChart {
@@ -38,8 +46,12 @@ class LineChart {
     this.series = {}; // pid -> [{t, v}]，完整会话历史（回看用），绘制时按窗口裁剪+抽稀
     this.windowMode = 'follow'; // follow=最近 followMs；all=全部历史
     this.followMs = 10 * 60 * 1000;
+    this.dirty = false; // 有待绘制数据（requestDraw 置位，flushCharts 统一绘制）
     this.resize();
   }
+  // 数据到达不立即绘制：标脏即可，由全局 150ms 合帧器统一绘制（仅激活设备页）。
+  // 非激活页持续累积数据但不绘制——切回时 resize() 会即时补画。
+  requestDraw() { this.dirty = true; }
   resize() {
     // 高分屏（devicePixelRatio>1）下需放大 canvas 缓冲区，否则字体和线条模糊。
     // ctx 用 setTransform(dpr,0,0,dpr,0,0)，后续 draw 坐标按 CSS 像素书写即可。
@@ -50,6 +62,7 @@ class LineChart {
     this.canvas.width = Math.max(1, Math.round(r.width * dpr));
     this.canvas.height = Math.max(1, Math.round(r.height * dpr));
     this.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    this.dirty = false;
     this.draw();
   }
   push(pid, t, v) {
@@ -229,6 +242,8 @@ class DeviceSession {
     this.maxkhz = [];       // AgentHello 带的每核最大频率（KHz）
     this.liveData = {};     // 实时数值面板数据
     this.coldStarts = [];   // 冷启动记录 [{time, action, total, wait}]（最近 5 次）
+    this.liveDirty = false;    // liveData 有未渲染变更（500ms 面板渲染器据此跳过）
+    this.threadsDirty = false; // latestThreads 有未渲染变更
 
     this.bindEvents();
     this.toggleCharts();
@@ -333,6 +348,7 @@ class DeviceSession {
   fmtTime(t) { return new Date(t).toTimeString().slice(0, 8); }
   setLive(key, label, value, unit, color) {
     this.liveData[key] = { label, value, unit, color: color || 'text' };
+    this.liveDirty = true;
   }
   renderLive() {
     const rows = Object.entries(this.liveData).map(([key, d]) =>
@@ -435,6 +451,7 @@ class DeviceSession {
       const pid = ev.PidDisappeared.pid;
       if (this.pidData[pid]) { this.pidData[pid].stopped = true; this.renderPidList(); }
       delete this.latestThreads[pid]; // 进程已死，Top 线程表不再展示其残留线程
+      this.threadsDirty = true;
     } else if (ev.CpuUpdate) {
       const { pid, timestamp, process_cpu, threads } = ev.CpuUpdate;
       if (!this.pidData[pid]) { this.pidData[pid] = { cpu: [], mem: [], new: true }; this.renderPidList(); }
@@ -442,13 +459,14 @@ class DeviceSession {
       this.charts.cpu.push('PID ' + pid, t, +process_cpu.toFixed(2));
       this.trackPeak(pid, 'cpu', process_cpu, t);
       this.latestThreads[pid] = threads;
+      this.threadsDirty = true;
       this.setLive('cpu', 'CPU (pid ' + pid + ')', process_cpu.toFixed(1), '%', 'accent');
       // 线程 top1
       if (threads.length > 0) {
         const top1 = threads.reduce((a, b) => a.cpu_usage > b.cpu_usage ? a : b);
         this.setLive('cpu_top', '  └ ' + top1.name, top1.cpu_usage.toFixed(1), '%', 'dim');
       }
-      try { this.charts.cpu.draw(); } catch (err) { _diag('cpuChart.draw ERROR: ' + err.message); }
+      this.charts.cpu.requestDraw();
     } else if (ev.MemoryUpdate) {
       const { pid, timestamp, total_pss, details } = ev.MemoryUpdate;
       if (!this.pidData[pid]) { this.pidData[pid] = { cpu: [], mem: [], new: true }; this.renderPidList(); }
@@ -462,7 +480,7 @@ class DeviceSession {
         this.setLive('mem_java', '  └ Java', (details.java_heap / 1024).toFixed(1), ' MB', 'dim');
         this.setLive('mem_code', '  └ Code', (details.code / 1024).toFixed(1), ' MB', 'dim');
       }
-      try { this.charts.mem.draw(); } catch (err) { _diag('memChart.draw ERROR: ' + err.message); }
+      this.charts.mem.requestDraw();
     } else if (ev.FpsUpdate) {
       const { pid, timestamp, layer, fps, jank_count } = ev.FpsUpdate;
       if (!this.pidData[pid]) { this.pidData[pid] = { cpu: [], mem: [], new: true }; this.renderPidList(); }
@@ -477,7 +495,7 @@ class DeviceSession {
       this.fpsHist[shortLayer].push({ t, fps, jank: jank_count });
       this.setLive('fps', 'FPS (' + shortLayer + ')', fps.toFixed(1), '', 'err');
       this.setLive('fps_jank', '  └ Jank', jank_count, '', 'dim');
-      try { this.charts.fps.draw(); } catch (err) { _diag('fpsChart.draw ERROR: ' + err.message); }
+      this.charts.fps.requestDraw();
     } else if (ev.NoProcess) {
       // 被测进程死亡重扫期间与录制并行时，不要抹掉录制进度条（等下一秒 progress 事件会恢复，
       // 但期间空白更差）；录制态只更新右侧 PID 列表相关状态，status 保持
@@ -495,7 +513,7 @@ class DeviceSession {
       const avg = mhz.reduce((a, b) => a + b, 0) / mhz.length;
       this.setLive('freq', 'CPU 频率', avg.toFixed(0), ' MHz', 'warn');
       this.setLive('freq_max', '  └ 最高核', Math.max(...mhz).toFixed(0), ' MHz', 'dim');
-      try { this.charts.freq.draw(); } catch (err) { _diag('freqChart.draw ERROR: ' + err.message); }
+      this.charts.freq.requestDraw();
     } else if (ev.TempUpdate) {
       const { timestamp, status, sensors } = ev.TempUpdate;
       this.autoCheck('thermal');
@@ -508,7 +526,7 @@ class DeviceSession {
         this.setLive('temp_' + name, '温度 ' + name, value.toFixed(1), ' °C', 'orange');
       }
       this.setLive('temp_status', '  └ 热状态', status >= 0 ? status : '?', '', 'dim');
-      try { this.charts.temp.draw(); } catch (err) { _diag('tempChart.draw ERROR: ' + err.message); }
+      this.charts.temp.requestDraw();
     } else if (ev.GpuUpdate) {
       const { timestamp, busy, util, mhz, maxmhz } = ev.GpuUpdate;
       this.autoCheck('gpu');
@@ -521,7 +539,7 @@ class DeviceSession {
       this.setLive('gpu_busy', 'GPU busy', busy.toFixed(1), '%', 'purple');
       if (maxmhz > 0) this.setLive('gpu_freq', '  └ 频率', mhz + '/' + maxmhz, ' MHz', 'dim');
       if (util > 0) this.setLive('gpu_util', '  └ util', util.toFixed(1), '%', 'dim');
-      try { this.charts.gpu.draw(); } catch (err) { _diag('gpuChart.draw ERROR: ' + err.message); }
+      this.charts.gpu.requestDraw();
     } else if (ev.GpuProcUpdate) {
       // QNX 路径：每进程 GPU busy%
       const { pid, timestamp, busy } = ev.GpuProcUpdate;
@@ -532,7 +550,7 @@ class DeviceSession {
       if (!this.gpuprocHist[pid]) this.gpuprocHist[pid] = [];
       this.gpuprocHist[pid].push({ t, busy });
       this.setLive('gpu_proc_' + pid, 'GPU busy (pid ' + pid + ')', busy.toFixed(1), '%', 'purple');
-      try { this.charts.gpu.draw(); } catch (err) { _diag('gpuChart.draw ERROR: ' + err.message); }
+      this.charts.gpu.requestDraw();
     } else if (ev.GpuMemUpdate) {
       // --gpu 降级路径（hypervisor 平台）：每 PID GPU 显存
       const { pid, timestamp, bytes, global } = ev.GpuMemUpdate;
@@ -546,7 +564,7 @@ class DeviceSession {
       this.gpumemHist[pid].push({ t, mb, gmb: global / 1e6 });
       this.setLive('gpumem_' + pid, 'GPU 显存 (pid ' + pid + ')', mb.toFixed(0), ' MB', 'teal');
       this.setLive('gpumem_global', '  └ 整机', (global / 1e6).toFixed(0), ' MB', 'dim');
-      try { this.charts.gpumem.draw(); } catch (err) { _diag('gpumemChart.draw ERROR: ' + err.message); }
+      this.charts.gpumem.requestDraw();
     } else if (ev.IoUpdate) {
       const { pid, timestamp, r, w, dr, dw } = ev.IoUpdate;
       if (!this.pidData[pid]) { this.pidData[pid] = { cpu: [], mem: [], new: true }; this.renderPidList(); }
@@ -557,7 +575,7 @@ class DeviceSession {
       if (!this.ioHist[pid]) this.ioHist[pid] = [];
       this.ioHist[pid].push({ t, r, w, dr, dw });
       this.setLive('io_' + pid, 'IO 读/写 (pid ' + pid + ')', r.toFixed(1) + ' / ' + w.toFixed(1), ' KB/s', 'orange');
-      try { this.charts.io.draw(); } catch (err) { _diag('ioChart.draw ERROR: ' + err.message); }
+      this.charts.io.requestDraw();
     } else if (ev.NetUpdate) {
       const { timestamp, rx, tx } = ev.NetUpdate;
       this.autoCheck('net');
@@ -565,9 +583,9 @@ class DeviceSession {
       this.charts.net.push('RX', t, +rx.toFixed(2));
       this.charts.net.push('TX', t, +tx.toFixed(2));
       this.setLive('net', '网络 RX/TX', rx.toFixed(1) + ' / ' + tx.toFixed(1), ' KB/s', 'sky');
-      try { this.charts.net.draw(); } catch (err) { _diag('netChart.draw ERROR: ' + err.message); }
+      this.charts.net.requestDraw();
     }
-    app.updateTitle();
+    // updateTitle 不再随事件调用（O 全设备累计点数/事件，长会话平方级）——5s 定时器更新
   }
 
   // ---- trace / stack 事件处理（payload 带 serial 已由 App 分发） ----
@@ -1105,13 +1123,25 @@ document.getElementById('themeBtn').addEventListener('click', () => {
 });
 applyTheme(localStorage.getItem('xperf-theme') || 'dark');
 
-// ---------- 周期渲染（实时数值/线程表，仅激活页——隐藏页无渲染意义） ----------
+// ---------- 周期渲染（仅激活页——隐藏页无渲染意义；全部按 dirty 标志跳过无变化工作） ----------
+// 图表合帧：数据事件只标脏（requestDraw），150ms 统一绘制——极端配置（50ms×多 PID）
+// 下每图最多 ~7 次/秒绘制（原实现每事件一次全量重绘，可达数百次/秒/图）
 setInterval(() => {
   const s = app.sessions.get(app.active);
   if (!s) return;
-  s.renderLive();
-  s.renderThreads();
+  for (const c of s.allCharts) {
+    if (c.dirty) { c.dirty = false; c.draw(); }
+  }
+}, 150);
+// 面板（实时数值/Top 线程）：数据变了才重建 DOM
+setInterval(() => {
+  const s = app.sessions.get(app.active);
+  if (!s) return;
+  if (s.liveDirty) { s.liveDirty = false; s.renderLive(); }
+  if (s.threadsDirty) { s.threadsDirty = false; s.renderThreads(); }
 }, 500);
+// 标题诊断统计：原每事件一次（O 全设备累计点数，长会话平方级），降为 5s 定时
+setInterval(() => app.updateTitle(), 5000);
 
 window.addEventListener('error', (e) => {
   document.title = 'XPerformance | ERROR: ' + (e.message || 'unknown');

@@ -139,6 +139,9 @@ fn spawn_sampling(app: tauri::AppHandle, serial: String, package: String, interv
         }
     };
     std::thread::spawn(move || {
+        // 采样热路径的逐事件 stderr 摘要默认关闭（GUI 无控制台时纯开销：
+        // 每事件一次 String 构造 + write 系统调用）；排查用 XPERF_DEBUG=1 打开
+        let debug_events = std::env::var_os("XPERF_DEBUG").is_some();
         let platform = xperf_core::detect_platform_live(Some(&serial));
         eprintln!("[sampling] 平台: {} ({})", platform.name(), platform.description());
         let bin = match agent::ensure_agent_built() {
@@ -173,7 +176,9 @@ fn spawn_sampling(app: tauri::AppHandle, serial: String, package: String, interv
             match stream.next_event() {
                 Ok(Some(Ok(ev))) => {
                     for sev in map_event(ev, &mut known_pids) {
-                        eprintln!("[sampling] {}", brief_event(&sev));
+                        if debug_events {
+                            eprintln!("[sampling] {}", brief_event(&sev));
+                        }
                         let _ = app.emit("sample", serde_json::json!({ "serial": serial, "event": sev }));
                     }
                 }
