@@ -43,6 +43,7 @@
 
 ## D. 结构改进（下轮候补）
 
+- [ ] **SS4 FPS 数据源升级候选：getfps -w（用户指点，待 HU 回来验证）**：SS4 GVM 上 `dumpsys SurfaceFlinger` 找图层全名后 `getfps -w "<全名>"` 可取 FPS。若实测可用且为 per-layer 口径，优于 frametimeline display 合成流（恢复 per-layer 归因 + 静止=0 语义，消除系统底噪混入）；验证点：存在性（which getfps）/输出格式与解析/开销（能否纳入 agent 节拍或 host 轮询）/权限（shell 可执行？）/静止界面读数。可用后评估替代 hostchan frametimeline 通道（frametimeline 通道实现保留作兜底）。**当前阻塞：2026-09-10 16:00 后 MindRT（42087266b1f）从 adb 消失（HU 休眠/断开），SS4 不可达**
 - [x] ~~agent 单文件拆分~~（531798a + 99d1b74 review 修复）：main.rs 1848 行 → 10 文件（main 493 + proc/mem/fps/thermal + gpu/{mod,kgsl,qnx,topgpu,ligfx}），三份读线程骨架抽公共 `gpu::spawn_stream_parser`，四段相同的 gpumem 补采臂合并；测试 23 个随模块迁移全绿。真机回归：SS2MAX 新旧 agent 同机对比事件分布/wire 格式/smaps 值一致。附带修复 host 侧 `ensure_agent_built` 只盯 main.rs 的 mtime 检查（改扫 src 树，touch 子模块已验证触发重建）
 - [x] ~~SS3 QNX 通道真机回归 + kgsl 统计链停滞修复~~（2026-09-03）：回归发现 QNX frame 流"1 条后停走、跨会话交替通/停"。黑盒实验（重启车机前后共 10+ 组对照）定位根因：**kgsl 统计链是驱动全局的，会话/fd 关闭都不清理**（泄漏直到整机重启）；`echo >` 式即开即死连接写入撞存量链只 flush 一窗即停，长活连接（`exec 3>`）写入则全链重相位持续输出；多链锁步产生重复行。修复（qnx.rs）：① 启动命令改 `exec 3>` 持 fd 写入；② slog 行按"与上一行完全相同"去重（Sys/Proc 各一条）；③ 看门狗兜底（frame 静默超 3×周期经 fd3 重写自愈，≤3 次）。真机验证：4 条泄漏链硬场景下启动顿 ~5s + 1 次自愈后稳定 1/s；gpu/gpuproc/gpumem 三类事件与 CSV 全通（eid→pid 9671 归因正确）；连续多轮 kill/重跑稳定。已知残留：存量链的窗口 flush 会带来少量同值重复样本（数值正确，重启清零）
 - [x] ~~xperf-core 轮询参考实现删除~~（225d89b，-1653 行；保留 ThreadCpuInfo/MemoryDetails/FpsTimeSeriesData/PidStats/SampleEvent 等协议类型）
