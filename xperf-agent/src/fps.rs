@@ -20,7 +20,13 @@ pub(crate) fn fps_every_n_rounds(interval_ms: u64) -> u64 {
 }
 
 struct FpsLayerState {
+    /// 干净图层名（事件 layer 字段/CSV 图例用）
     name: String,
+    /// `--latency` 查询名。Android 16（SS4）的 QCM SF 构建要求传 `--list` 原始行的
+    /// `<hex> <name>` 别名形态——只传干净名恒空（实测：带前缀 65 行真帧数据 vs
+    /// 不带 1 行刷新周期；2026-09-10 经 getfps 逆向 + A/B 直测锁定）。旧平台为
+    /// 干净名（历史行为，SS2MAX/SS3 真机验证，勿改）。
+    query: String,
     /// 上轮时刻 + 上轮缓冲末尾时间戳；None = 未建基线
     last: Option<(Instant, Option<u64>)>,
 }
@@ -89,11 +95,13 @@ fn parse_owned_buffer_layers(dump: &str, pid: u32) -> Vec<String> {
     layers
 }
 
-/// --list 解析：保留包名匹配的行，去 `<hex> ` 别名前缀，去重。
-/// Android 16 起 --list 行带 `RequestedLayerState{<hex> <name> parentId=… …}` 包装
-/// （SS4/A16 实测），须先拆壳再按旧格式取名字段，否则整行进 --latency 必无数据。
-fn parse_list_layers(list: &str, package: &str) -> Vec<String> {
-    let mut layers = Vec::new();
+/// `--list` 解析：保留包名匹配的行，返回 (干净名, --latency 查询名)，按干净名去重。
+/// Android 16 起 `--list` 行带 `RequestedLayerState{<hex> <name> parentId=… …}` 包装
+/// （SS4/A16 实测），须拆壳取名字段；且该构建的 `--latency` 只认 `<hex> <name>`
+/// 别名形态（见 [`FpsLayerState::query`]），查询名保留前缀。旧格式平台查询名 =
+/// 干净名（行为不变）。
+fn parse_list_layers(list: &str, package: &str) -> Vec<(String, String)> {
+    let mut layers: Vec<(String, String)> = Vec::new();
     for line in list.lines() {
         let line = line.trim();
         if !line.contains(package) {
@@ -104,10 +112,12 @@ fn parse_list_layers(list: &str, package: &str) -> Vec<String> {
             Some(rest) => (true, rest),
             None => (false, line),
         };
-        // 去 `<hex> ` 别名前缀（旧格式与 A16 壳内均有）
-        let name = match s.split_once(' ') {
-            Some((head, rest)) if !head.is_empty() && head.chars().all(|c| c.is_ascii_hexdigit()) => rest.trim(),
-            _ => s,
+        // 拆 `<hex> ` 别名前缀（旧格式与 A16 壳内均有）
+        let (hex, name) = match s.split_once(' ') {
+            Some((head, rest)) if !head.is_empty() && head.chars().all(|c| c.is_ascii_hexdigit()) => {
+                (Some(head), rest.trim())
+            }
+            _ => (None, s),
         };
         // A16 壳内名字段后接 parentId=/relativeParentId=/z= 元数据与结尾 `}` → 截断
         let name = if wrapped {
@@ -120,8 +130,13 @@ fn parse_list_layers(list: &str, package: &str) -> Vec<String> {
         } else {
             name
         };
-        if !layers.contains(&name.to_string()) {
-            layers.push(name.to_string());
+        // A16 查询名带别名前缀；旧格式保持干净名
+        let query = match (wrapped, hex) {
+            (true, Some(h)) => format!("{h} {name}"),
+            _ => name.to_string(),
+        };
+        if !layers.iter().any(|(n, _)| n == name) {
+            layers.push((name.to_string(), query));
         }
     }
     layers
@@ -134,16 +149,23 @@ fn parse_list_layers(list: &str, package: &str) -> Vec<String> {
 /// BLAST 合成，app 直提 buffer）漏掉 → FPS 恒 0；包名匹配能把 BLAST 层补进。
 /// 无 buffer 的辅助层（Background for/Bounds for/ActivityRecord…）并入无害：
 /// 空缓冲层不建帧基线、不发事件（sample_round 的 None 基线路径）。
-fn sf_discover_layers(pid: u32, package: &str) -> Vec<String> {
-    let mut layers = dumpsys(&["SurfaceFlinger"])
+fn sf_discover_layers(pid: u32, package: &str) -> Vec<(String, String)> {
+    // 全量 dump 路径的层先入列（查询名兜底为干净名）；--list 同名层会覆盖其查询名
+    // （借 A16 的 `<hex> <name>` 形态——全量 dump 块里拿不到别名前缀）
+    let mut layers: Vec<(String, String)> = dumpsys(&["SurfaceFlinger"])
         .map(|s| parse_owned_buffer_layers(&s, pid))
-        .unwrap_or_default();
+        .unwrap_or_default()
+        .into_iter()
+        .map(|name| (name.clone(), name))
+        .collect();
     let by_name = dumpsys(&["SurfaceFlinger", "--list"])
         .map(|s| parse_list_layers(&s, package))
         .unwrap_or_default();
-    for name in by_name {
-        if !layers.contains(&name) {
-            layers.push(name);
+    for (name, query) in by_name {
+        if let Some(slot) = layers.iter_mut().find(|(n, _)| *n == name) {
+            slot.1 = query;
+        } else {
+            layers.push((name, query));
         }
     }
     layers
@@ -158,7 +180,7 @@ impl FpsState {
         if !self.attempted || self.zero_rounds >= FPS_REDISCOVER_ZERO_ROUNDS {
             self.layers = sf_discover_layers(pid, package)
                 .into_iter()
-                .map(|name| FpsLayerState { name, last: None })
+                .map(|(name, query)| FpsLayerState { name, query, last: None })
                 .collect();
             self.attempted = true;
             self.zero_rounds = 0;
@@ -171,7 +193,7 @@ impl FpsState {
         let now = Instant::now();
         let mut samples: Vec<(String, f32, u32, u32)> = Vec::new();
         for layer in &mut self.layers {
-            let presents = dumpsys(&["SurfaceFlinger", "--latency", &layer.name])
+            let presents = dumpsys(&["SurfaceFlinger", "--latency", &layer.query])
                 .map(|s| parse_latency_output(&s))
                 .unwrap_or_default();
             if presents.is_empty() {
@@ -276,13 +298,19 @@ mod tests {
 
     #[test]
     fn test_parse_list_layers_strips_hex_alias() {
+        // 旧格式：查询名 = 干净名（历史行为不变）
         let list = "147955a com.pkg/com.pkg.MainActivity#0\ncom.pkg/com.pkg.MainActivity#0\ncom.other/Main#0\n";
-        assert_eq!(parse_list_layers(list, "com.pkg"), vec!["com.pkg/com.pkg.MainActivity#0".to_string()]);
+        assert_eq!(
+            parse_list_layers(list, "com.pkg"),
+            vec![("com.pkg/com.pkg.MainActivity#0".to_string(), "com.pkg/com.pkg.MainActivity#0".to_string())]
+        );
     }
 
     #[test]
     fn test_parse_list_layers_android16_requested_layer_state() {
         // SS4（Android 16）真机 --list 形态：RequestedLayerState{<hex> <name> parentId=… […]}
+        // 查询名保留 `<hex> ` 别名前缀（A16 SF 的 --latency 只认该形态）；
+        // 壳内无 hex 的行查询名退化为干净名
         let list = "RequestedLayerState{92cc982 SurfaceView[com.pkg/com.pkg.Main](BLAST)#367 parentId=366}\n\
                     RequestedLayerState{710a43c SurfaceView[com.other/Act](BLAST)#276 parentId=275}\n\
                     RequestedLayerState{com.pkg/com.pkg.Main#362}\n\
@@ -290,9 +318,15 @@ mod tests {
         assert_eq!(
             parse_list_layers(list, "com.pkg"),
             vec![
-                "SurfaceView[com.pkg/com.pkg.Main](BLAST)#367".to_string(),
-                "com.pkg/com.pkg.Main#362".to_string(),
-                "Bounds for - com.pkg/com.pkg.Main#365".to_string(),
+                (
+                    "SurfaceView[com.pkg/com.pkg.Main](BLAST)#367".to_string(),
+                    "92cc982 SurfaceView[com.pkg/com.pkg.Main](BLAST)#367".to_string()
+                ),
+                ("com.pkg/com.pkg.Main#362".to_string(), "com.pkg/com.pkg.Main#362".to_string()),
+                (
+                    "Bounds for - com.pkg/com.pkg.Main#365".to_string(),
+                    "9ff Bounds for - com.pkg/com.pkg.Main#365".to_string()
+                ),
             ]
         );
     }
