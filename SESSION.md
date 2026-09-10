@@ -7,6 +7,28 @@
 
 ---
 
+## 2026-09-10(3) — SS4 adb 自动桥接实施 S1-S6（WORKSPACE H，`feature/ss4-adb-bridge`）
+
+**任务**：按 `docs/DESIGN-ss4-adb.md` §9 实施 bridge 模块（S1-S5）+ 真机回归（S6）。
+
+**commit**：5018c11（S1 bridge.rs 核心）→ 03aa440（S2 utils 集成）→ e184ddc（S3+S4 root 链路与自愈）→ fa5cc6f（S5 GUI 过滤）→ f957d8c（review 修复：acquire_root 补 Ss4 兜底 + bootstrap 每轮重读规则防多网关端口撞车）。文档收尾（CLAUDE.md 桥接段/WORKSPACE/SESSION）随合并提交。
+
+**实现要点**（详见 CLAUDE.md「SS4 adb 自动桥接」）：
+- `bridge.rs`：refresh（forward --list 恢复映射/已知网关 connect 每轮都试/候选 bootstrap 60s 冷却/≤2 轮有界重枚举）+ reconnect（按规则存在性重建+connect）+ 纯函数 parse_forward_list/allocate_port/classify_device（9 单测）；serial 恒 `localhost:<port>` 字面（serial 稳定性不变量）
+- 集成点恰好四处：list_adb_devices 尾部 hook、device_online localhost 分支、try_adb_root/acquire_root Ss4 兜底（rootandroid.sh）、pick_device 过滤 is_gateway
+- GUI：`visible_devices` 统一收敛三处 payload（devices_json 内聚/list_devices/监视器 diff 前）；ensure_device_online 拒绝网关并指引；前端零改动
+
+**S6 真机回归基线**（全部 --remote hppc，SS4+SS3+SS2MAX 三机同连）：
+- 清桥接状态后 CLI 自动 bootstrap 成功：多台报错清单只列 3 台 Android（`localhost:5559 HU_Smart_space_4_0 Android 16` 自动桥接出现，MindRT 被过滤）
+- `--device localhost:5559` 采样：auto-root ①直连成功、平台 SS4/12 核/hello root、CPU 500ms 样本（gltf ~10-14%）/线程明细/流式 CSV/退出图表全通
+- **采样中 GVM reboot**：连接断开 → bridge 自愈 → 自动重连恢复；重连竞态中 root ①直连与 ②网关 rootandroid.sh 兜底**均真实触发成功**
+- 三机并行采样（SS4+SS3+SS2MAX 各一 CLI 进程）：18/21/14 样本互不干扰
+- 静态：全量测试 94 绿（core 90+7ignored/gui 8/cli 5/xrm 2 减重复计数）、clippy 0、cargo doc 0
+
+**遗留**：九项指标逐项实测 + C 类回归 + platform/ss4.rs 桩补实（WORKSPACE H 剩余项，独立会话）——ligfx 通道须改 host 侧经网关读 MindRT logcat（S0/R8）；ligfx Frequency 恒 1000 单位存疑；hello maxkhz 全 0 待查。GUI 桥接路径为命令级验证（未跑 GUI 进程目验 tab 行为，payload 过滤由 devices_json 单点收敛）。
+
+---
+
 ## 2026-09-10(2) — SS4 S0 真机预验证（WORKSPACE H，无代码）
 
 **任务**：按 `docs/DESIGN-ss4-adb.md` §8 清单在 hppc 上手工 adb 预验证 R1-R5/R7/R8，结论回填设计文档。
