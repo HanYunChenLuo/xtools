@@ -2,7 +2,7 @@
 
 > 本文件记录跨会话的待办事项（backlog）。每次会话的历史总结见 `SESSION.md`。
 > 完成一项就把状态改为 ✅ 并注明完成的 commit；新增想法随时追加。
-> 最后更新：2026-09-10（H：**SS4 adb 自动桥接已合入** + 排查链闭环（A16 图层发现修复 1f74a73 / gltf RemoteServer 崩溃根因 / frametimeline-only FPS 出路实测 / force-stop 清场工具化 c5d2cc2）+ **指标适配交接稿 `docs/DESIGN-ss4-metrics.md` 定稿（任务 A-E，数据源全勘察勿重复）**；新会话按该文档实施 H 剩余项）
+> 最后更新：2026-09-10（晚）：**H 节 SS4 指标适配完成**（任务 A-E：frametimeline FPS host 通道 7a3e9fb / ligfx GPU host 通道 9004f96 / simpleperf cpu-clock + 千分位解析 b8754bf；九项指标矩阵 + C 类全回归，详见 SESSION 当日条目）
 
 ## 当前状态速览
 
@@ -11,14 +11,15 @@
 - **多设备 adb（两级）**：全局 `TARGET_SERIAL`（CLI）+ **会话级 `serial: Option<&str>` 参数**（core 各入口：spawn_agent/deploy/trace/simpleperf/coldstart/detect_platform，`adb_for`/`run_adb_command_for` 注入）；**GUI 每设备一 tab 并行**（详见 CLAUDE.md「多设备 adb」）
 - **GUI 多设备改版**：顶栏设备 tab（热插拔动态增删、断开灰显保留数据插回自动恢复）+ 每设备独立页（侧栏 + 性能指标/Perfetto/Simpleperf 三子 tab）+ `DeviceSession` 类（事件按 payload.serial 分发）+ **「应用操作」**（打开/重启应用，activity 留空自动 resolve-activity，`am start -W` 顺带测冷启动进「冷启动」面板，系统重定向警示）
 - **平台抽象**：`xperf-core/src/platform/` trait + adb devices -l 自动检测（SS2MAX/SS2PRO/SS3/SS4/Android）；agent 加 `--platform`/`--qnx-host` 参数
-- **GPU 五通道**（detect_gpu_path_ex 按平台选路）：kgsl sysfs（Android/SS2）/ QNX telnet（SS3，真 busy%/util%/频率+每进程）/ topgpu（SS2MAX）/ ligfxprofilerd logcat（SS4）/ dumpsys gpu 显存保底；全部补采 dumpsys gpu 显存
+- **GPU 五通道**（detect_gpu_path_ex 按平台选路）：kgsl sysfs（Android/SS2）/ QNX telnet（SS3，真 busy%/util%/频率+每进程）/ topgpu（SS2MAX）/ ligfxprofilerd logcat（SS4，GVM 无输出永不命中——实际走 host 侧通道）/ dumpsys gpu 显存保底；全部补采 dumpsys gpu 显存
+- **SS4 host 侧指标通道**（hostchan.rs，协议 v4）：FPS=frametimeline-only perfetto 5s 窗循环（display 合成流口径，layer=`(display)`）、GPU busy=经桥接网关读 MindRT logcat ligfxprofilerd；合成 AgentEvent 经 mpsc 汇入 AgentStream（extra_rx），CLI/GUI 零改动；SS4 平台限制：GVM 无 cpufreq/thermal（VM 隔离）、PMU 未虚拟化（simpleperf 自动 cpu-clock）
 - **C 类验证能力**：阈值告警（--threshold，静止界面不误报）+ 退出验证报告 + 冷启动（--cold-start / GUI 打开/重启应用，模块 core/coldstart.rs）+ **simpleperf 函数热点**（--stack N：调用栈录制 + 线程/self/children 三视图报告，CLI 独立/并行两模式 + GUI 独立 tab）+ **基线对比**（--save-baseline/--compare-baseline：两次运行 diff 回归判定，CLI/GUI 共用，详见 CLAUDE.md「基线对比模式」）
 - 落盘：数据根 `/tmp/xperf`（CLI 流式 CSV + 退出图表；GUI 完整历史 + CSV 导出，共用同根；GUI 深挖目录 `<pkg>/<ts>-<serial>/` 防双设备撞名）；清理走 CLI `--clean-cache` / GUI 按钮（~/.cache/xperf + /tmp/xperf，2bd6bca）
 - GUI：9 张折线图 + 实时数值面板 + Top 线程 + 峰值 + 冷启动面板 + 间隔档位下拉 + 实际周期标注 + 勾选即时生效（自动重启会话）+ Perfetto 分析（独立 tab 报告 + 浏览器自动加载 + 每秒录制进度）+ **函数热点**（独立 tab + 每秒录制进度 + 浏览器火焰图）+ 暗/亮双主题
 - agent 部署：自动尝试 adb root（**仅车机平台**，XPERF_NO_AUTO_ROOT=1 旁路；hello 带 root 标志，非 root 按能力降级——WORKSPACE G 节矩阵）；src 树内任一 .rs mtime 变化自动重建
 - 测试：**全量全绿**（core 81+7 ignored（4 条 hppc 集成：隧道×2/init+acquire_root）：协议/transport/trace/simpleperf/baseline/coldstart/设备 diff/auto-root 守卫；xperformance 5：alerts；GUI 6：export_csv×2 + 基线×2 + 多会话隔离 + 远程配置；xrm 2），clippy 零警告，**cargo doc 零 warning**（默认 lint 集 + missing_docs 三 crate）
 - **SSH 远程后端（feature/ssh-remote 已合 main）**：`--remote hppc` 经 SSH 隧道连远端 adb server（hop#1 承载 adb 协议 + hop#2 每设备一条承载 agent 流），采样/trace/simpleperf/断连重连/GUI 连接切换全通；详见 CLAUDE.md「SSH 远程后端」与 `docs/DESIGN-ssh-remote.md`
-- 设备：SS3 6eb792dfb0f（adbd root，QNX GPU 通道 + 多设备并行已真机回归）；SS2MAX d1f39648c1f（adb root 可用；**多设备并行 + 冷启动 COLD 874ms 已真机验证**）
+- 设备：SS3 6eb792dfb0f（adbd root，QNX GPU 通道 + 多设备并行已真机回归）；SS2MAX d1f39648c1f（adb root 可用；**多设备并行 + 冷启动 COLD 874ms 已真机验证**）；SS4 经 hppc 桥接为 localhost:5559（MindRT `42087266b1f` 中继；桥接/指标双适配完成，H 节）
 - **测试对象（555ffab 起统一）**：`example/apk/filament-gltf-viewer-v1.76.0-android.apk`（git-lfs 管理，包名 `com.google.android.filament.gltf`，入口 `.MainActivity`）——真机测试一律用它，不再用 svm。已装 SS3 + SS2MAX
 
 ---
@@ -48,11 +49,12 @@
 
 ## E. 已知遗留（评估过，低风险不阻塞）
 
-- **SS4 FPS 无数据源（2026-09-10 确证，平台限制）**：SS4（A16，QCM SDE 定制 SF 构建）`dumpsys SurfaceFlinger --latency` 对**全部图层**只返回刷新率行（无一帧时间戳）——全 BLAST 层实测皆空；getprop 全表无 debug.sf frame 相关可恢复开关；MindRT 侧也无帧源（无 DRM 卡、weston 只服务 MindRT 自身 UI、ligfxprofilerd 是 5s 聚合 GPU 负载采样无帧率字段）。**出路已实测：frametimeline-only perfetto 近似无损**——`android.surfaceflinger.frametimeline` 单数据源（注意不是 `android.surface.frametimeline`，写错被静默忽略）10s 仅 94.5KB（~9.5KB/s，vs 全配置 4.6MB/s），595 上屏帧 ~59.5fps + per-layer `TX - <层名>` 行；FrameTimelineManager 常驻开销≈0。agent 行为：图层发现正常（A16 包装格式 1f74a73 已修），但每轮缓冲恒空 → 不发事件（不伪造 0）。**工程化方案（H 节 FPS 项）**：host 侧短窗循环录 frametimeline-only trace + trace_processor 增量解析；**与全配置 --trace 并发无冲突已实测**（2026-09-10：frametimeline-only 后台 15s 与全配置 --trace 10 同窗口并发，A 916 帧/B 609 帧双双完整——traced 原生多会话，每会话独立 buffer，FPS 会话不用 atrace 无全局类目覆盖问题）。**归因粒度实测局限（2026-09-10 A/B 对照）**：per-layer `TX - <层名>` 行只覆盖非 BLAST 系统窗（StatusBar/extra_window/HUD 等），**BLAST 层（SurfaceView 直渲应用，含 gltf）帧被折叠进 layer_name=NULL 的 display 级合成流**（vsync 合并：gltf 动画时 359/6s≈60fps，杀掉后 122/6s≈20fps 系统底噪）——**单动画源场景 NULL 流 ≈ 被测应用 FPS**（系统低频动画做基线扣除），真 per-layer 归因此构建无源（与 --latency 同被阉割）；ligfx 每进程 GPU busy（5s 窗，interval 可调小）作渲染活跃度旁证。**另注意 gltf 反复崩溃是 RemoteServer 8082 端口冲突**（Application Error，filament-utils 调试服务器；测试 APK 宜重建去掉 RemoteServer，或测前确认 8082-8084 空闲）
+- ~~SS4 FPS 无数据源~~（**已解决**，2026-09-10 H 节任务 A，7a3e9fb）：QCM SDE 构建 `--latency` 全图层恒空（平台阉割）→ host 侧 frametimeline-only perfetto 通道（hostchan.rs：5s 窗循环录/拉/解析 → NULL display 合成流汇总 fps/jank，layer=`(display)`，pidof 归因，应用不在时不发事件）。**口径**：display 合成流 ≈ 被测应用 FPS（单动画源场景），含系统底噪（静止非 0）；per-layer 归因被构建阉割（BLAST 帧折叠进 NULL 流）。agent 侧 `--fps` 在 SS4 短路（协议 v4）。frametimeline 与全配置 --trace 并发无冲突（traced 原生多会话）；gltf 崩溃=RemoteServer 8082 端口冲突（测前 --force-stop 清场）
 - SS2MAX GPU 显存无数据源（2026-09-07 root 下全路径确证：dumpsys gpu 无 Memory snapshot 段 + /sys/kernel/debug 未编译进内核 + /proc/kgsl 不存在，平台限制）
 - SS3 kgsl 统计链（见 D-2/CLAUDE.md）：三层清理已落地（agent 退出钩子 + setsid + host 条件兜底，**均带 pgrep 多会话并发保护**），SIGINT/Ctrl-C/正常退出路径真机验证停链成功、下一会话零自愈即起流；残余风险仅 agent 被 SIGKILL 暴杀（无钩子机会）与 reboot 后首会话（开机 5000ms 链在流，走一次看门狗自愈 ~8s）
 - ~~SS2MAX gpubusy 计数器恒 `0 0` / busy% 可 >100%~~（**已修**，commit 见 SESSION 2026-09-07：根因是 SS2MAX 厂商内核的 gpubusy 为**窗口语义**——读数是上一 ~1s 窗口的 busy/total µs，total 恒 ≈1e6 非累计；按累计差值解析出 1662%。`GpuBusyCalc` 三判据自动锁定窗口语义直读 busy/total；真机对照内核 `gpu_busy_percentage` 均值 75.5 vs 74.7 一致。原"恒 0 0"即 GPU 空闲时的窗口读数，非停走）
-- SS4 ligfx Frequency 单位待真机核实（Hz vs MHz）
+- ~~SS4 ligfx Frequency 单位待真机核实~~（**已核销**，2026-09-10 任务 B）：恒 `1000 Hz` 空闲/负载不变，GPU VFIO 直通两侧无 kgsl/devfreq 节点可对照——按「定频占位/单位标注存疑」处理，事件原样透传 mhz=1000，业务侧只看 Utilization。`persist.vendor.ligfxprofiler.sampling_interval_ms` 实测动态读取，但调小（1000）会致 ligfxprofilerd 停输出（恢复 5000 即好）——勿调
+- **SS4 GVM 无 cpufreq/thermal（2026-09-10 确证，VM 平台限制）**：`/sys/devices/system/cpu/cpu0/cpufreq/` 不存在（hello maxkhz 全 0 即此因，root 下同），`--freq` 探测禁用；`/sys/class/thermal/` 空 + thermalservice HAL Ready=false（连 SS3 的 test HAL 假数据都无），`--thermal` 探测禁用。PMU 未虚拟化（simpleperf cpu-cycles 8s 仅 6 样本 → core 自动改 cpu-clock，b8754bf）
 - **QNX proc 链泄漏（2026-09-07 发现，未修）**：三层清理只写 `gpubusystats`（frame 链），`gpu_per_process_busy` 进程链无停止手段（实测死写入者 toggle/写 0/log_level 0 均无效）——每 --gpu 会话泄漏一条，多日累积 ~20 条锁步洪泛，疑似挤占致 frame 链无法启动（两轮会话 0 frame 事件）。恢复 = `adb reboot`（整 SoC 复位含 QNX）。待找到正确停链命令后补进 agent 退出钩子与 host qnx_stop_stats
 - ~~孤儿 adb exec-out 泄漏~~（**已根治**，daemon 化 commit 见 SESSION 2026-09-07 晚条目：agent 常驻 daemon + host 经 forward/TCP 连接，host 死亡 → TCP 断开 → 会话即收，不再产生孤儿流；daemon 0 会话 60s 自杀。早前过渡方案 e692d4e 的 cleanup_orphan_agents/stdin EOF 监测已被 daemon 化取代并移除）
 - ~~多设备连接时所有 adb 命令不带 -s 会失败~~（**46bd161 已修**：全局 `-s` 注入 + CLI `--device` + GUI 设备下拉，SS3+手机双连真机回归；原候补转正，详见 CLAUDE.md「多设备 adb」）。GUI 多台未指定 `--device` 的自动启动跳过路径为逻辑验证 + 单测覆盖（验证时手机恰断开未双机复现，行为由 pick_device 单测锁定）
@@ -93,10 +95,10 @@
 
 ---
 
-## H. SS4 平台适配（桥接已完成，指标回归待实施）
+## H. SS4 平台适配（已完成）
 
 - [x] **SS4 adb 自动桥接**（2026-09-10，`feature/ss4-adb-bridge`）：S0 预验证（hppc 手工 adb，结论回填 `docs/DESIGN-ss4-adb.md` v1.2）→ S1 `bridge.rs` 核心 → S2 utils 集成（list hook + pick_device 过滤）→ S3/S4 root 链路与自愈 → S5 GUI 过滤 → S6 真机回归。commit 链：738fcba（S0 文档）→ 5018c11（S1）→ 03aa440（S2）→ e184ddc（S3+S4）→ fa5cc6f（S5）→ f957d8c（review 修复×2）。**真机回归全通**（--remote hppc）：清桥接状态后 CLI 自动 bootstrap（forward+connect 全自动，多台报错清单只列 3 台 Android 不含 MindRT）、`--device localhost:5559` 采样（auto-root ①直连成功、平台识别 SS4/12 核/hello root、CPU 样本/线程明细/CSV/退出图表全通）、**采样中 GVM reboot 自动重连恢复**（①② 双 root 路径在重连竞态中真实触发）、SS3+SS2MAX+SS4 三机并行采样不互扰。详见 CLAUDE.md「SS4 adb 自动桥接」
-- [ ] **SS4 指标适配**（交接新会话，**实施依据 `docs/DESIGN-ss4-metrics.md`**——全部数据源已真机勘察完毕勿重复）：任务 A FPS frametimeline-only perfetto 流式化（SS4 专属兜底，配置/归因粒度/并发无冲突均已实测）→ 任务 B GPU ligfx host 侧通道（经网关读 MindRT logcat，行格式/解析复用/interval 属性/Frequency 单位核实）→ 任务 C 九项指标逐项实测矩阵（root/非 root 两态；hello maxkhz 全 0 待查）→ 任务 D C 类回归（trace✅/冷启动✅310ms/simpleperf 待测/基线）→ 任务 E 文档收尾（ss4.rs 桩补实/CLAUDE.md SS4 特性段/E 节核销/SESSION 基线）。**环境坑**：gltf 反复崩溃=RemoteServer 8082 端口冲突，测前 `--force-stop` 清场（c5d2cc2 已工具化）；建议重建 APK 去 RemoteServer
+- [x] **SS4 指标适配**（2026-09-10 晚，`feature/ss4-metrics`，实施依据 `docs/DESIGN-ss4-metrics.md`）：任务 A FPS frametimeline-only perfetto host 通道（7a3e9fb：hostchan.rs 5s 窗循环 → NULL display 合成流汇总 fps/jank 汇入 AgentStream；agent --fps 在 SS4 短路、协议 v4；真机 59.8fps 稳态/杀进程停发/重启恢复/GVM reboot 重连恢复全通）→ 任务 B GPU ligfx host 侧通道（9004f96：经网关 logcat 流读，Sys→Gpu/进程行→GpuProc comm 归因；真机 busy 33.8%/进程 11% 归因正确；Frequency 恒 1000 核销、sampling_interval 调小致停输出现已记录）→ 任务 C 九项矩阵 root/非 root 两态实测（freq/thermal 为 GVM VM 隔离平台限制，探测禁用符合预期；hello maxkhz 全 0 根因=GVM 无 cpufreq sysfs）→ 任务 D C 类回归（trace✅/冷启动 246ms✅/simpleperf：PMU 未虚拟化致 cpu-cycles 无效 → 自动 cpu-clock + 千分位样本数解析修复 b8754bf，3908 样本/9s/基线保存-对比全链路持平 9 项）→ 任务 E 文档收尾（ss4.rs 桩补实/CLAUDE.md「SS4 host 侧指标通道」节/E 节核销）→ 独立 review 修复（7e0a748：2 严重 4 一般全修，含 ligfx 独占登记重连竞态宽限接管、EOF 热重连退避、阻塞读看门狗；真机 GVM reboot 重连场景复测通过）
 
 ---
 

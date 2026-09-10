@@ -463,7 +463,9 @@ fn build_sql(package: &str) -> String {
     q
 }
 
-fn run_trace_processor(tp: &Path, trace: &Path, sql_path: &Path) -> Result<(String, String)> {
+/// 以 `-q sql_path trace` 执行 trace_processor，返回 (stdout, stderr)。
+/// pub(crate)：hostchan 的 frametimeline 窗口解析复用。
+pub(crate) fn run_trace_processor(tp: &Path, trace: &Path, sql_path: &Path) -> Result<(String, String)> {
     let out = Command::new(tp)
         .arg("-q")
         .arg(sql_path)
@@ -526,7 +528,8 @@ fn parse_sections(stdout: &str) -> HashMap<String, Vec<Vec<String>>> {
 }
 
 /// 简单 CSV 行解析（处理双引号包裹与引号转义）
-fn parse_csv_line(line: &str) -> Vec<String> {
+/// pub(crate)：hostchan 的 frametimeline 窗口结果解析复用。
+pub(crate) fn parse_csv_line(line: &str) -> Vec<String> {
     let mut fields = Vec::new();
     let mut cur = String::new();
     let mut in_quotes = false;

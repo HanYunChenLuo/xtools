@@ -12,7 +12,8 @@
 //! （cpu-cycles 事件默认 4000Hz + dwarf 调用栈；`--app` 覆盖该应用全部进程并容忍进程
 //! 重启）→ 设备端 `simpleperf report` 生成三视图（报告须在 pull 前跑，`.data` 还在设备
 //! 上）→ adb pull 落盘 `log/<pkg>/<会话时间戳>/stack/`（`.data` 保留，可推回设备换参数
-//! 复跑 report）。
+//! 复跑 report）。SS4（Android GVM）硬件 PMU 未虚拟化，cpu-cycles 近乎无样本，
+//! 自动改用软件事件 cpu-clock（详见 [`record`](crate::simpleperf::record)）。
 //!
 //! 实测基线与坑（SS3，simpleperf 1.build.47，adbd root，2026-09-04）：
 //! - svm 空闲态 8s 录得 8773 样本 / 0 丢失 / 3.3MB（实际样本率 ≈1100/s，随 CPU 活动浮动）
@@ -48,6 +49,9 @@ pub struct RecordedStack {
     pub samples: u64,
     /// 丢失样本数（record 输出解析）
     pub samples_lost: u64,
+    /// 实际使用的 perf 事件（默认 cpu-cycles；SS4 GVM 硬件 PMU 未虚拟化，
+    /// cpu-cycles 8s 仅 ~6 样本（2026-09-10 实测），自动改用软件事件 cpu-clock）
+    pub event: String,
 }
 
 /// 校验包名字符集（`[A-Za-z0-9._-]`，与 CLI `validate_package_name` / GUI 校验一致）。
@@ -64,32 +68,21 @@ fn validate_package(package: &str) -> Result<()> {
 }
 
 /// 解析 record 输出中的样本统计（`Samples recorded: 8773. Samples lost: 0.`，
-/// simpleperf 日志行内嵌）。未匹配返回 `(0, 0)`。
+/// simpleperf 日志行内嵌；新版带千分位逗号 `4,016`）。未匹配返回 `(0, 0)`。
 fn parse_sample_stats(output: &str) -> (u64, u64) {
-    let recorded = output
-        .find("Samples recorded:")
-        .and_then(|i| {
-            output[i + "Samples recorded:".len()..]
-                .trim_start()
-                .chars()
-                .take_while(|c| c.is_ascii_digit())
-                .collect::<String>()
-                .parse()
-                .ok()
-        })
-        .unwrap_or(0);
-    let lost = output
-        .find("Samples lost:")
-        .and_then(|i| {
-            output[i + "Samples lost:".len()..]
-                .trim_start()
-                .chars()
-                .take_while(|c| c.is_ascii_digit())
-                .collect::<String>()
-                .parse()
-                .ok()
-        })
-        .unwrap_or(0);
+    // 新版 simpleperf 的样本计数带千分位逗号（实测 SS4: "Samples recorded: 4,016"），
+    // 先剥离逗号再解析
+    fn parse_count(output: &str, key: &str) -> Option<u64> {
+        let i = output.find(key)?;
+        let raw: String = output[i + key.len()..]
+            .trim_start()
+            .chars()
+            .take_while(|c| c.is_ascii_digit() || *c == ',')
+            .collect();
+        raw.replace(',', "").parse().ok()
+    }
+    let recorded = parse_count(output, "Samples recorded:").unwrap_or(0);
+    let lost = parse_count(output, "Samples lost:").unwrap_or(0);
     (recorded, lost)
 }
 
@@ -143,12 +136,31 @@ pub fn record(
     }
 
     let wall_start = Local::now();
+    // SS4（Android GVM）硬件 PMU 未虚拟化：默认 cpu-cycles 事件近乎无样本
+    // （8s 仅 6 个，2026-09-10 实测），软件事件 cpu-clock 正常（~500 样本/s）。
+    // 其余平台保持默认（不传 -e，行为零变化）。
+    let event = match crate::platform::detect_platform_live(serial).id() {
+        crate::platform::PlatformId::Ss4 => "cpu-clock",
+        _ => "cpu-cycles",
+    };
+    let mut rec_args: Vec<String> =
+        ["shell", "simpleperf", "record", "--app", package, "-g"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+    if event != "cpu-cycles" {
+        rec_args.extend(["-e".to_string(), event.to_string()]);
+    }
+    rec_args.extend([
+        "--duration".to_string(),
+        seconds.to_string(),
+        "-o".to_string(),
+        dev_path.clone(),
+        "2>&1".to_string(),
+    ]);
     // stderr 合并进 stdout（设备端 2>&1）：simpleperf 的样本统计与报错都走日志行
     let mut child = crate::utils::adb_for(serial)
-        .args([
-            "shell", "simpleperf", "record", "--app", package, "-g",
-            "--duration", &seconds.to_string(), "-o", &dev_path, "2>&1",
-        ])
+        .args(&rec_args)
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
@@ -264,6 +276,7 @@ pub fn record(
         bytes,
         samples,
         samples_lost,
+        event: event.to_string(),
     })
 }
 
@@ -1041,10 +1054,11 @@ pub fn analyze_and_report(rec: &RecordedStack, package: &str) -> Result<String> 
         package
     ));
     s.push_str(&format!(
-        "录制窗口: {} ~ {}（{:.1}s，cpu-cycles 采样 + dwarf 调用栈）\n",
+        "录制窗口: {} ~ {}（{:.1}s，{} 采样 + dwarf 调用栈）\n",
         rec.wall_start.format("%H:%M:%S"),
         rec.wall_end.format("%H:%M:%S"),
-        (rec.wall_end - rec.wall_start).num_milliseconds() as f64 / 1000.0
+        (rec.wall_end - rec.wall_start).num_milliseconds() as f64 / 1000.0,
+        rec.event
     ));
     s.push_str(&format!(
         "样本: {}（丢失 {}）  数据: {}（{:.1} MB）\n\n",
@@ -1120,6 +1134,11 @@ mod tests {
         assert_eq!(
             parse_sample_stats("Samples recorded: 12. Samples lost: 34."),
             (12, 34)
+        );
+        // 新版 simpleperf 千分位逗号（SS4 实测 "Samples recorded: 4,016"）
+        assert_eq!(
+            parse_sample_stats("Samples recorded: 4,016. Samples lost: 0."),
+            (4016, 0)
         );
         // 未匹配
         assert_eq!(parse_sample_stats("no stats here"), (0, 0));
@@ -1398,6 +1417,7 @@ mod tests {
             bytes: 3325139,
             samples: 8773,
             samples_lost: 0,
+            event: "cpu-cycles".to_string(),
         };
         let text = analyze_and_report(&rec, "com.lixiang.car.x.svm").unwrap();
         assert!(text.contains("com.lixiang.car.x.svm"));

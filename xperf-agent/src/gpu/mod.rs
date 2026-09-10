@@ -63,7 +63,9 @@ pub(crate) fn detect_gpu_path_ex(platform: Option<&str>) -> Option<GpuPath> {
             }
         }
         Some("ss4") => {
-            // SS4：ligfxprofilerd logcat 优先，失败则 kgsl（可能有），再失败 dumpsys 保底
+            // SS4：GPU busy 由 host 侧 ligfx 通道提供（ligfxprofilerd 在 MindRT 侧，
+            // GVM logcat 无输出 → 本机 ligfx::available() 恒 false，仅作探测保留）。
+            // kgsl（可能有）兜底，再失败 dumpsys 显存保底
             if ligfx::available() {
                 Some(GpuPath::Ligfx)
             } else if let Some(k) = kgsl::detect_kgsl() {

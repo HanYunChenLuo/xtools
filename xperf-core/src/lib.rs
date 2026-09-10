@@ -21,6 +21,8 @@ pub mod cpu;
 pub mod csvstream;
 /// FPS 采样协议类型（时序数据结构）。
 pub mod fps;
+/// host 侧采样通道（SS4 专属兜底：frametimeline FPS / ligfx GPU，合成事件汇入 AgentStream）。
+pub mod hostchan;
 /// 时间轴打点：Unix socket 监听与打点事件。
 pub mod marker;
 /// 内存采样协议类型。
