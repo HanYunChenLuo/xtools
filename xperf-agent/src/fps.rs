@@ -90,6 +90,8 @@ fn parse_owned_buffer_layers(dump: &str, pid: u32) -> Vec<String> {
 }
 
 /// --list 解析：保留包名匹配的行，去 `<hex> ` 别名前缀，去重。
+/// Android 16 起 --list 行带 `RequestedLayerState{<hex> <name> parentId=… …}` 包装
+/// （SS4/A16 实测），须先拆壳再按旧格式取名字段，否则整行进 --latency 必无数据。
 fn parse_list_layers(list: &str, package: &str) -> Vec<String> {
     let mut layers = Vec::new();
     for line in list.lines() {
@@ -97,9 +99,26 @@ fn parse_list_layers(list: &str, package: &str) -> Vec<String> {
         if !line.contains(package) {
             continue;
         }
-        let name = match line.split_once(' ') {
+        // A16 包装拆壳：RequestedLayerState{…} → 壳内内容
+        let (wrapped, s) = match line.strip_prefix("RequestedLayerState{") {
+            Some(rest) => (true, rest),
+            None => (false, line),
+        };
+        // 去 `<hex> ` 别名前缀（旧格式与 A16 壳内均有）
+        let name = match s.split_once(' ') {
             Some((head, rest)) if !head.is_empty() && head.chars().all(|c| c.is_ascii_hexdigit()) => rest.trim(),
-            _ => line,
+            _ => s,
+        };
+        // A16 壳内名字段后接 parentId=/relativeParentId=/z= 元数据与结尾 `}` → 截断
+        let name = if wrapped {
+            let end = [" parentId=", " relativeParentId=", " z=", "}"]
+                .iter()
+                .filter_map(|m| name.find(m))
+                .min()
+                .unwrap_or(name.len());
+            name[..end].trim_end()
+        } else {
+            name
         };
         if !layers.contains(&name.to_string()) {
             layers.push(name.to_string());
@@ -259,5 +278,22 @@ mod tests {
     fn test_parse_list_layers_strips_hex_alias() {
         let list = "147955a com.pkg/com.pkg.MainActivity#0\ncom.pkg/com.pkg.MainActivity#0\ncom.other/Main#0\n";
         assert_eq!(parse_list_layers(list, "com.pkg"), vec!["com.pkg/com.pkg.MainActivity#0".to_string()]);
+    }
+
+    #[test]
+    fn test_parse_list_layers_android16_requested_layer_state() {
+        // SS4（Android 16）真机 --list 形态：RequestedLayerState{<hex> <name> parentId=… […]}
+        let list = "RequestedLayerState{92cc982 SurfaceView[com.pkg/com.pkg.Main](BLAST)#367 parentId=366}\n\
+                    RequestedLayerState{710a43c SurfaceView[com.other/Act](BLAST)#276 parentId=275}\n\
+                    RequestedLayerState{com.pkg/com.pkg.Main#362}\n\
+                    RequestedLayerState{9ff Bounds for - com.pkg/com.pkg.Main#365 parentId=362 z=-2}\n";
+        assert_eq!(
+            parse_list_layers(list, "com.pkg"),
+            vec![
+                "SurfaceView[com.pkg/com.pkg.Main](BLAST)#367".to_string(),
+                "com.pkg/com.pkg.Main#362".to_string(),
+                "Bounds for - com.pkg/com.pkg.Main#365".to_string(),
+            ]
+        );
     }
 }
