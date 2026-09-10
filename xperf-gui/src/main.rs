@@ -413,18 +413,33 @@ fn validate_package(package: &str) -> Result<(), String> {
     }
 }
 
+/// SS4 网关（MindRT）过滤：Linux 主控不是 Android 采样目标，不进任何设备
+/// payload（`list_devices`/`devices_json`/热插拔监视器三处统一经此收敛——
+/// 前端永远看不到网关，网关插拔也不产生 devices-changed 噪声）
+fn visible_devices(devices: Vec<xperf_core::AdbDevice>) -> Vec<xperf_core::AdbDevice> {
+    devices.into_iter().filter(|d| !d.is_gateway).collect()
+}
+
 /// 设备在线性校验（命令入口用）：serial 须在当前在线列表中，
-/// 不在线返回带设备清单的错误（前端展示给用户）。
+/// 不在线返回带设备清单的错误（前端展示给用户）。SS4 网关（MindRT）拒绝采样，
+/// 错误信息指引其桥接出的 Android 伪设备。
 fn ensure_device_online(serial: &str) -> Result<(), String> {
     let devices = xperf_core::list_adb_devices().map_err(|e| e.to_string())?;
-    if devices.iter().any(|d| d.serial == serial) {
-        Ok(())
-    } else {
-        Err(format!(
+    match devices.iter().find(|d| d.serial == serial) {
+        Some(d) if d.is_gateway => {
+            let android = xperf_core::bridge::gateway_android_serial(serial)
+                .unwrap_or_else(|| "localhost:5559".to_string());
+            Err(format!(
+                "{} 是 SS4 MindRT 网关（Linux 主控，非采样目标），请选择 {}（Android）",
+                serial, android
+            ))
+        }
+        Some(_) => Ok(()),
+        None => Err(format!(
             "设备 {} 不在线（当前在线：{}）",
             serial,
             if devices.is_empty() { "无".to_string() } else { devices.iter().map(|d| d.serial.as_str()).collect::<Vec<_>>().join(", ") }
-        ))
+        )),
     }
 }
 
@@ -849,12 +864,7 @@ async fn acquire_root(serial: String) -> Result<String, String> {
 #[tauri::command]
 fn list_devices() -> Result<serde_json::Value, String> {
     let devices = xperf_core::list_adb_devices().map_err(|e| e.to_string())?;
-    Ok(serde_json::json!({
-        "devices": devices
-            .into_iter()
-            .map(|d| serde_json::json!({ "serial": d.serial, "model": d.model, "version": d.android_version }))
-            .collect::<Vec<_>>(),
-    }))
+    Ok(devices_json(devices))
 }
 
 // ---------- SSH 远程后端（连接切换；设计 docs/DESIGN-ssh-remote.md §6.2） ----------
@@ -886,10 +896,11 @@ fn load_remotes() -> Vec<RemoteConfig> {
         .unwrap_or_default()
 }
 
-/// 设备列表转 JSON（list_devices / connect_remote 共用）
+/// 设备列表转 JSON（list_devices / connect_remote / devices-changed 共用；
+/// 网关经 visible_devices 过滤，前端永远看不到 MindRT）
 fn devices_json(devices: Vec<xperf_core::AdbDevice>) -> serde_json::Value {
     serde_json::json!({
-        "devices": devices
+        "devices": visible_devices(devices)
             .into_iter()
             .map(|d| serde_json::json!({ "serial": d.serial, "model": d.model, "version": d.android_version }))
             .collect::<Vec<_>>(),
@@ -1055,7 +1066,9 @@ fn spawn_device_monitor(app: tauri::AppHandle) {
                 );
             }
             let devices = match xperf_core::list_adb_devices() {
-                Ok(d) => d,
+                // diff 之前过滤网关（设计 §4.4）：网关插拔不产生 devices-changed
+                // 噪声、不进 added/removed，前端不会为 MindRT 建 tab
+                Ok(d) => visible_devices(d),
                 Err(_) => continue, // adb 暂不可用，下轮重试
             };
             let (added, removed) = xperf_core::diff_devices(&last, &devices);
@@ -1069,16 +1082,10 @@ fn spawn_device_monitor(app: tauri::AppHandle) {
                 added.join(","),
                 removed.join(",")
             );
-            let _ = app.emit(
-                "devices-changed",
-                serde_json::json!({
-                    "devices": devices.iter().map(|d| serde_json::json!({
-                        "serial": d.serial, "model": d.model, "version": d.android_version,
-                    })).collect::<Vec<_>>(),
-                    "added": added,
-                    "removed": removed,
-                }),
-            );
+            let mut payload = devices_json(devices.clone());
+            payload["added"] = serde_json::json!(added);
+            payload["removed"] = serde_json::json!(removed);
+            let _ = app.emit("devices-changed", payload);
             last = devices;
         }
     });
