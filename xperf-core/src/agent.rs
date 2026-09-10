@@ -598,8 +598,9 @@ pub fn spawn_agent(
             }
         });
     }
-    // SS4 host 侧通道（frametimeline FPS 等）：合成事件经 extra_rx 汇入本流
-    let extra_rx = crate::hostchan::maybe_spawn(flags, platform, package, serial);
+    // SS4 host 侧通道（frametimeline FPS / ligfx GPU）：合成事件经 extra_rx 汇入
+    // 本流；ping_stop 兼作通道线程的会话停止标志（kill/drop 时置位）
+    let extra_rx = crate::hostchan::maybe_spawn(flags, platform, package, serial, ping_stop.clone());
     Ok(AgentStream { writer, reader, ping_stop, extra_rx })
 }
 

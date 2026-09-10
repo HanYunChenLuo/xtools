@@ -25,10 +25,12 @@
 use crate::agent::AgentEvent;
 use crate::platform::PlatformId;
 use anyhow::{Context, Result, bail};
-use std::io::Write as _;
+use std::collections::HashMap;
+use std::io::{BufRead, BufReader, Write as _};
 use std::path::Path;
 use std::process::Stdio;
 use std::sync::mpsc;
+use std::sync::{Arc, Mutex, atomic::AtomicBool, atomic::Ordering};
 use std::time::{Duration, Instant};
 
 /// 合成事件的发送端类型（Ok = 合成事件；Err 保留给行解析失败语义，本模块只用 Ok）
@@ -47,11 +49,15 @@ const MAX_CONSECUTIVE_FAILURES: u32 = 3;
 ///
 /// 非 SS4 平台 / 未开 fps|gpu / 无包名时返回 None（无通道）。`serial` 为 None 时
 /// 走 adb 全局目标（CLI 单设备路径，与 agent 其余调用一致）。
+/// `stop`：会话停止标志（AgentStream 的 ping_stop，kill/drop 时置位）——通道线程
+/// 在窗口边界/重连点检查，保证会话结束后线程有界退出（发送失败检查只覆盖有事件
+/// 可发的路径，设备离线期间无事件可发，须靠该标志）。
 pub fn maybe_spawn(
     flags: crate::agent::MetricFlags,
     platform: Option<&dyn crate::platform::Platform>,
     package: Option<&str>,
     serial: Option<&str>,
+    stop: Arc<AtomicBool>,
 ) -> Option<HostRx> {
     if platform?.id() != PlatformId::Ss4 {
         return None;
@@ -63,9 +69,11 @@ pub fn maybe_spawn(
     let serial = serial.map(str::to_string);
     let (tx, rx) = mpsc::channel();
     if flags.fps {
-        spawn_frametimeline(pkg.clone(), serial.clone(), tx.clone());
+        spawn_frametimeline(pkg.clone(), serial.clone(), tx.clone(), stop.clone());
     }
-    // flags.gpu 的 ligfx host 通道：任务 B（DESIGN-ss4-metrics.md）实施
+    if flags.gpu {
+        spawn_ligfx(pkg, serial, tx, stop);
+    }
     Some(rx)
 }
 
@@ -91,7 +99,7 @@ const FRAMETIMELINE_SQL: &str =
     "select ts, dur from actual_frame_timeline_slice where layer_name is null order by ts;\n";
 
 /// 启动 frametimeline FPS 线程（5s 窗循环：录 → pull → trace_processor 解析 → 发事件）
-fn spawn_frametimeline(pkg: String, serial: Option<String>, tx: HostTx) {
+fn spawn_frametimeline(pkg: String, serial: Option<String>, tx: HostTx, stop: Arc<AtomicBool>) {
     std::thread::spawn(move || {
         let tp = match crate::trace::ensure_trace_processor() {
             Ok(p) => p,
@@ -105,6 +113,9 @@ fn spawn_frametimeline(pkg: String, serial: Option<String>, tx: HostTx) {
         let mut watermark: i64 = 0;
         let mut fails = 0u32;
         loop {
+            if stop.load(Ordering::Relaxed) {
+                return; // 会话结束（AgentStream kill/drop）
+            }
             match record_and_parse_window(&tp, serial.as_deref(), FPS_WINDOW_SECS) {
                 Ok(frames) => {
                     fails = 0;
@@ -279,6 +290,206 @@ fn now_ms() -> u64 {
     chrono::Local::now().timestamp_millis() as u64
 }
 
+// ==================== ligfx GPU 通道（经桥接网关读 MindRT logcat） ====================
+
+/// ligfx 通道的进程内独占登记（按 Android serial）。logcat 是只读通道，跨进程无
+/// QNX 统计链式的写冲突；进程内独占防止多会话在同一 MindRT 上重复起 logcat 读流。
+static LIGFX_BUSY: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+/// ligfx logcat 断流后的重连间隔
+const LIGFX_RECONNECT_SECS: u64 = 2;
+
+/// ligfx 行解析结果（归一自系统行/进程行；移植自 xperf-agent gpu/ligfx.rs，
+/// 真机行格式见模块测试）
+enum LigfxEvent {
+    /// 系统行：`[GPU0] Frame N: Frequency: F Hz, ..., Busy=B%, Queued=Q%, Utilization=U%`
+    Sys {
+        /// Global Busy %
+        busy: f32,
+        /// Global Utilization %（业务侧关注字段，平台文档口径）
+        util: f32,
+        /// Frequency 原始值（单位标称 Hz 但恒 1000，疑似定频占位/单位标注错误）
+        mhz: u32,
+    },
+    /// 进程行：`[GPU0]   GVM_<comm 15字符截断>-<会话id>: Busy=B%, ...`
+    Proc {
+        /// 进程 comm（≤15 字符，GVM_ 前缀与 -会话id 后缀已剥离）
+        name: String,
+        /// 该进程 Busy %
+        busy: f32,
+    },
+}
+
+/// 解析 ligfxprofilerd logcat 行（移植自 agent `gpu/ligfx.rs::parse_line`，语义一致：
+/// 无 ligfxprofilerd 标签 / 关键字段缺失的行丢弃；业务侧只看 Busy/Utilization）
+fn parse_ligfx_line(line: &str) -> Option<LigfxEvent> {
+    if !line.contains("ligfxprofilerd") {
+        return None;
+    }
+    if line.contains("Frame ") && line.contains("Frequency:") {
+        let mhz = line.split("Frequency:").nth(1)?.split_whitespace().next()?.parse::<u32>().ok()?;
+        let busy = parse_pct_after(line, "Busy=")?;
+        let util = parse_pct_after(line, "Utilization=")?;
+        return Some(LigfxEvent::Sys { busy, util, mhz });
+    }
+    if line.contains("GVM_") {
+        let gvm_pos = line.find("GVM_")?;
+        let after = &line[gvm_pos + 4..];
+        let name_end = after.find(':').unwrap_or(after.len());
+        let name = after[..name_end].split('-').next()?.trim().to_string();
+        let busy = parse_pct_after(line, "Busy=")?;
+        let _ = parse_pct_after(line, "Utilization=")?; // 字段缺失的行整体丢弃
+        return Some(LigfxEvent::Proc { name, busy });
+    }
+    None
+}
+
+/// 从 "key=12.34%" 格式中提取 f32
+fn parse_pct_after(line: &str, key: &str) -> Option<f32> {
+    let pos = line.find(key)? + key.len();
+    line[pos..].split('%').next()?.trim().parse().ok()
+}
+
+/// ligfx 进程行 comm → Android pid 映射（只覆盖被测包进程；重建时机：首行/
+/// 查找未命中且距上次重建 >5s/每 60s 定期——进程重启 pid 变化须跟进）
+struct CommMap {
+    map: HashMap<String, u32>,
+    last_refresh: Instant,
+}
+
+impl CommMap {
+    fn new() -> Self {
+        Self { map: HashMap::new(), last_refresh: Instant::now() - Duration::from_secs(3600) }
+    }
+
+    /// 查 name（comm 15 字符截断语义，与 agent lookup_pid 一致）；未命中时
+    /// 按需重建一次再查
+    fn lookup(&mut self, serial: Option<&str>, pkg: &str, name: &str) -> Option<u32> {
+        if self.last_refresh.elapsed() > Duration::from_secs(60) {
+            self.refresh(serial, pkg);
+        }
+        if let Some(pid) = self.get(name) {
+            return Some(pid);
+        }
+        if self.last_refresh.elapsed() > Duration::from_secs(5) {
+            self.refresh(serial, pkg);
+            return self.get(name);
+        }
+        None
+    }
+
+    fn get(&self, name: &str) -> Option<u32> {
+        self.map.get(name).copied().or_else(|| {
+            let truncated: String = name.chars().take(15).collect();
+            self.map.get(&truncated).copied()
+        })
+    }
+
+    /// 重建映射：`pidof <pkg>` → 逐 pid 读 `/proc/<pid>/comm`（内核已截断 15 字符）
+    fn refresh(&mut self, serial: Option<&str>, pkg: &str) {
+        self.last_refresh = Instant::now();
+        let Ok(out) = crate::utils::run_adb_command_for(serial, &["shell", "pidof", pkg]) else {
+            return;
+        };
+        let mut m = HashMap::new();
+        for pid in out.stdout.split_whitespace() {
+            let Ok(comm) =
+                crate::utils::run_adb_command_for(serial, &["shell", "cat", &format!("/proc/{pid}/comm")])
+            else {
+                continue;
+            };
+            if let Ok(pid) = pid.parse::<u32>() {
+                m.insert(comm.stdout.trim().to_string(), pid);
+            }
+        }
+        self.map = m;
+    }
+}
+
+/// 启动 ligfx GPU 线程：经桥接网关在 MindRT 上跑 `logcat -s ligfxprofilerd`，
+/// 系统行 → Gpu 事件，进程行 → GpuProc 事件（comm 归因到被测包 pid）。
+/// 流断（MindRT 重启/桥接重建）后按 [`LIGFX_RECONNECT_SECS`] 间隔重连。
+fn spawn_ligfx(pkg: String, serial: Option<String>, tx: HostTx, stop: Arc<AtomicBool>) {
+    // 生效 serial（None 走全局目标）；bridged SS4 的 Android serial 恒为 localhost:<port>
+    let Some(android_serial) = crate::utils::resolve_serial(serial.as_deref()) else {
+        let _ = tx.send(Ok(AgentEvent::Err { msg: "SS4 GPU（ligfx）：无目标设备 serial，通道未启动".into() }));
+        return;
+    };
+    let Some(gateway) = crate::bridge::gateway_for_android(&android_serial) else {
+        let _ = tx.send(Ok(AgentEvent::Err {
+            msg: format!("SS4 GPU（ligfx）：{android_serial} 无桥接网关信息（bridge 未收敛？），通道未启动"),
+        }));
+        return;
+    };
+    // 进程内独占（后到会话 err 禁用）
+    {
+        let mut g = LIGFX_BUSY.lock().unwrap();
+        if g.contains(&android_serial) {
+            let _ = tx.send(Ok(AgentEvent::Err {
+                msg: "SS4 GPU（ligfx）：通道被本进程另一会话占用，本会话 GPU busy 禁用（显存不受影响）".into(),
+            }));
+            return;
+        }
+        g.push(android_serial.clone());
+    }
+    std::thread::spawn(move || {
+        let mut comms = CommMap::new();
+        while !stop.load(Ordering::Relaxed) {
+            // -T 0：不回放 logcat 历史缓冲（旧块会以当前时刻批量入账，污染时序）
+            let child = crate::utils::adb_for(Some(&gateway))
+                .args(["shell", "logcat", "-T", "0", "-s", "ligfxprofilerd"])
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .spawn();
+            let mut child = match child {
+                Ok(c) => c,
+                Err(e) => {
+                    if tx.send(Ok(AgentEvent::Err { msg: format!("SS4 GPU（ligfx）：logcat 启动失败: {e}") })).is_err() {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_secs(LIGFX_RECONNECT_SECS));
+                    continue;
+                }
+            };
+            let Some(stdout) = child.stdout.take() else {
+                std::thread::sleep(Duration::from_secs(LIGFX_RECONNECT_SECS));
+                continue;
+            };
+            let mut stream_dead = false;
+            for line in BufReader::new(stdout).lines() {
+                if stop.load(Ordering::Relaxed) {
+                    break;
+                }
+                let Ok(line) = line else {
+                    stream_dead = true;
+                    break;
+                };
+                let Some(ev) = parse_ligfx_line(&line) else { continue };
+                let ts = now_ms();
+                let out = match ev {
+                    LigfxEvent::Sys { busy, util, mhz } => AgentEvent::Gpu { ts, busy, util, mhz, maxmhz: 0 },
+                    LigfxEvent::Proc { name, busy } => {
+                        let Some(pid) = comms.lookup(Some(&android_serial), &pkg, &name) else {
+                            continue; // 非被测包进程（或进程已退出）：不归因
+                        };
+                        AgentEvent::GpuProc { ts, pid, busy }
+                    }
+                };
+                if tx.send(Ok(out)).is_err() {
+                    stream_dead = true;
+                    break;
+                }
+            }
+            let _ = child.kill();
+            if stream_dead && !stop.load(Ordering::Relaxed) {
+                std::thread::sleep(Duration::from_secs(LIGFX_RECONNECT_SECS));
+            }
+        }
+        // 释放进程内独占
+        LIGFX_BUSY.lock().unwrap().retain(|s| s != &android_serial);
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -351,5 +562,32 @@ mod tests {
     fn test_sanitize_serial() {
         assert_eq!(sanitize("localhost:5559"), "localhost_5559");
         assert_eq!(sanitize("6eb792dfb0f"), "6eb792dfb0f");
+    }
+
+    #[test]
+    fn test_parse_ligfx_line() {
+        // 真机样例（DESIGN-ss4-metrics.md 任务 B；logcat 默认格式带标签头）
+        let sys = "09-10 14:00:00.656 21047 I ligfxprofilerd: [GPU0] Frame 149556: Frequency: 1000 Hz, Tasks: 3 total, GSL Timestamp: 748015951, Global: Busy=29.28%, Queued=20.24%, Utilization=29.28%";
+        match parse_ligfx_line(sys) {
+            Some(LigfxEvent::Sys { busy, util, mhz }) => {
+                assert!((busy - 29.28).abs() < 0.01);
+                assert!((util - 29.28).abs() < 0.01);
+                assert_eq!(mhz, 1000);
+            }
+            _ => panic!("应为 Sys"),
+        }
+        let proc_ = "09-10 14:00:00.656 21047 I ligfxprofilerd: [GPU0]   GVM_d.filament.gltf-1572152: Busy=8.39%, Queued=5.98%, Utilization=8.39%";
+        match parse_ligfx_line(proc_) {
+            Some(LigfxEvent::Proc { name, busy }) => {
+                assert_eq!(name, "d.filament.gltf"); // comm 15 字符截断 + 会话 id 剥离
+                assert!((busy - 8.39).abs() < 0.01);
+            }
+            _ => panic!("应为 Proc"),
+        }
+        // 无标签 / 非 ligfx 行 / 关键字段缺失 → 丢弃
+        assert!(parse_ligfx_line("random logcat line").is_none());
+        assert!(parse_ligfx_line("[GPU0] Frame 1: Frequency: 1000 Hz").is_none()); // 无 ligfxprofilerd 标签
+        let no_util = "x ligfxprofilerd: [GPU0]   GVM_abc-1: Busy=1.0%";
+        assert!(parse_ligfx_line(no_util).is_none());
     }
 }
