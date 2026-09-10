@@ -135,7 +135,7 @@ fps_sample_round(pid)                    ← agent 内每 PID 每 FPS 轮一次�
 - 缓冲 127 帧 ≈ 2.1s@60fps：采样间隔大于该值时老帧被挤出，计数为下界（interval ≤ 1s 精确）
 - **jank 不按 vsync 阈值**（30fps 相机流在 60Hz 屏上帧间隔 33ms 会被误判全卡）：用间隔 > 2×窗口中位间隔，<3 帧不计；FPS 窗口限频 ≥500ms 后帧数足够，jank 统计有效
 - 静止界面 FPS=0 如实上报（事件照常发，GUI 折线落底）
-- **SS4 例外**：QCM SDE 构建 `--latency` 全图层恒空（平台阉割）——agent 侧 `--fps` 在 `--platform ss4` 下短路（协议 v4 起，发一次 err 说明），实际 FPS 由 host 侧 frametimeline perfetto 通道合成（display 合成流口径，静止时含系统底噪非 0），见「SS4 host 侧指标通道」
+- **Android 16（SS4）的图层名要求**：`--list` 行带 `RequestedLayerState{<hex> <name> parentId=…}` 包装，且该构建的 `--latency` **只认 `<hex> <name>` 别名形态**（带前缀 65 行真数据 vs 干净名 1 行刷新周期，2026-09-10 经 getfps 逆向 + A/B 直测锁定）——agent fps.rs 的查询名双轨（A16 保留前缀/旧平台干净名），曾误判"平台阉割"并绕道 host frametimeline 通道（v4，已废弃删除，v5 恢复设备端路径）
 
 `--fps` 流式写入 `/tmp/xperf/<pkg>/<ts>/fps/<pkg>_fps_data_pid<pid>.csv`（Timestamp,FPS,Jank,Layer）。GUI 有 FPS 勾选框 + 折线图（自适应纵轴，多图层逐层一条线，图层短名作图例）。
 
@@ -189,7 +189,7 @@ Platform trait + `adb devices -l` product 字段自动检测（HU_SS3/HU_SS2MAXF
 
 **SS2MAX 特性**：温度走 sysfs thermal zones 兜底（thermalservice sensors 列表为空但 HAL 有数据，条件须 `!sensors.is_empty()`）；IO 需 root（车机平台 auto-root 覆盖；非 root 时 /proc/<pid>/io 拒读发 err 禁用）；GPU 显存无数据源（dumpsys gpu 无 Memory snapshot 段，/sys/kernel/debug 未编译进内核，/proc/kgsl 不存在——2026-09-07 root 下确证）；**gpubusy 是窗口语义**（读数为上一 ~1s 窗口的 busy/total µs，total 恒 ≈1e6，非累计计数器；按累计差值解析曾出 1662% 荒谬值）——`GpuBusyCalc` 自动判别累计/窗口双语义（幅值/回退/>100% 三判据锁定），窗口语义直读 busy/total、与 `gpu_busy_percentage` 节点同刻值互证一致；gpubusy 节点 shell 可读（非 root 亦可采 GPU busy%）。
 
-**SS4 特性**：MindRT+GVM 双系统（桥接见「SS4 adb 自动桥接」）；FPS/GPU busy 走 host 侧通道、GVM 无 cpufreq/thermal、simpleperf 自动 cpu-clock——见「SS4 host 侧指标通道」节与 `platform/ss4.rs` 模块文档。
+**SS4 特性**：MindRT+GVM 双系统（桥接见「SS4 adb 自动桥接」）；GPU busy 走 host 侧 ligfx 通道、FPS 设备端 per-layer（A16 图层名带 `<hex> ` 前缀，协议 v5）、GVM 无 cpufreq/thermal、simpleperf 自动 cpu-clock——见「SS4 host 侧指标通道」节与 `platform/ss4.rs` 模块文档。
 
 ---
 
@@ -238,15 +238,15 @@ SS4（SA8797P）是 **MindRT（Linux PVM，USB 可见）+ Android（GVM，USB �
 - **GUI**：`visible_devices` 统一过滤三处 payload（devices_json 内聚/list_devices/connect_remote/监视器 diff 前）——前端永远看不到 MindRT tab；`ensure_device_online` 拒绝网关 serial 并指引 `localhost:<port>`；前端零改动（serial 冒号在 dataset/id 安全）
 - **SSH 远程零改动**：forward/connect/devices 全是 adb server 侧语义，经 hop#1 天然到达 hppc server；`-s localhost:5559` 路由与 hop#2 映射按 serial 过滤正常
 - **S0+S6 真机验证**：免 root 桥接、GVM 重启 serial 不消失（offline ~24s 自动回 device，零干预自愈）、采样中 GVM reboot 自动重连恢复、root 双路径（①直连 ②网关兜底均在重连竞态中真实触发）、SS3+SS2MAX+SS4 三机并行采样不互扰
-- **ligfx/FPS 兜底（S0/R8 推翻，已实施）**：ligfxprofilerd 在 **MindRT 侧**（GVM logcat 无输出）——agent `gpu/ligfx.rs` 在 SS4 永不命中（仅探测保留）；SS4 的 GPU busy 与 FPS 均由 **host 侧通道**（`xperf-core/src/hostchan.rs`）合成事件汇入 AgentStream：GPU=经网关读 MindRT logcat（~5s/帧块，`GVM_<comm>` 按 comm 归因，Frequency 恒 1000 单位存疑），FPS=frametimeline-only perfetto 短窗循环（归因粒度=display 级 NULL 流，layer 标 `(display)`）。详见下文「SS4 host 侧指标通道」与 **`docs/DESIGN-ss4-metrics.md`**
+- **ligfx 兜底（S0/R8 推翻，已实施）**：ligfxprofilerd 在 **MindRT 侧**（GVM logcat 无输出）——agent `gpu/ligfx.rs` 在 SS4 永不命中（仅探测保留）；SS4 的 GPU busy 由 **host 侧通道**（`xperf-core/src/hostchan.rs`）合成事件汇入 AgentStream：经网关读 MindRT logcat（~5s/帧块，`GVM_<comm>` 按 comm 归因，Frequency 恒 1000 单位存疑）。详见下文「SS4 host 侧指标通道」与 **`docs/DESIGN-ss4-metrics.md`**（FPS 部分已被 agent v5 设备端路径取代，见 FPS 采样流程节）
 
-### SS4 host 侧指标通道（`xperf-core/src/hostchan.rs`，任务 A/B，2026-09-10）
+### SS4 host 侧指标通道（`xperf-core/src/hostchan.rs`，2026-09-10）
 
-**为什么**：SS4 两类指标的设备端数据源失效（FPS：QCM SDE 构建 `--latency` 全图层恒空；GPU busy：ligfxprofilerd 在 MindRT 侧 GVM 不可达）。host 侧线程合成 `AgentEvent` 经 mpsc 汇入 `AgentStream.extra_rx`（`next_event`/`next_event_batch` 统一取出，agent 心跳空行保证投递延迟 ≤ 一个采样间隔），**CLI/GUI 消费端零改动**；通道由 `spawn_agent` 按 `platform==Ss4 && flags.fps|gpu` 启动，生命周期随流（析构 → 发送失败/`ping_stop` 置位退出），断连重连由 `reconnect_agent → spawn_agent` 重启通道。
+**为什么**：SS4 的 GPU busy 数据源在设备端不可达——ligfxprofilerd 在 MindRT 侧输出 logcat，GVM 内无任何输出。host 侧线程合成 `AgentEvent` 经 mpsc 汇入 `AgentStream.extra_rx`（`next_event`/`next_event_batch` 统一取出，agent 心跳空行保证投递延迟 ≤ 一个采样间隔），**CLI/GUI 消费端零改动**；通道由 `spawn_agent` 按 `platform==Ss4 && flags.gpu` 启动，生命周期随流（析构 → 发送失败/`ping_stop` 置位退出），断连重连由 `reconnect_agent → spawn_agent` 重启。
 
-- **FPS（frametimeline 通道）**：5s 窗循环「perfetto `-c -` stdin 喂 frametimeline-only 配置（~9.5KB/s，与全配置 --trace 并发无冲突）→ pull → trace_processor 单 SQL 取 `actual_frame_timeline_slice where layer_name is null` → 水位去重汇总 fps/jank（口径同 agent：间隔 > 2×窗口中位）」。**归因粒度**：BLAST 层帧折叠进 `layer_name IS NULL` 的 display 级合成流（per-layer `TX -` 行只覆盖系统窗）⇒ 事件语义 = display 合成 FPS ≈ 被测应用 FPS（单动画源场景，含系统底噪静止时非 0），pid 取 `pidof` 首进程、应用不在时不发事件，layer 固定 `(display)`。agent 侧 `--fps` 在 SS4 短路不发事件（协议 v4）。
-- **GPU（ligfx 通道）**：`bridge::gateway_for_android` 拿 MindRT 网关 serial → `adb -s <网关> shell logcat -T 0 -s ligfxprofilerd` 流式读（`-T 0` 不回放历史缓冲防旧块污染时序）→ Sys 行 → `Gpu{busy,util,mhz}`（maxmhz=0 未知）/ `GVM_<comm>-<id>` 进程行 → `GpuProc`（`pidof` + `/proc/<pid>/comm` 15 字符截断归因，miss/60s 定期重建映射）。断流 2s 重连；进程内按 serial 独占（logcat 只读无 QNX 式写冲突，防同进程多会话重复起流）。显存保底（dumpsys gpu）仍由 agent 侧补采，两通道并存。
+- **GPU（ligfx 通道）**：`bridge::gateway_for_android` 拿 MindRT 网关 serial → `adb -s <网关> shell logcat -T 0 -s ligfxprofilerd` 流式读（`-T 0` 不回放历史缓冲防旧块污染时序）→ Sys 行 → `Gpu{busy,util,mhz}`（maxmhz=0 未知）/ `GVM_<comm>-<id>` 进程行 → `GpuProc`（`pidof` + `/proc/<pid>/comm` 15 字符截断归因，miss/60s 定期重建映射）。断流 2s 重连（网关 serial 每次重解析，零行速败计连续失败达上限退出）；进程内按 serial 独占（活会话判定 + 重连竞态 500ms×20 宽限接管；logcat 只读无 QNX 式写冲突）。显存保底（dumpsys gpu）仍由 agent 侧补采，两通道并存。
 - **GVM 平台限制（已确证）**：无 cpufreq sysfs（`cpu0/cpufreq` 不存在 → hello maxkhz 全 0、`--freq` 探测禁用）、无 thermal（无 zones 且 thermalservice HAL Ready=false → `--thermal` 探测禁用）、PMU 未虚拟化（simpleperf cpu-cycles 8s 仅 6 样本 → core 自动改用 cpu-clock）。ligfx `sampling_interval_ms` 属性动态读取但调小（1000）会致 ligfxprofilerd 停输出——勿调。
+- **FPS 曾走 host 侧（v4，已废弃删除）**：当时误判 SS4 `--latency` 被平台阉割，hostchan 曾有 frametimeline-only perfetto 5s 窗通道（display 合成流口径）；2026-09-10 用户指点 `getfps -w` 可用，逆向发现其底层即 `--latency` 且要求 `<hex> <name>` 图层全名——agent v5 修复查询名后设备端 per-layer 路径恢复（见 FPS 采样流程节），host FPS 通道删除。
 
 
 ### SSH 远程后端（`--remote`，xperf-core/src/transport.rs，CLI 与 GUI 共用）

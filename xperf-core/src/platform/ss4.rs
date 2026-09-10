@@ -11,8 +11,9 @@
 //!   `persist.vendor.ligfxprofiler.sampling_interval_ms` 实测为动态读取，但
 //!   调小到 1000 会让 ligfxprofilerd 停止输出（恢复 5000 后恢复），勿调。
 //! - **GPU 显存**：`dumpsys gpu` Memory snapshot 可用（agent 保底通道生效）。
-//! - **FPS**：QCM SDE 定制 SF 构建 `--latency` 全图层恒空；host 侧
-//!   frametimeline-only perfetto 短窗通道兜底（hostchan，display 合成流口径）。
+//! - **FPS**：设备端 per-layer 路径（与其他平台同构）。A16 的 `--latency` 只认
+//!   `--list` 原始行的 `<hex> <name>` 别名形态（2026-09-10 经 getfps 逆向 + A/B
+//!   直测锁定，曾误判平台阉割绕道 host frametimeline，v5 修复后回归设备端）。
 //! - **CPU 频率/温度**：GVM 无 cpufreq sysfs（`cpu0/cpufreq` 不存在）、无
 //!   thermal zones 且 thermalservice HAL Ready=false——VM 隔离的平台限制，
 //!   agent 探测后如实 err 禁用（hello maxkhz 全 0 即此原因）。
