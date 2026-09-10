@@ -224,6 +224,7 @@ pub enum AgentEvent {
 }
 
 /// 与 agent 的协议版本：与 xperf-agent 的 PROTOCOL_VERSION 同步 bump（改 wire 协议/命令时）。
+/// host 连接时校验 hello 的 version，不一致则通知 suicide + 强杀重推。
 /// v3：hello 增加 `root` 字段。
 /// v4：agent 侧 SS4 --fps 短路（当时误判 SF --latency 被平台阉割）。
 /// v5：SS4 --latency 修复（A16 SF 要求图层名带 `<hex> ` 别名前缀，agent fps.rs

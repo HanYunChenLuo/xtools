@@ -233,8 +233,8 @@ fn ligfx_unregister(serial: &str, stop: &Arc<AtomicBool>) {
 ///
 /// 断流（MindRT 重启/桥接重建/adb 离线退出）后按 [`LIGFX_RECONNECT_SECS`] 间隔
 /// 重连，网关 serial 每次尝试重新解析（桥接重建后可能变化）；连续速败达
-/// [`MAX_CONSECUTIVE_FAILURES`] 次报错退出（与 frametimeline 通道同口径，
-/// 断连恢复由 reconnect_agent → spawn_agent 重启通道）。
+/// [`MAX_CONSECUTIVE_FAILURES`] 次报错退出（断连恢复由 reconnect_agent →
+/// spawn_agent 重启通道）。
 fn spawn_ligfx(pkg: String, serial: Option<String>, tx: HostTx, stop: Arc<AtomicBool>) {
     // 生效 serial（None 走全局目标）；bridged SS4 的 Android serial 恒为 localhost:<port>
     let Some(android_serial) = crate::utils::resolve_serial(serial.as_deref()) else {

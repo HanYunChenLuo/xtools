@@ -2,7 +2,7 @@
 
 > 本文件记录跨会话的待办事项（backlog）。每次会话的历史总结见 `SESSION.md`。
 > 完成一项就把状态改为 ✅ 并注明完成的 commit；新增想法随时追加。
-> 最后更新：2026-09-10（晚）：**H 节 SS4 指标适配完成**（任务 A-E：frametimeline FPS host 通道 7a3e9fb / ligfx GPU host 通道 9004f96 / simpleperf cpu-clock + 千分位解析 b8754bf；九项指标矩阵 + C 类全回归，详见 SESSION 当日条目）
+> 最后更新：2026-09-10（深夜）：**SS4 FPS 根因反转并回归设备端路径**（agent v5 / 7683720：A16 `--latency` 图层名须带 `<hex> ` 前缀——getfps 逆向揭示，v4"平台阉割"误判撤销，host frametimeline 通道删除；另发现多宿主协议版本战坑，见 E 节）。H 节指标适配（任务 A-E）当日早些时候完成，详见 SESSION 当日条目
 
 ## 当前状态速览
 
@@ -17,10 +17,10 @@
 - 落盘：数据根 `/tmp/xperf`（CLI 流式 CSV + 退出图表；GUI 完整历史 + CSV 导出，共用同根；GUI 深挖目录 `<pkg>/<ts>-<serial>/` 防双设备撞名）；清理走 CLI `--clean-cache` / GUI 按钮（~/.cache/xperf + /tmp/xperf，2bd6bca）
 - GUI：9 张折线图 + 实时数值面板 + Top 线程 + 峰值 + 冷启动面板 + 间隔档位下拉 + 实际周期标注 + 勾选即时生效（自动重启会话）+ Perfetto 分析（独立 tab 报告 + 浏览器自动加载 + 每秒录制进度）+ **函数热点**（独立 tab + 每秒录制进度 + 浏览器火焰图）+ 暗/亮双主题
 - agent 部署：自动尝试 adb root（**仅车机平台**，XPERF_NO_AUTO_ROOT=1 旁路；hello 带 root 标志，非 root 按能力降级——WORKSPACE G 节矩阵）；src 树内任一 .rs mtime 变化自动重建
-- 测试：**全量全绿**（core 81+7 ignored（4 条 hppc 集成：隧道×2/init+acquire_root）：协议/transport/trace/simpleperf/baseline/coldstart/设备 diff/auto-root 守卫；xperformance 5：alerts；GUI 6：export_csv×2 + 基线×2 + 多会话隔离 + 远程配置；xrm 2），clippy 零警告，**cargo doc 零 warning**（默认 lint 集 + missing_docs 三 crate）
+- 测试：**全量全绿**（core 94+7 ignored（含 4 条 hppc 集成：隧道×2/init+acquire_root）：协议/流合并/hostchan（ligfx 解析+registry）/transport/trace/simpleperf/baseline/coldstart/设备 diff/auto-root 守卫；xperformance 5：alerts；GUI 8：export_csv×2 + 基线×2 + 多会话隔离 + 远程配置等；xrm 2），clippy 零警告，**cargo doc 零 warning**（默认 lint 集 + missing_docs 三 crate）
 - **SSH 远程后端（feature/ssh-remote 已合 main）**：`--remote hppc` 经 SSH 隧道连远端 adb server（hop#1 承载 adb 协议 + hop#2 每设备一条承载 agent 流），采样/trace/simpleperf/断连重连/GUI 连接切换全通；详见 CLAUDE.md「SSH 远程后端」与 `docs/DESIGN-ssh-remote.md`
 - 设备：SS3 6eb792dfb0f（adbd root，QNX GPU 通道 + 多设备并行已真机回归）；SS2MAX d1f39648c1f（adb root 可用；**多设备并行 + 冷启动 COLD 874ms 已真机验证**）；SS4 经 hppc 桥接为 localhost:5559（MindRT `42087266b1f` 中继；桥接/指标双适配完成，H 节）
-- **测试对象（555ffab 起统一）**：`example/apk/filament-gltf-viewer-v1.76.0-android.apk`（git-lfs 管理，包名 `com.google.android.filament.gltf`，入口 `.MainActivity`）——真机测试一律用它，不再用 svm。已装 SS3 + SS2MAX
+- **测试对象（555ffab 起统一）**：`example/apk/filament-gltf-viewer-v1.76.0-android.apk`（git-lfs 管理，包名 `com.google.android.filament.gltf`，入口 `.MainActivity`）——真机测试一律用它，不再用 svm。已装 SS3 + SS2MAX + SS4
 
 ---
 
@@ -100,7 +100,7 @@
 ## H. SS4 平台适配（已完成）
 
 - [x] **SS4 adb 自动桥接**（2026-09-10，`feature/ss4-adb-bridge`）：S0 预验证（hppc 手工 adb，结论回填 `docs/DESIGN-ss4-adb.md` v1.2）→ S1 `bridge.rs` 核心 → S2 utils 集成（list hook + pick_device 过滤）→ S3/S4 root 链路与自愈 → S5 GUI 过滤 → S6 真机回归。commit 链：738fcba（S0 文档）→ 5018c11（S1）→ 03aa440（S2）→ e184ddc（S3+S4）→ fa5cc6f（S5）→ f957d8c（review 修复×2）。**真机回归全通**（--remote hppc）：清桥接状态后 CLI 自动 bootstrap（forward+connect 全自动，多台报错清单只列 3 台 Android 不含 MindRT）、`--device localhost:5559` 采样（auto-root ①直连成功、平台识别 SS4/12 核/hello root、CPU 样本/线程明细/CSV/退出图表全通）、**采样中 GVM reboot 自动重连恢复**（①② 双 root 路径在重连竞态中真实触发）、SS3+SS2MAX+SS4 三机并行采样不互扰。详见 CLAUDE.md「SS4 adb 自动桥接」
-- [x] **SS4 指标适配**（2026-09-10 晚，`feature/ss4-metrics`，实施依据 `docs/DESIGN-ss4-metrics.md`）：任务 A FPS frametimeline-only perfetto host 通道（7a3e9fb：hostchan.rs 5s 窗循环 → NULL display 合成流汇总 fps/jank 汇入 AgentStream；agent --fps 在 SS4 短路、协议 v4；真机 59.8fps 稳态/杀进程停发/重启恢复/GVM reboot 重连恢复全通）→ 任务 B GPU ligfx host 侧通道（9004f96：经网关 logcat 流读，Sys→Gpu/进程行→GpuProc comm 归因；真机 busy 33.8%/进程 11% 归因正确；Frequency 恒 1000 核销、sampling_interval 调小致停输出现已记录）→ 任务 C 九项矩阵 root/非 root 两态实测（freq/thermal 为 GVM VM 隔离平台限制，探测禁用符合预期；hello maxkhz 全 0 根因=GVM 无 cpufreq sysfs）→ 任务 D C 类回归（trace✅/冷启动 246ms✅/simpleperf：PMU 未虚拟化致 cpu-cycles 无效 → 自动 cpu-clock + 千分位样本数解析修复 b8754bf，3908 样本/9s/基线保存-对比全链路持平 9 项）→ 任务 E 文档收尾（ss4.rs 桩补实/CLAUDE.md「SS4 host 侧指标通道」节/E 节核销）→ 独立 review 修复（7e0a748：2 严重 4 一般全修，含 ligfx 独占登记重连竞态宽限接管、EOF 热重连退避、阻塞读看门狗；真机 GVM reboot 重连场景复测通过）
+- [x] **SS4 指标适配**（2026-09-10 晚，`feature/ss4-metrics`，实施依据 `docs/DESIGN-ss4-metrics.md`）：任务 A FPS frametimeline-only perfetto host 通道（7a3e9fb：hostchan.rs 5s 窗循环 → NULL display 合成流汇总 fps/jank 汇入 AgentStream；agent --fps 在 SS4 短路、协议 v4；真机 59.8fps 稳态/杀进程停发/重启恢复/GVM reboot 重连恢复全通）→ 任务 B GPU ligfx host 侧通道（9004f96：经网关 logcat 流读，Sys→Gpu/进程行→GpuProc comm 归因；真机 busy 33.8%/进程 11% 归因正确；Frequency 恒 1000 核销、sampling_interval 调小致停输出现已记录）→ 任务 C 九项矩阵 root/非 root 两态实测（freq/thermal 为 GVM VM 隔离平台限制，探测禁用符合预期；hello maxkhz 全 0 根因=GVM 无 cpufreq sysfs）→ 任务 D C 类回归（trace✅/冷启动 246ms✅/simpleperf：PMU 未虚拟化致 cpu-cycles 无效 → 自动 cpu-clock + 千分位样本数解析修复 b8754bf，3908 样本/9s/基线保存-对比全链路持平 9 项）→ 任务 E 文档收尾（ss4.rs 桩补实/CLAUDE.md「SS4 host 侧指标通道」节/E 节核销）→ 独立 review 修复（7e0a748：2 严重 4 一般全修，含 ligfx 独占登记重连竞态宽限接管、EOF 热重连退避、阻塞读看门狗；真机 GVM reboot 重连场景复测通过）→ **深夜根因反转（7683720/agent v5）：任务 A 的 frametimeline 通道系误判产物已删除**——A16 `--latency` 实为图层名格式要求（`<hex> ` 前缀），FPS 回归设备端 per-layer 路径，终态见 E 节 FPS 条目
 
 ---
 
