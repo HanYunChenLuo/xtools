@@ -226,7 +226,8 @@ pub enum AgentEvent {
 /// 与 agent 的协议版本：与 xperf-agent 的 PROTOCOL_VERSION 同步 bump（改 wire 协议/命令时）。
 /// host 连接时校验 hello 的 version，不一致则通知 suicide + 强杀重推。
 /// v3：hello 增加 `root` 字段。
-pub const AGENT_PROTOCOL_VERSION: u32 = 3;
+/// v4：agent 侧 SS4 --fps 短路（FPS 由 host 侧 frametimeline 通道合成，见 hostchan）。
+pub const AGENT_PROTOCOL_VERSION: u32 = 4;
 
 /// daemon 的抽象 socket 名（设备端 `localabstract:xperf-agent`）
 const AGENT_ABSTRACT_SOCK: &str = "xperf-agent";
@@ -241,24 +242,49 @@ pub struct AgentStream {
     writer: std::sync::Arc<std::sync::Mutex<std::net::TcpStream>>,
     reader: BufReader<std::net::TcpStream>,
     ping_stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// host 侧合成事件通道（SS4 frametimeline FPS 等，见 [`crate::hostchan`]）。
+    /// 与设备端事件统一经 next_event/next_event_batch 取出，消费端零改动；
+    /// 发送端线程随本流析构（receiver Drop → 发送失败退出）。
+    extra_rx: Option<crate::hostchan::HostRx>,
 }
 
 impl AgentStream {
+    /// 非阻塞取一条 host 侧合成事件；通道断开（发送线程退出）则摘除返回 None。
+    fn take_extra(&mut self) -> Option<std::result::Result<AgentEvent, String>> {
+        let rx = self.extra_rx.as_ref()?;
+        match rx.try_recv() {
+            Ok(ev) => Some(ev),
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.extra_rx = None;
+                None
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => None,
+        }
+    }
+
     /// 阻塞读取下一行事件；流结束（会话断开/daemon 退出）返回 Ok(None)。
     /// 解析失败的行跳过（返回 Some(Err) 由调用方决定）。
+    ///
+    /// host 侧合成事件在每趟读行前检查；设备端静默时 agent 每轮发心跳空行
+    /// （整轮零输出探活），故合成事件的投递延迟至多一个采样间隔。
     pub fn next_event(&mut self) -> Result<Option<std::result::Result<AgentEvent, String>>> {
-        let mut line = String::new();
-        let n = self.reader.read_line(&mut line)?;
-        if n == 0 {
-            return Ok(None); // EOF
+        loop {
+            if let Some(ev) = self.take_extra() {
+                return Ok(Some(ev));
+            }
+            let mut line = String::new();
+            let n = self.reader.read_line(&mut line)?;
+            if n == 0 {
+                return Ok(None); // EOF
+            }
+            let line = line.trim();
+            if line.is_empty() {
+                continue; // 心跳空行：回到 loop 头先取合成事件
+            }
+            return Ok(Some(
+                serde_json::from_str(line).map_err(|e| format!("{} (行: {})", e, line)),
+            ));
         }
-        let line = line.trim();
-        if line.is_empty() {
-            return self.next_event();
-        }
-        Ok(Some(
-            serde_json::from_str(line).map_err(|e| format!("{} (行: {})", e, line)),
-        ))
     }
 
     /// 批量读取：阻塞等首条，随后抽干读缓冲里已完整的行（不阻塞、不改协议）。
@@ -284,6 +310,10 @@ impl AgentStream {
                 continue; // 心跳空行
             }
             out.push(serde_json::from_str(line).map_err(|e| format!("{} (行: {})", e, line)));
+        }
+        // 同 burst 抽干 host 侧合成事件队列
+        while let Some(ev) = self.take_extra() {
+            out.push(ev);
         }
         Ok(Some(out))
     }
@@ -568,7 +598,9 @@ pub fn spawn_agent(
             }
         });
     }
-    Ok(AgentStream { writer, reader, ping_stop })
+    // SS4 host 侧通道（frametimeline FPS 等）：合成事件经 extra_rx 汇入本流
+    let extra_rx = crate::hostchan::maybe_spawn(flags, platform, package, serial);
+    Ok(AgentStream { writer, reader, ping_stop, extra_rx })
 }
 
 /// 确保设备端 daemon 在跑且协议版本匹配，返回 **host 本机可直连**的端口。
@@ -988,6 +1020,49 @@ mod tests {
             }
             _ => panic!("应为 Fps 事件"),
         }
+    }
+
+    /// host 侧合成事件（hostchan extra_rx）与设备端 NDJSON 行的合并读取：
+    /// 合成事件优先取出；设备端只有心跳空行时也能投递；发送端退出后通道摘除，
+    /// 设备端事件与 EOF 语义不受影响。
+    #[test]
+    fn test_agent_stream_merges_host_channel() {
+        use std::io::Write as _;
+        use std::net::TcpListener;
+        // loopback 假 daemon：心跳空行 + 一条 freq 事件行，随后保持连接
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let srv = std::thread::spawn(move || {
+            let (mut s, _) = listener.accept().unwrap();
+            s.write_all(b"\n{\"t\":\"freq\",\"ts\":1,\"khz\":[42]}\n").unwrap();
+            s.flush().unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        });
+        let tcp = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(Ok(AgentEvent::Gpu { ts: 9, busy: 1.0, util: 0.0, mhz: 0, maxmhz: 0 })).unwrap();
+        let mut stream = AgentStream {
+            writer: std::sync::Arc::new(std::sync::Mutex::new(tcp.try_clone().unwrap())),
+            reader: BufReader::new(tcp),
+            ping_stop: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            extra_rx: Some(rx),
+        };
+        // 合成事件先于设备端事件取出
+        match stream.next_event().unwrap() {
+            Some(Ok(AgentEvent::Gpu { ts: 9, .. })) => {}
+            other => panic!("应为合成 Gpu 事件: {:?}", other),
+        }
+        // 设备端真实事件随后到达（心跳空行被跳过）
+        match stream.next_event().unwrap() {
+            Some(Ok(AgentEvent::Freq { khz, .. })) => assert_eq!(khz, vec![42]),
+            other => panic!("应为 Freq 事件: {:?}", other),
+        }
+        // 批量接口同口径（本例逐条到达：首条后即返回）
+        // 发送端退出 + 服务端关闭 → EOF
+        drop(tx);
+        srv.join().unwrap();
+        assert!(stream.next_event().unwrap().is_none());
+        assert!(stream.extra_rx.is_none(), "发送端退出后通道应被摘除");
     }
 
     #[test]
