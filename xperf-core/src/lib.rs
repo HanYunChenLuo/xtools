@@ -10,6 +10,9 @@
 pub mod agent;
 /// 基线对比：会话汇总统计的保存/读取与两次运行 diff 报告（性能回归验证）。
 pub mod baseline;
+/// SS4 双系统（MindRT + Android GVM）adb 自动桥接：网关识别/forward+connect
+/// 引导/断线自愈（设计 `docs/DESIGN-ss4-adb.md`）。
+pub mod bridge;
 /// 冷启动时间测量与应用操作（am start -W / resolve-activity / force-stop）。
 pub mod coldstart;
 /// CPU 采样协议类型（线程级 CPU 信息）。

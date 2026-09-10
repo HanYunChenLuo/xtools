@@ -122,6 +122,10 @@ pub struct AdbDevice {
     /// 纯解析不填，恒为空串，`list_adb_devices` 逐台补齐；取失败为 `?`）。
     /// 采集方式与 Android 版本相关（如 BLAST 合成层是 12+ 特性），供选路参考。
     pub android_version: String,
+    /// SS4 MindRT 网关（Linux 主控，非 Android 采样目标；桥接宿主）。
+    /// `parse_adb_devices` 纯解析恒为 false，由 `bridge::refresh` 落标记；
+    /// true 时 CLI `pick_device` 跳过、GUI 前端隐藏，采样命令拒绝。
+    pub is_gateway: bool,
 }
 
 /// 解析 `adb devices -l` 输出为在线设备列表（跳过 `offline`/`unauthorized` 行）。
@@ -148,6 +152,7 @@ pub fn parse_adb_devices(output: &str) -> Vec<AdbDevice> {
             product: field("product"),
             model: field("model"),
             android_version: String::new(),
+            is_gateway: false,
         });
     }
     out
@@ -307,7 +312,7 @@ mod tests {
         assert_eq!(devices.len(), 2); // offline 行跳过
         assert_eq!(
             devices[0],
-            AdbDevice { serial: "1280da60".into(), product: "dada".into(), model: "24129PN74C".into(), android_version: String::new() }
+            AdbDevice { serial: "1280da60".into(), product: "dada".into(), model: "24129PN74C".into(), android_version: String::new(), is_gateway: false }
         );
         assert_eq!(devices[1].serial, "6eb792dfb0f");
         assert_eq!(devices[1].product, "HU_SS3");
@@ -338,7 +343,7 @@ mod tests {
     // ---- 热插拔 diff ----
 
     fn dev(serial: &str) -> AdbDevice {
-        AdbDevice { serial: serial.into(), product: String::new(), model: String::new(), android_version: String::new() }
+        AdbDevice { serial: serial.into(), product: String::new(), model: String::new(), android_version: String::new(), is_gateway: false }
     }
 
     // ---- adb_command 传输注入（S3）----
