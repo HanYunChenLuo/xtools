@@ -7,6 +7,24 @@
 
 ---
 
+## 2026-09-10(7) — SS4 FPS 根因反转：A16 --latency 图层名须带 hex 前缀，设备端路径恢复（agent v5）
+
+**任务**：用户反馈编译运行后仍拿不到 gltf FPS；用户提供线索 `getfps -w "<图层全名>"` 可取 SS4 FPS。
+
+**commit**：1486463（fix/ss4-fps-hex：agent fps.rs 查询名双轨 + 撤 SS4 短路 + 删 host frametimeline 通道，协议 v5）→ 本次（文档）。
+
+**关键结论**：
+- **v4 结论反转**：SS4 `--latency` 并非平台阉割。逆向 getfps 二进制（strings 见 `--latency-clear` 调用）发现其底层即 `--latency`，且传 `--list` 原始行的 `<hex> <name>` 全名——A/B 直测：带前缀 65 行真帧数据 vs 只传干净名 1 行刷新周期。此前所有 --latency 测试都用了剥壳后的名字，故恒空。
+- **修复**：agent fps.rs `FpsLayerState` 拆 name（事件用）/query（--latency 查询用）双轨——A16 `RequestedLayerState` 包装行 query 保留 `<hex> ` 前缀，旧格式平台 query=干净名（零变化）；全量 dump 发现的层借 --list 同名行升级 query。SS4 --fps 短路撤销（v4 引入），hostchan frametimeline 通道删除（display 合成流口径全面劣于 per-layer），协议 bump v5。
+- **"拿不到 FPS"用户侧根因**：①用户的 release GUI 从 main 编译（v5 未合入时 = v4 短路版）；②**v4 GUI 与 v5 CLI 并存打协议版本战**——各自 ensure_daemon 发现场上 daemon 版本不符即 suicide+重推，互相杀死对方 daemon 无限循环（实测设备 2 daemon 进程/6 socket 堆积、会话 hello 后流冻结）。协议 bump 升级时旧宿主必须退出（已记 WORKSPACE E 节）。
+- getfps 输出口径（顺手勘察）：`count :N, max/min 帧间隔 ms`，内部 `--latency-clear` + 差值；`/system/etc/layer_mapping.cfg` 提供常用窗别名（svm/launcher/hud…）。
+
+**真机验证（--remote hppc，单宿主干净环境）**：SS4 稳态 59-61fps per-layer（#367/#429/#519/#549/#579 逐次 Surface 重建）；杀进程链路 stdout 模式 exit=1/noproc=24/新 pid 续采，daemon 模式 #549→#579 新 pid 续采；--gpu --fps 双通道共存（37 fps + ligfx busy 34.2%/进程 10.9%）；SS2MAX 回归 60fps 旧格式不变、SS3 回归 60fps。全量测试 94+8+5+2 绿，clippy/doc 零警告。
+
+**遗留**：无。
+
+---
+
 ## 2026-09-10(6) — SS4 指标适配实施（WORKSPACE H 剩余，`feature/ss4-metrics`）
 
 **任务**：按 `docs/DESIGN-ss4-metrics.md` 任务 A-E 实施 SS4 指标适配。

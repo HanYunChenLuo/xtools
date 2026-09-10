@@ -12,7 +12,7 @@
 - **GUI 多设备改版**：顶栏设备 tab（热插拔动态增删、断开灰显保留数据插回自动恢复）+ 每设备独立页（侧栏 + 性能指标/Perfetto/Simpleperf 三子 tab）+ `DeviceSession` 类（事件按 payload.serial 分发）+ **「应用操作」**（打开/重启应用，activity 留空自动 resolve-activity，`am start -W` 顺带测冷启动进「冷启动」面板，系统重定向警示）
 - **平台抽象**：`xperf-core/src/platform/` trait + adb devices -l 自动检测（SS2MAX/SS2PRO/SS3/SS4/Android）；agent 加 `--platform`/`--qnx-host` 参数
 - **GPU 五通道**（detect_gpu_path_ex 按平台选路）：kgsl sysfs（Android/SS2）/ QNX telnet（SS3，真 busy%/util%/频率+每进程）/ topgpu（SS2MAX）/ ligfxprofilerd logcat（SS4，GVM 无输出永不命中——实际走 host 侧通道）/ dumpsys gpu 显存保底；全部补采 dumpsys gpu 显存
-- **SS4 host 侧指标通道**（hostchan.rs，协议 v4）：FPS=frametimeline-only perfetto 5s 窗循环（display 合成流口径，layer=`(display)`）、GPU busy=经桥接网关读 MindRT logcat ligfxprofilerd；合成 AgentEvent 经 mpsc 汇入 AgentStream（extra_rx），CLI/GUI 零改动；SS4 平台限制：GVM 无 cpufreq/thermal（VM 隔离）、PMU 未虚拟化（simpleperf 自动 cpu-clock）
+- **SS4 host 侧指标通道**（hostchan.rs）：GPU busy=经桥接网关读 MindRT logcat ligfxprofilerd（合成 AgentEvent 经 mpsc 汇入 AgentStream，CLI/GUI 零改动）；**FPS 已回归设备端 per-layer 路径**（协议 v5：A16 图层名须带 `<hex> ` 前缀，曾误判阉割绕道 host frametimeline 已废弃删除）；SS4 平台限制：GVM 无 cpufreq/thermal（VM 隔离）、PMU 未虚拟化（simpleperf 自动 cpu-clock）
 - **C 类验证能力**：阈值告警（--threshold，静止界面不误报）+ 退出验证报告 + 冷启动（--cold-start / GUI 打开/重启应用，模块 core/coldstart.rs）+ **simpleperf 函数热点**（--stack N：调用栈录制 + 线程/self/children 三视图报告，CLI 独立/并行两模式 + GUI 独立 tab）+ **基线对比**（--save-baseline/--compare-baseline：两次运行 diff 回归判定，CLI/GUI 共用，详见 CLAUDE.md「基线对比模式」）
 - 落盘：数据根 `/tmp/xperf`（CLI 流式 CSV + 退出图表；GUI 完整历史 + CSV 导出，共用同根；GUI 深挖目录 `<pkg>/<ts>-<serial>/` 防双设备撞名）；清理走 CLI `--clean-cache` / GUI 按钮（~/.cache/xperf + /tmp/xperf，2bd6bca）
 - GUI：9 张折线图 + 实时数值面板 + Top 线程 + 峰值 + 冷启动面板 + 间隔档位下拉 + 实际周期标注 + 勾选即时生效（自动重启会话）+ Perfetto 分析（独立 tab 报告 + 浏览器自动加载 + 每秒录制进度）+ **函数热点**（独立 tab + 每秒录制进度 + 浏览器火焰图）+ 暗/亮双主题
@@ -43,14 +43,14 @@
 
 ## D. 结构改进（下轮候补）
 
-- [ ] **SS4 FPS 数据源升级候选：getfps -w（用户指点，待 HU 回来验证）**：SS4 GVM 上 `dumpsys SurfaceFlinger` 找图层全名后 `getfps -w "<全名>"` 可取 FPS。若实测可用且为 per-layer 口径，优于 frametimeline display 合成流（恢复 per-layer 归因 + 静止=0 语义，消除系统底噪混入）；验证点：存在性（which getfps）/输出格式与解析/开销（能否纳入 agent 节拍或 host 轮询）/权限（shell 可执行？）/静止界面读数。可用后评估替代 hostchan frametimeline 通道（frametimeline 通道实现保留作兜底）。**当前阻塞：2026-09-10 16:00 后 MindRT（42087266b1f）从 adb 消失（HU 休眠/断开），SS4 不可达**
+- ~~SS4 FPS 数据源升级候选：getfps -w~~（**已核销**，2026-09-10 晚）：getfps 逆向发现其底层即 `dumpsys SurfaceFlinger --latency`，价值是揭示了 SS4/A16 的图层名须带 `<hex> ` 别名前缀——agent v5 据此修复查询名，设备端 per-layer 路径恢复（见 E 节 FPS 条目终态）
 - [x] ~~agent 单文件拆分~~（531798a + 99d1b74 review 修复）：main.rs 1848 行 → 10 文件（main 493 + proc/mem/fps/thermal + gpu/{mod,kgsl,qnx,topgpu,ligfx}），三份读线程骨架抽公共 `gpu::spawn_stream_parser`，四段相同的 gpumem 补采臂合并；测试 23 个随模块迁移全绿。真机回归：SS2MAX 新旧 agent 同机对比事件分布/wire 格式/smaps 值一致。附带修复 host 侧 `ensure_agent_built` 只盯 main.rs 的 mtime 检查（改扫 src 树，touch 子模块已验证触发重建）
 - [x] ~~SS3 QNX 通道真机回归 + kgsl 统计链停滞修复~~（2026-09-03）：回归发现 QNX frame 流"1 条后停走、跨会话交替通/停"。黑盒实验（重启车机前后共 10+ 组对照）定位根因：**kgsl 统计链是驱动全局的，会话/fd 关闭都不清理**（泄漏直到整机重启）；`echo >` 式即开即死连接写入撞存量链只 flush 一窗即停，长活连接（`exec 3>`）写入则全链重相位持续输出；多链锁步产生重复行。修复（qnx.rs）：① 启动命令改 `exec 3>` 持 fd 写入；② slog 行按"与上一行完全相同"去重（Sys/Proc 各一条）；③ 看门狗兜底（frame 静默超 3×周期经 fd3 重写自愈，≤3 次）。真机验证：4 条泄漏链硬场景下启动顿 ~5s + 1 次自愈后稳定 1/s；gpu/gpuproc/gpumem 三类事件与 CSV 全通（eid→pid 9671 归因正确）；连续多轮 kill/重跑稳定。已知残留：存量链的窗口 flush 会带来少量同值重复样本（数值正确，重启清零）
 - [x] ~~xperf-core 轮询参考实现删除~~（225d89b，-1653 行；保留 ThreadCpuInfo/MemoryDetails/FpsTimeSeriesData/PidStats/SampleEvent 等协议类型）
 
 ## E. 已知遗留（评估过，低风险不阻塞）
 
-- ~~SS4 FPS 无数据源~~（**已解决**，2026-09-10 H 节任务 A，7a3e9fb）：QCM SDE 构建 `--latency` 全图层恒空（平台阉割）→ host 侧 frametimeline-only perfetto 通道（hostchan.rs：5s 窗循环录/拉/解析 → NULL display 合成流汇总 fps/jank，layer=`(display)`，pidof 归因，应用不在时不发事件）。**口径**：display 合成流 ≈ 被测应用 FPS（单动画源场景），含系统底噪（静止非 0）；per-layer 归因被构建阉割（BLAST 帧折叠进 NULL 流）。agent 侧 `--fps` 在 SS4 短路（协议 v4）。frametimeline 与全配置 --trace 并发无冲突（traced 原生多会话）；gltf 崩溃=RemoteServer 8082 端口冲突（测前 --force-stop 清场）
+- ~~SS4 FPS 无数据源~~（**已解决并二次修正**，终态 2026-09-10 晚 agent v5 / 1486463）：v4 曾误判"QCM 构建阉割 --latency"绕道 host frametimeline 通道（7a3e9fb）；**用户指点 getfps -w 后逆向确认真因：A16 SF 的 --latency 只认 `--list` 原始行的 `<hex> <name>` 别名形态**（带前缀 65 行真数据 vs 干净名 1 行刷新周期）——agent fps.rs 查询名双轨（A16 保留前缀/旧平台干净名），设备端 per-layer 路径恢复（协议 v5，SS4 短路撤销、host frametimeline 通道删除），真机 59-61fps + 杀进程重发现（#549→#579）+ SS2MAX/SS3 回归全通
 - SS2MAX GPU 显存无数据源（2026-09-07 root 下全路径确证：dumpsys gpu 无 Memory snapshot 段 + /sys/kernel/debug 未编译进内核 + /proc/kgsl 不存在，平台限制）
 - SS3 kgsl 统计链（见 D-2/CLAUDE.md）：三层清理已落地（agent 退出钩子 + setsid + host 条件兜底，**均带 pgrep 多会话并发保护**），SIGINT/Ctrl-C/正常退出路径真机验证停链成功、下一会话零自愈即起流；残余风险仅 agent 被 SIGKILL 暴杀（无钩子机会）与 reboot 后首会话（开机 5000ms 链在流，走一次看门狗自愈 ~8s）
 - ~~SS2MAX gpubusy 计数器恒 `0 0` / busy% 可 >100%~~（**已修**，commit 见 SESSION 2026-09-07：根因是 SS2MAX 厂商内核的 gpubusy 为**窗口语义**——读数是上一 ~1s 窗口的 busy/total µs，total 恒 ≈1e6 非累计；按累计差值解析出 1662%。`GpuBusyCalc` 三判据自动锁定窗口语义直读 busy/total；真机对照内核 `gpu_busy_percentage` 均值 75.5 vs 74.7 一致。原"恒 0 0"即 GPU 空闲时的窗口读数，非停走）
@@ -62,6 +62,7 @@
 - QNX 双会话并发交互（五轮 review 实测）：①后启动会话的 fd3 写入给先启动方一次 ~7s GPU 停走（看门狗自愈恢复）；②各方 GPU 事件密度升至 ~2×（双方写入产生非锁步多链，行级全等去重不覆盖，值为真值仅密度偏高）；③退出清理已有并发保护（pgrep 检测其他 agent 跳过停链，agent 钩子 >1 / host 兜底 ≥1+收尸等待，真机验证）——并发监控本身罕见，记录不修
 - ~~GUI add_marker 不写 markers.csv~~（已失效：GUI 打点功能整体删除，78f93a9，仅剩 CLI socket 打点）
 - marker 每连接线程无界（有 10s 读超时兜底）
+- **多宿主协议版本战（2026-09-10 晚实测踩坑，协议 bump 期间必看）**：新旧两个 host 进程（如旧版 GUI + 新版 CLI）同时连同一设备时，各自 `ensure_daemon` 发现版本不符就 suicide+重推 daemon——两边版本不同则**互相杀死对方的 daemon 无限循环**，表现：会话 hello 后流冻结、设备端 daemon 进程与 `@xperf-agent` socket 堆积（实测 2 进程/6 socket）。协议 bump 升级时旧宿主进程必须先退出；排查命令 `adb shell 'pgrep -f xperf-age[n]t; grep -c xperf-agent /proc/net/unix'`，清理 `pkill -f xperf-age[n]t`
 - **bridge 边缘态（2026-09-10 review 记录）**：bootstrap 探测失败冷却期（60s）内 MindRT 以 `is_gateway=false` 漏进设备列表（pick_device 可选中/GUI 可建 tab）——仅中继坏掉时出现，选中后采样会按普通设备失败；不修（正常路径 bootstrap 秒成，冷却语义是防反复探测）
 - GUI 基线/应用操作按钮与设备 tab 切换的点击渲染为人工目验项（后端链路由命令级测试锁定：save/compare 端到端 + build_summary 口径 + 多会话隔离；真机日志已验手动开始/勾选重启/trace 录制全链路）
 

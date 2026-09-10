@@ -224,10 +224,11 @@ pub enum AgentEvent {
 }
 
 /// 与 agent 的协议版本：与 xperf-agent 的 PROTOCOL_VERSION 同步 bump（改 wire 协议/命令时）。
-/// host 连接时校验 hello 的 version，不一致则通知 suicide + 强杀重推。
 /// v3：hello 增加 `root` 字段。
-/// v4：agent 侧 SS4 --fps 短路（FPS 由 host 侧 frametimeline 通道合成，见 hostchan）。
-pub const AGENT_PROTOCOL_VERSION: u32 = 4;
+/// v4：agent 侧 SS4 --fps 短路（当时误判 SF --latency 被平台阉割）。
+/// v5：SS4 --latency 修复（A16 SF 要求图层名带 `<hex> ` 别名前缀，agent fps.rs
+/// 查询名双轨），SS4 --fps 短路撤销，设备端 FPS 路径恢复。
+pub const AGENT_PROTOCOL_VERSION: u32 = 5;
 
 /// daemon 的抽象 socket 名（设备端 `localabstract:xperf-agent`）
 const AGENT_ABSTRACT_SOCK: &str = "xperf-agent";

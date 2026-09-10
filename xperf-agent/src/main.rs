@@ -81,9 +81,11 @@ use proc::PidState;
 /// 协议版本：host（xperf-core 的 `AGENT_PROTOCOL_VERSION` 常量）校验，
 /// 不一致则 suicide + 重推二进制。改动 wire 协议/命令时两侧同步 bump。
 /// v3：hello 增加 `root` 字段（agent 进程是否 uid=0）。
-/// v4：SS4 平台 --fps 短路（SF --latency 全图层恒空，FPS 由 host 侧 frametimeline
-/// 通道合成）——行为契约变化，bump 强制重推避免旧 agent 在 SS4 空转图层发现。
-const PROTOCOL_VERSION: u32 = 4;
+/// v4：SS4 平台 --fps 短路（当时误判 SF --latency 被平台阉割）。
+/// v5：SS4 --latency 修复——A16 SF 要求图层名带 `<hex> ` 别名前缀（fps.rs 查询名
+/// 双轨），SS4 --fps 短路撤销、设备端 FPS 路径恢复，host frametimeline 兜底移除。
+/// bump 强制重推，避免 v4 短路版残留在设备。
+const PROTOCOL_VERSION: u32 = 5;
 
 /// daemon 模式的最大并发会话（host）数
 const MAX_SESSIONS: usize = 10;
@@ -647,16 +649,7 @@ fn run_session(args: Args, io: Option<SessionIo>, stop: Arc<AtomicBool>) {
     // FPS 预热：图层发现的全量 dumpsys SurfaceFlinger 在此车机 ~1.5s，
     // 放在节拍时钟开始前执行，避免首轮 backlog、后续追帧期 CPU 窗口不齐。
     // （进程尚未启动时此处无 PID，发现会推迟到循环内首次 FPS 轮，代价同上但仅一次）
-    //
-    // SS4 短路：QCM SDE 定制 SF 构建的 --latency 对全部图层恒空（2026-09-10 全图层
-    // 实测确证，getprop 无可恢复开关），设备端图层发现只会空转（缓冲恒空 → 每 10 个
-    // FPS 轮触发一次 ~1.5s 全量 dump 重发现）。SS4 的 FPS 由 host 侧 frametimeline
-    // perfetto 通道合成（xperf-core hostchan），设备端发一次说明后完全退出 FPS 路径。
-    let fps_enabled = args.fps && args.platform.as_deref() != Some("ss4");
-    if args.fps && !fps_enabled {
-        emit("{\"t\":\"err\",\"msg\":\"SS4 平台 SurfaceFlinger --latency 无帧数据（QCM 构建阉割），FPS 改由 host 侧 frametimeline 通道采样\"}");
-    }
-    if fps_enabled {
+    if args.fps {
         if let Some(pkg) = &args.package {
             for pid in proc::resolve_pids(pkg) {
                 if !active_pids.contains(&pid) {
@@ -883,8 +876,8 @@ fn run_session(args: Args, io: Option<SessionIo>, stop: Arc<AtomicBool>) {
             // FPS：设备端本地 dumpsys SurfaceFlinger（图层发现 + 帧时间戳差值）。
             // 限频执行（每 fps_every 轮一次）；启动时已预热建基线，
             // 首个 FPS 轮（round == fps_every）即覆盖一个完整周期。
-            // SS4 已在会话入口短路（fps_enabled=false），不进入此分支。
-            if fps_enabled && round.is_multiple_of(fps_every) {
+            // A16（SS4）的 --latency 查询名带 `<hex> ` 别名前缀（fps.rs），其余平台干净名。
+            if args.fps && round.is_multiple_of(fps_every) {
                 let pkg = package_of(&args, &mut pkg_cache, pid);
                 fps_states.entry(pid).or_default().sample_round(pid, &pkg, ts);
             }
