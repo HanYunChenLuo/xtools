@@ -7,6 +7,21 @@
 
 ---
 
+## 2026-09-10(5) — force-stop 工具化 + H 指标适配交接稿定稿
+
+**任务**：杀进程清场功能落地；review 代码与文档，产出 H 节交接材料。
+
+**commit**：c5d2cc2（feat: CLI --force-stop + GUI「停止应用」）→ 本次（交接稿 + 文档）。
+
+**关键结论**：
+- **gltf RemoteServer 崩溃根因（源码级）**：`MainActivity.onCreate`（MainActivity.kt:154）无条件 `RemoteServer(8082)`（filament-utils ws 调试服务器）→ Java 侧 `nCreate==0` 即 `IllegalStateException`（RemoteServer.java:43，无重试无降级）→ native CivetWeb bind 失败（典型 EADDRINUSE）；正常手机崩溃=进程死亡端口自愈，SS4 Application Error 保进程 → 端口不放 → 崩溃循环。修复建议：onCreate try-catch 置 null 或删除（viewer 本体不依赖）。
+- **交接稿 `docs/DESIGN-ss4-metrics.md`（v1.0）**：任务 A FPS frametimeline 流式化（SS4 专属兜底；配置/pbtxt 权限目录/9.5KB/s 开销/并发无冲突/NULL 流归因语义全实测）→ 任务 B GPU ligfx host 侧通道（经网关读 MindRT logcat；真机行样例；parse_line 逻辑移植 core；`persist.vendor.ligfxprofiler.sampling_interval_ms` 调窗；Frequency 单位核实）→ 任务 C 九项矩阵（hello maxkhz 全 0 待查）→ 任务 D C 类（trace✅/冷启动✅/simpleperf 待测/基线）→ 任务 E 文档收尾。**数据源已全勘察，新会话勿重复**。
+- **review 记录**：bridge 边缘态（bootstrap 失败冷却期 MindRT 漏进设备列表）入 WORKSPACE E 节不修项；agent `gpu/ligfx.rs::parse_line` 与真机行格式吻合可直接移植；`gpu/mod.rs:66` 注释链待任务 B 同步。
+
+**遗留**：H 指标适配按交接稿任务 A-E 实施（新会话）。
+
+---
+
 ## 2026-09-10(4) — SS4 FPS/GPU 为 0 排查：A16 图层发现修复 + 两项平台限制确证
 
 **任务**：用户反馈 GUI 经 SSH 连 SS4 看 FPS 与 GPU busy 均 0，排查定位。

@@ -2,7 +2,7 @@
 
 > 本文件记录跨会话的待办事项（backlog）。每次会话的历史总结见 `SESSION.md`。
 > 完成一项就把状态改为 ✅ 并注明完成的 commit；新增想法随时追加。
-> 最后更新：2026-09-10（H：**SS4 adb 自动桥接已合入**（feature/ss4-adb-bridge：S0 预验证 + S1-S5 实施 + S6 真机回归全通——自动桥接/采样/GVM 重启自愈/root 双路径/三机并行；详见 CLAUDE.md「SS4 adb 自动桥接」）；剩余：九项指标逐项实测（含 ligfx 改 host 侧通道）+ C 类回归 + platform/ss4.rs 桩补实，按 H 3-6 独立成会话）
+> 最后更新：2026-09-10（H：**SS4 adb 自动桥接已合入** + 排查链闭环（A16 图层发现修复 1f74a73 / gltf RemoteServer 崩溃根因 / frametimeline-only FPS 出路实测 / force-stop 清场工具化 c5d2cc2）+ **指标适配交接稿 `docs/DESIGN-ss4-metrics.md` 定稿（任务 A-E，数据源全勘察勿重复）**；新会话按该文档实施 H 剩余项）
 
 ## 当前状态速览
 
@@ -59,6 +59,7 @@
 - QNX 双会话并发交互（五轮 review 实测）：①后启动会话的 fd3 写入给先启动方一次 ~7s GPU 停走（看门狗自愈恢复）；②各方 GPU 事件密度升至 ~2×（双方写入产生非锁步多链，行级全等去重不覆盖，值为真值仅密度偏高）；③退出清理已有并发保护（pgrep 检测其他 agent 跳过停链，agent 钩子 >1 / host 兜底 ≥1+收尸等待，真机验证）——并发监控本身罕见，记录不修
 - ~~GUI add_marker 不写 markers.csv~~（已失效：GUI 打点功能整体删除，78f93a9，仅剩 CLI socket 打点）
 - marker 每连接线程无界（有 10s 读超时兜底）
+- **bridge 边缘态（2026-09-10 review 记录）**：bootstrap 探测失败冷却期（60s）内 MindRT 以 `is_gateway=false` 漏进设备列表（pick_device 可选中/GUI 可建 tab）——仅中继坏掉时出现，选中后采样会按普通设备失败；不修（正常路径 bootstrap 秒成，冷却语义是防反复探测）
 - GUI 基线/应用操作按钮与设备 tab 切换的点击渲染为人工目验项（后端链路由命令级测试锁定：save/compare 端到端 + build_summary 口径 + 多会话隔离；真机日志已验手动开始/勾选重启/trace 录制全链路）
 
 ## F. SSH 远程调试（已完成）
@@ -95,11 +96,7 @@
 ## H. SS4 平台适配（桥接已完成，指标回归待实施）
 
 - [x] **SS4 adb 自动桥接**（2026-09-10，`feature/ss4-adb-bridge`）：S0 预验证（hppc 手工 adb，结论回填 `docs/DESIGN-ss4-adb.md` v1.2）→ S1 `bridge.rs` 核心 → S2 utils 集成（list hook + pick_device 过滤）→ S3/S4 root 链路与自愈 → S5 GUI 过滤 → S6 真机回归。commit 链：738fcba（S0 文档）→ 5018c11（S1）→ 03aa440（S2）→ e184ddc（S3+S4）→ fa5cc6f（S5）→ f957d8c（review 修复×2）。**真机回归全通**（--remote hppc）：清桥接状态后 CLI 自动 bootstrap（forward+connect 全自动，多台报错清单只列 3 台 Android 不含 MindRT）、`--device localhost:5559` 采样（auto-root ①直连成功、平台识别 SS4/12 核/hello root、CPU 样本/线程明细/CSV/退出图表全通）、**采样中 GVM reboot 自动重连恢复**（①② 双 root 路径在重连竞态中真实触发）、SS3+SS2MAX+SS4 三机并行采样不互扰。详见 CLAUDE.md「SS4 adb 自动桥接」
-- [ ] **九项指标逐项实测 + C 类回归 + 桩补实**（独立会话，按原 H 3-6）：CPU/内存/FPS/频率/温度/IO/网络/GPU/显存逐项核（**ligfx 通道须先改 host 侧经网关读 MindRT logcat**——S0/R8 已推翻 agent GVM logcat 假设；ligfx Frequency 单位 Hz/MHz 核实——恒 1000 存疑；hello maxkhz 全 0 待查）；perfetto/simpleperf/冷启动/基线回归；`platform/ss4.rs` 桩补实 + CLAUDE.md SS4 特性段 + E 节遗留核销 + SESSION 基线数据
-  1. ~~环境/平台检测真机核对~~（S0+S6 已验：`product:HU_SS4 model:HU_Smart_space_4_0` → Ss4；**Android 16**，FPS 图层按 A12+ BLAST；MindRT `42087266b1f` 无 product 为网关稳定特征）
-  2. **九项指标逐项实测**（重点：ligfx host 侧通道起流 + Frequency 单位；温度/热降频数据源；IO（root 后 /proc/pid/io）；显存 dumpsys gpu Memory snapshot 段有无）
-  3. **C 类能力回归**：perfetto `--trace`、simpleperf `--stack`（应用是否 debuggable/profileable）、冷启动（S0 已测 am start -W COLD 310ms 可用）、基线对比
-  4. **文档收尾**：`platform/ss4.rs` 桩补实（gpu_hint/description/数据源细节）、CLAUDE.md 平台表 + SS4 特性段（对齐 SS2MAX 特性格式）、E 节遗留核销、SESSION 当日条目（真机基线数据入 SESSION）
+- [ ] **SS4 指标适配**（交接新会话，**实施依据 `docs/DESIGN-ss4-metrics.md`**——全部数据源已真机勘察完毕勿重复）：任务 A FPS frametimeline-only perfetto 流式化（SS4 专属兜底，配置/归因粒度/并发无冲突均已实测）→ 任务 B GPU ligfx host 侧通道（经网关读 MindRT logcat，行格式/解析复用/interval 属性/Frequency 单位核实）→ 任务 C 九项指标逐项实测矩阵（root/非 root 两态；hello maxkhz 全 0 待查）→ 任务 D C 类回归（trace✅/冷启动✅310ms/simpleperf 待测/基线）→ 任务 E 文档收尾（ss4.rs 桩补实/CLAUDE.md SS4 特性段/E 节核销/SESSION 基线）。**环境坑**：gltf 反复崩溃=RemoteServer 8082 端口冲突，测前 `--force-stop` 清场（c5d2cc2 已工具化）；建议重建 APK 去 RemoteServer
 
 ---
 

@@ -235,7 +235,7 @@ SS4（SA8797P）是 **MindRT（Linux PVM，USB 可见）+ Android（GVM，USB �
 - **GUI**：`visible_devices` 统一过滤三处 payload（devices_json 内聚/list_devices/connect_remote/监视器 diff 前）——前端永远看不到 MindRT tab；`ensure_device_online` 拒绝网关 serial 并指引 `localhost:<port>`；前端零改动（serial 冒号在 dataset/id 安全）
 - **SSH 远程零改动**：forward/connect/devices 全是 adb server 侧语义，经 hop#1 天然到达 hppc server；`-s localhost:5559` 路由与 hop#2 映射按 serial 过滤正常
 - **S0+S6 真机验证**：免 root 桥接、GVM 重启 serial 不消失（offline ~24s 自动回 device，零干预自愈）、采样中 GVM reboot 自动重连恢复、root 双路径（①直连 ②网关兜底均在重连竞态中真实触发）、SS3+SS2MAX+SS4 三机并行采样不互扰
-- **ligfx 注意（S0/R8 推翻）**：ligfxprofilerd 在 **MindRT 侧**（GVM logcat 无输出）——agent `gpu/ligfx.rs`（读 GVM logcat）不成立，SS4 GPU 通道须改 host 侧经网关读 MindRT logcat（~5s/帧块，`GVM_<comm>` 按 comm 归因，Frequency 恒 1000 单位存疑），属 WORKSPACE H 节 GPU 项
+- **ligfx 注意（S0/R8 推翻）**：ligfxprofilerd 在 **MindRT 侧**（GVM logcat 无输出）——agent `gpu/ligfx.rs`（读 GVM logcat）不成立，SS4 GPU 通道须改 host 侧经网关读 MindRT logcat（~5s/帧块，`GVM_<comm>` 按 comm 归因，Frequency 恒 1000 单位存疑）；**FPS 亦然**：SS4 构建 `--latency` 全层失效，须 frametimeline-only perfetto 兜底（归因粒度=display 级 NULL 流）。两者实施依据 **`docs/DESIGN-ss4-metrics.md`**（任务 A/B，数据源已全勘察）
 
 ### SSH 远程后端（`--remote`，xperf-core/src/transport.rs，CLI 与 GUI 共用）
 
