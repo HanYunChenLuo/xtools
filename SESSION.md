@@ -11,7 +11,7 @@
 
 **任务**：按 `docs/DESIGN-ss4-metrics.md` 任务 A-E 实施 SS4 指标适配。
 
-**commit**：7a3e9fb（任务 A：FPS frametimeline host 通道 + agent ss4 fps 短路 + 协议 v4）→ 9004f96（任务 B：GPU ligfx host 侧通道）→ b8754bf（任务 D 附带修复：simpleperf cpu-clock + 千分位解析）→ 本次（任务 E 文档收尾）。
+**commit**：7a3e9fb（任务 A：FPS frametimeline host 通道 + agent ss4 fps 短路 + 协议 v4）→ 9004f96（任务 B：GPU ligfx host 侧通道）→ b8754bf（任务 D 附带修复：simpleperf cpu-clock + 千分位解析）→ d9dc84a（任务 E 文档收尾）→ 7e0a748（review 修复：独立 review 2 严重 4 一般全修——ligfx EOF 热重连/独占登记重连竞态（宽限接管）/阻塞读 stop 看门狗/err 风暴上限；frametimeline 水位无条件推进/jank 门槛对齐；pull 30s 超时/僵尸回收等建议项）。
 
 **实现**：
 - **架构（任务 A/B 共用）**：host 侧线程合成 `AgentEvent` 经 mpsc 汇入 `AgentStream.extra_rx`，`next_event`/`next_event_batch` 统一取出（agent 心跳空行保证投递延迟 ≤ 一个采样间隔），**CLI/GUI 消费端零改动**；通道由 `spawn_agent` 按 SS4+指标开关启动，生命周期随流（析构→发送失败/`ping_stop` 退出），断连重连由 `reconnect_agent→spawn_agent` 重启。新模块 `xperf-core/src/hostchan.rs`。
