@@ -328,6 +328,17 @@ pub fn gateway_android_serial(gateway: &str) -> Option<String> {
     with_state(|s| s.gateways.get(gateway).map(|i| i.android_serial.clone()))
 }
 
+/// Android 伪设备 serial → 其网关（MindRT）serial（Ss4 root 兜底经网关执行
+/// `rootandroid.sh` 用；桥接未收敛/非桥接设备返回 None）
+pub fn gateway_for_android(android_serial: &str) -> Option<String> {
+    with_state(|s| {
+        s.gateways
+            .iter()
+            .find(|(_, info)| info.android_serial == android_serial)
+            .map(|(gw, _)| gw.clone())
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
