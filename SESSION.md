@@ -7,6 +7,30 @@
 
 ---
 
+## 2026-09-10(6) — SS4 指标适配实施（WORKSPACE H 剩余，`feature/ss4-metrics`）
+
+**任务**：按 `docs/DESIGN-ss4-metrics.md` 任务 A-E 实施 SS4 指标适配。
+
+**commit**：7a3e9fb（任务 A：FPS frametimeline host 通道 + agent ss4 fps 短路 + 协议 v4）→ 9004f96（任务 B：GPU ligfx host 侧通道）→ b8754bf（任务 D 附带修复：simpleperf cpu-clock + 千分位解析）→ 本次（任务 E 文档收尾）。
+
+**实现**：
+- **架构（任务 A/B 共用）**：host 侧线程合成 `AgentEvent` 经 mpsc 汇入 `AgentStream.extra_rx`，`next_event`/`next_event_batch` 统一取出（agent 心跳空行保证投递延迟 ≤ 一个采样间隔），**CLI/GUI 消费端零改动**；通道由 `spawn_agent` 按 SS4+指标开关启动，生命周期随流（析构→发送失败/`ping_stop` 退出），断连重连由 `reconnect_agent→spawn_agent` 重启。新模块 `xperf-core/src/hostchan.rs`。
+- **任务 A（FPS）**：5s 窗循环「perfetto `-c -` stdin frametimeline-only 配置 → pull → trace_processor 单 SQL（`actual_frame_timeline_slice where layer_name is null`）→ 水位去重汇总 fps/jank（口径同 agent）」。pid 取 pidof 首进程（应用不在时不发事件），layer 固定 `(display)`。agent 侧 `--platform ss4` 下 `--fps` 短路（不再空转图层发现），协议 bump v4 强制重推。
+- **任务 B（GPU）**：`bridge::gateway_for_android` 拿 MindRT 网关 → `adb shell logcat -T 0 -s ligfxprofilerd` 流式读（-T 0 不回放历史缓冲）→ Sys→Gpu / `GVM_<comm>-<id>`→GpuProc（pidof+/proc/pid/comm 15 字符截断归因，miss/60s 重建映射）。断流 2s 重连；进程内按 serial 独占（只读通道无 QNX 式写冲突）。显存保底仍由 agent dumpsys gpu 补采并存。
+- **任务 D 附带**：SS4 GVM PMU 未虚拟化（cpu-cycles 8s 仅 6 样本）→ simpleperf 按平台自动 `-e cpu-clock`（RecordedStack 加 event 字段，报告头如实标注）；顺手修复 `parse_sample_stats` 千分位逗号解析（新版 simpleperf `4,016` 被旧解析截断为 4）。
+
+**真机基线（SS4 localhost:5559 经 --remote hppc，gltf viewer）**：
+- FPS frametimeline：稳态 59.8fps（299 帧/5s 窗，jank 0）；杀进程即停发、重启自动跟新 pid、**GVM reboot 后通道随重连自动恢复**；SS3 agent 路径回归 60fps 不受影响
+- GPU ligfx：busy 33.8%（系统）/ 11.0%（gltf 进程归因正确）；显存 dumpsys 保底并存（721.8MB/整机 4653MB）
+- 九项矩阵 root/非 root 两态：CPU/内存/FPS/GPU/显存/IO（root）/网络 全通；**freq/thermal 为 GVM 平台限制**（无 cpufreq sysfs——hello maxkhz 全 0 根因；无 thermal zones + HAL Ready=false），agent 探测 err 禁用符合预期；非 root 下 frametimeline（perfetto shell 可录）与 ligfx（MindRT root）均可用，IO 如期禁用
+- C 类：trace/冷启动 246ms 复用既有结论；simpleperf cpu-clock 3908 样本/9s 三视图完整；基线保存→对比全链路（CPU/PSS/FPS/Jank/GPU 9 项持平）
+
+**核销**：ligfx Frequency 单位（恒 1000 定频占位/标注存疑，原样透传；`sampling_interval_ms` 调小致停输出勿调）、hello maxkhz 全 0（GVM 无 cpufreq sysfs）。
+
+**遗留**：无新阻塞项；GUI 侧 SS4 事件流经命令级验证（与 CLI 同一 AgentStream 路径），未跑 GUI 进程目验。
+
+---
+
 ## 2026-09-10(5) — force-stop 工具化 + H 指标适配交接稿定稿
 
 **任务**：杀进程清场功能落地；review 代码与文档，产出 H 节交接材料。
