@@ -7,6 +7,22 @@
 
 ---
 
+## 2026-09-10(4) — SS4 FPS/GPU 为 0 排查：A16 图层发现修复 + 两项平台限制确证
+
+**任务**：用户反馈 GUI 经 SSH 连 SS4 看 FPS 与 GPU busy 均 0，排查定位。
+
+**commit**：1f74a73（agent fps.rs A16 包装格式修复）。文档（WORKSPACE E 节 + 本条）随提交。
+
+**结论**（三层分离）：
+- **FPS 根因①（已修，真 bug）**：Android 16 `dumpsys SurfaceFlinger --list` 行带 `RequestedLayerState{<hex> <name> parentId=… …}` 包装，agent `parse_list_layers` 未拆壳 → 整行作层名进 `--latency` 必无数据 → 图层发现全灭。修复 1f74a73（拆壳 + 元数据截断；旧格式逐字节兼容）；解析逻辑 rustc 独立断言验证（真机 A16 行，主机无法跑 agent 单测）；SS3 60.8 / SS2MAX 60.5 真机回归。
+- **FPS 根因②（平台限制，未修）**：SS4 的 QCM SDE 定制 SF 构建 `--latency` 对**全部图层**恒空（全 BLAST 层实测只有刷新率行）；perfetto FrameTimeline 正常（`--trace 5` 实测 303 帧 ~60fps avg 15.44ms，顺带验证 C 类 trace 在 SS4 全通）。修复后 agent 图层发现正常但缓冲恒空 → 不发事件（不伪造 0）。SS4 FPS 需新数据源（perfetto frametimeline 流式化）或标不支持——入 WORKSPACE E 节 + H 节评估。
+- **GPU busy=0（已知 R8 gap）**：ligfxprofilerd 在 MindRT 侧（S0 已证 GVM logcat 无输出）→ agent ligfx 通道起不来，自动降级 dumpsys gpu 显存（**SS4 显存可用**：gltf 734.9MB / 整机 4819MB，Memory snapshot 段存在）——busy 需 H 节的 host 侧 ligfx 通道。
+- 附带发现：gltf viewer 在 SS4 曾崩溃（Application Error 窗，疑 GVM reboot 时应用被杀后遗留），force-stop 重启恢复；SS4 `--list` 图层号随 Surface 重建递增（#367→#418，agent 重发现机制覆盖）。
+
+**遗留**：SS4 FPS 数据源选型 + ligfx host 侧通道（WORKSPACE H 剩余项）。
+
+---
+
 ## 2026-09-10(3) — SS4 adb 自动桥接实施 S1-S6（WORKSPACE H，`feature/ss4-adb-bridge`）
 
 **任务**：按 `docs/DESIGN-ss4-adb.md` §9 实施 bridge 模块（S1-S5）+ 真机回归（S6）。

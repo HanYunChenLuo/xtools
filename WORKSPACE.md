@@ -48,6 +48,7 @@
 
 ## E. 已知遗留（评估过，低风险不阻塞）
 
+- **SS4 FPS 无数据源（2026-09-10 确证，平台限制）**：SS4（A16，QCM SDE 定制 SF 构建）`dumpsys SurfaceFlinger --latency` 对**全部图层**只返回刷新率行（无一帧时间戳）——全 BLAST 层实测皆空；perfetto FrameTimeline 数据源正常（5s 303 帧 ~60fps，证明帧流与 FrameTimelineManager 活跃），仅 --latency 调试接口失效。agent 行为：图层发现正常（A16 包装格式 1f74a73 已修），但每轮缓冲恒空 → 不发事件（不伪造 0）。**候选路径（H 节 GPU/FPS 项评估）**：perfetto frametimeline 流式化（重）或如实标不支持
 - SS2MAX GPU 显存无数据源（2026-09-07 root 下全路径确证：dumpsys gpu 无 Memory snapshot 段 + /sys/kernel/debug 未编译进内核 + /proc/kgsl 不存在，平台限制）
 - SS3 kgsl 统计链（见 D-2/CLAUDE.md）：三层清理已落地（agent 退出钩子 + setsid + host 条件兜底，**均带 pgrep 多会话并发保护**），SIGINT/Ctrl-C/正常退出路径真机验证停链成功、下一会话零自愈即起流；残余风险仅 agent 被 SIGKILL 暴杀（无钩子机会）与 reboot 后首会话（开机 5000ms 链在流，走一次看门狗自愈 ~8s）
 - ~~SS2MAX gpubusy 计数器恒 `0 0` / busy% 可 >100%~~（**已修**，commit 见 SESSION 2026-09-07：根因是 SS2MAX 厂商内核的 gpubusy 为**窗口语义**——读数是上一 ~1s 窗口的 busy/total µs，total 恒 ≈1e6 非累计；按累计差值解析出 1662%。`GpuBusyCalc` 三判据自动锁定窗口语义直读 busy/total；真机对照内核 `gpu_busy_percentage` 均值 75.5 vs 74.7 一致。原"恒 0 0"即 GPU 空闲时的窗口读数，非停走）
