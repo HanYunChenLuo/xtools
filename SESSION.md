@@ -7,6 +7,25 @@
 
 ---
 
+## 2026-09-10(2) — SS4 S0 真机预验证（WORKSPACE H，无代码）
+
+**任务**：按 `docs/DESIGN-ss4-adb.md` §8 清单在 hppc 上手工 adb 预验证 R1-R5/R7/R8，结论回填设计文档。
+
+**环境**：SS4 接 hppc（MindRT `42087266b1f` usb:1-12.3，无 product 字段）+ SS3 + SS2MAX 三机同连；纯 ssh hppc 手工 adb，无代码改动。
+
+**结论**（设计文档已回填 v1.2，**方案 A 主设计零改动，可进 S1-S6**）：
+- **R1 ✅（最高风险排除）**：`forward tcp:15559 localabstract:xperf-agent` 穿 5557 中继成功，nc 收 agent hello（12 核/version 2）——F1（agent --tcp-port 模式）不需要。
+- **R2 ✅**：真机 `adb devices -l` 形态与设计/单测逐字一致（桥接后 `localhost:5559 product:HU_SS4 model:HU_Smart_space_4_0`）。
+- **R3 ✅ 比假设乐观**：标准 adb `adb -s localhost:5559 root` **直接成功**（无 TCP root 限制）→ root 主路径；MindRT `rootandroid.sh`（/system_ext/bin）兜底也实测成功。
+- **R4 ✅ 比假设乐观**：MindRT 未 root（adbd uid=2000）即可 forward+connect——bootstrap 的 MindRT root 非必要，保持 best-effort。
+- **R5 ✅**：`adb -s localhost:5559 reboot` 只重启 GVM；serial **不消失**（offline 态）→ **~24s 自动回 device**，forward 规则/connect/中继全程存活，零干预自愈（connect 返 "already connected" 为无害 no-op）。**另实测：MindRT adbd 重启（root 提权）清 forward 规则**（relay 是 MindRT 上一个 adb 进程 LISTEN 127.0.0.1:5557，跨重启存活）→ refresh 重建路径必需。
+- **R7 ✅**：**Android 16**（FPS 图层按 A12+ BLAST 形态）；push/install/`am start -W`（gltf viewer COLD 310ms）正常。
+- **R8 ⚠ 推翻**：ligfxprofilerd 在 **MindRT 侧**（/usr/bin/ligfxprofilerd），**GVM logcat 无 ligfx 输出** → agent `gpu/ligfx.rs` 通道不成立，走 fallback：host 侧 `adb -s <mindrt> shell logcat -s ligfxprofilerd` 流式读取（H 节 GPU 项实施）。数据形态：~5s/帧块；Sys=Frequency/Busy/Queued/Utilization；Proc=`GVM_<comm 15字符截断>-<会话id>`（id 非 GVM pid、跨重启变化，归因按 comm）；负载对照 gltf viewer Global Busy 11%→29%。**Frequency 恒 1000**（GPU VFIO 直通 GVM，MindRT/GVM 均无 kgsl/devfreq 节点可对照；Hz 标注疑似 MHz，单位与定频问题留 H 节 GPU 项）。
+
+**遗留**：进 S1（bridge.rs 核心）→ S6，实施计划与测试设计见 `docs/DESIGN-ss4-adb.md` §9/§10；ligfx Frequency 单位核实并入 H 节 GPU 项。设备收尾状态：MindRT 已 root、GVM 已 root（rootandroid.sh）、gltf viewer 已装 SS4、测试 agent daemon 已随 GVM 重启清除。
+
+---
+
 ## 2026-09-10 — SS4 adb 桥接方案设计（WORKSPACE H 前置，无代码）
 
 **任务**：读飞书《SS4.0 (8797) USB ADB调试指南》，设计 SS4（SA8797P）双系统拓扑的 adb 接入方案；一轮自 review 后定稿，交接新会话实施。
