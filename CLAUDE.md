@@ -225,6 +225,18 @@ Platform trait + `adb devices -l` product 字段自动检测（HU_SS3/HU_SS2MAXF
 - **重连**：`device_online` 只认目标设备（`adb -s X get-state` = "device"）——多台同连时其他设备在线不算"回来了"
 - **QNX 收尾**：`qnx_stop_stats` 的 pgrep 多会话保护/probe/停链均带 `-s`（语义不变，作用域收敛到目标设备）
 
+### SS4 adb 自动桥接（`xperf-core/src/bridge.rs`；设计 `docs/DESIGN-ss4-adb.md`）
+
+SS4（SA8797P）是 **MindRT（Linux PVM，USB 可见）+ Android（GVM，USB 不可见）** 双系统：`adb devices` 只见 MindRT（**无 product 字段的 USB 设备**），Android 须经 `forward tcp:<port> tcp:5557`（MindRT 上的 adb 中继，常驻）+ `adb connect localhost:<port>` 桥接成伪设备。bridge 模块让桥接全自动：桥接后 Android 以 `localhost:<port>`（恒 localhost 字面，**serial 稳定性不变量**，勿用 127.0.0.1）进入现有全链路，下游零感知。
+
+- **四个集成点**（全链路仅此）：①`list_adb_devices` 尾部 `bridge::refresh`（幂等收敛：forward --list 恢复网关映射/已知网关 connect 自愈每轮都试/候选设备 bootstrap 失败 60s 冷却；新建连接有界重枚举 ≤2 轮）②`device_online` 的 `localhost:*` 分支 → `bridge::reconnect`（GVM 重启自愈双保险之一，另一是监视器轮询 refresh）③`try_adb_root`/`acquire_root` Ss4 兜底（直连 adb root 失败 → 经网关 `rootandroid.sh` + 重连 + 15s 轮询，①②报错各自透传）④`pick_device` 过滤 `AdbDevice.is_gateway`
+- **网关识别**：forward 规则 target=`tcp:5557` → 确定网关（谁建的都复用，含用户手工/厂商 tool）；无 product 直连设备 → 候选探测（connect 失败即清规则冷却，对普通设备零影响）；**MindRT adbd 重启（root 提权）清 forward 规则**——refresh/reconnect 按规则存在性重建
+- **root**：S0 实测标准 adb 直连 root 成功（无 TCP 限制）为主路径，`rootandroid.sh`（MindRT `/system_ext/bin/`）兜底；MindRT 自身 root 免（best-effort）
+- **GUI**：`visible_devices` 统一过滤三处 payload（devices_json 内聚/list_devices/connect_remote/监视器 diff 前）——前端永远看不到 MindRT tab；`ensure_device_online` 拒绝网关 serial 并指引 `localhost:<port>`；前端零改动（serial 冒号在 dataset/id 安全）
+- **SSH 远程零改动**：forward/connect/devices 全是 adb server 侧语义，经 hop#1 天然到达 hppc server；`-s localhost:5559` 路由与 hop#2 映射按 serial 过滤正常
+- **S0+S6 真机验证**：免 root 桥接、GVM 重启 serial 不消失（offline ~24s 自动回 device，零干预自愈）、采样中 GVM reboot 自动重连恢复、root 双路径（①直连 ②网关兜底均在重连竞态中真实触发）、SS3+SS2MAX+SS4 三机并行采样不互扰
+- **ligfx 注意（S0/R8 推翻）**：ligfxprofilerd 在 **MindRT 侧**（GVM logcat 无输出）——agent `gpu/ligfx.rs`（读 GVM logcat）不成立，SS4 GPU 通道须改 host 侧经网关读 MindRT logcat（~5s/帧块，`GVM_<comm>` 按 comm 归因，Frequency 恒 1000 单位存疑），属 WORKSPACE H 节 GPU 项
+
 ### SSH 远程后端（`--remote`，xperf-core/src/transport.rs，CLI 与 GUI 共用）
 
 **为什么**：真机接在远端 Linux 机（hppc）时，本机（Mac）跑 GUI/CLI 经 SSH 完成采样/perfetto/simpleperf 全部功能。完整设计与逐条实测依据：`docs/DESIGN-ssh-remote.md`。

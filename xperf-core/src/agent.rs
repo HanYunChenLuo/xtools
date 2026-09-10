@@ -375,19 +375,63 @@ fn try_adb_root(serial: Option<&str>) {
     if std::env::var_os("XPERF_NO_AUTO_ROOT").is_some() {
         return;
     }
-    if !should_auto_root(crate::platform::detect_platform_live(serial).id()) {
+    let platform_id = crate::platform::detect_platform_live(serial).id();
+    if !should_auto_root(platform_id) {
         return; // 非车机：不默认获取 root
     }
+    if adb_root_verify(serial) {
+        eprintln!("adb root: 成功（uid=0）");
+        return;
+    }
+    // Ss4 兜底（设计 §6 ②）：标准 adb 直连 root 失败 → 经 MindRT 网关 rootandroid.sh
+    if matches!(platform_id, crate::platform::PlatformId::Ss4)
+        && ss4_root_via_gateway(serial).is_ok()
+    {
+        eprintln!("adb root: 成功（经网关 rootandroid.sh，uid=0）");
+        return;
+    }
+    let id = crate::utils::run_adb_command_for(serial, &["shell", "id"]).map(|o| o.stdout).unwrap_or_default();
+    eprintln!("adb root: 未生效（{}），无 root 指标按能力降级（IO 等不可用）", id.trim());
+}
+
+/// 直连 `adb root` + 等 adbd 回来 + `shell id` 验证（uid=0 返回 true）
+fn adb_root_verify(serial: Option<&str>) -> bool {
     let adb = || crate::utils::adb_for(serial);
     let _ = adb().args(["root"]).output();
     // adbd 重启后等设备回来
     let _ = adb().args(["wait-for-device"]).output();
-    let id = crate::utils::run_adb_command_for(serial, &["shell", "id"]).map(|o| o.stdout).unwrap_or_default();
-    if id.contains("uid=0") {
-        eprintln!("adb root: 成功（uid=0）");
-    } else {
-        eprintln!("adb root: 未生效（{}），无 root 指标按能力降级（IO 等不可用）", id.trim());
+    shell_uid0(serial)
+}
+
+/// `shell id` 是否 uid=0
+fn shell_uid0(serial: Option<&str>) -> bool {
+    crate::utils::run_adb_command_for(serial, &["shell", "id"])
+        .map(|o| o.stdout.contains("uid=0"))
+        .unwrap_or(false)
+}
+
+/// Ss4 root 兜底路径（设计 §6 ②，S0 实测脚本在 MindRT 的 `/system_ext/bin/`、
+/// PATH 内）：经网关 `adb -s <mindrt> shell rootandroid.sh` 把 Android adbd 提为
+/// root——adbd 提权重启会断开伪设备连接，经 [`crate::bridge::reconnect`] 重连后
+/// 轮询 `id` 确认（15s 上限，与 acquire_root 同骨架）。
+/// Ok = uid=0 已验证；Err 携带失败原因（无网关信息/脚本执行失败/超时未生效）。
+fn ss4_root_via_gateway(serial: Option<&str>) -> Result<String, String> {
+    use std::time::{Duration, Instant};
+    let eff = crate::utils::resolve_serial(serial).ok_or("无目标 serial")?;
+    let gateway = crate::bridge::gateway_for_android(&eff)
+        .ok_or_else(|| "桥接未收敛，无网关信息".to_string())?;
+    let out = crate::utils::run_adb_command_for(Some(&gateway), &["shell", "rootandroid.sh"])
+        .map_err(|e| format!("rootandroid.sh 执行失败: {}", e))?;
+    // adbd 提权重启掉连接 → 重连（规则若被清一并重建）
+    let _ = crate::bridge::reconnect(&eff);
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(500));
+        if shell_uid0(serial) {
+            return Ok("经网关 rootandroid.sh，uid=0".to_string());
+        }
     }
+    Err(format!("rootandroid.sh 未生效（15s 超时；脚本输出: {}）", out.stdout.trim()))
 }
 
 /// 显式获取 root 权限（GUI「获取 root」按钮用；用户显式动作，任意平台都执行——
@@ -395,6 +439,8 @@ fn try_adb_root(serial: Option<&str>) {
 /// `adb root` 会重启 adbd：设备短暂离线、设备端 daemon 被杀，采样中会话走既有
 /// 重连恢复（新 daemon 继承 root 身份，新 hello root=true）。轮询 `id` 确认
 /// （adbd 重启需数秒），上限 15s；生产构建拒 root 时透传 adb 原文报错。
+/// Ss4 兜底（设计 §6 ②）：直连失败时经 MindRT 网关 `rootandroid.sh`，
+/// ①② 报错各自透传区分。
 /// `serial`：目标设备（多设备并行会话用，`None` 回退全局选择）。
 pub fn acquire_root(serial: Option<&str>) -> Result<String> {
     use std::time::{Duration, Instant};
@@ -404,6 +450,7 @@ pub fn acquire_root(serial: Option<&str>) -> Result<String> {
         .context("adb root 执行失败")?;
     let msg = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
     let deadline = Instant::now() + Duration::from_secs(15);
+    let mut direct_err: Option<String> = None;
     while Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(500));
         let id = crate::utils::run_adb_command_for(serial, &["shell", "id"]).map(|o| o.stdout).unwrap_or_default();
@@ -412,14 +459,28 @@ pub fn acquire_root(serial: Option<&str>) -> Result<String> {
         }
         // adbd 已回来但仍 shell 且 adb root 明确拒绝（生产构建）：fail-fast 报原文
         if id.contains("uid=") && msg.contains("cannot") {
-            anyhow::bail!("{}", msg.trim());
+            direct_err = Some(msg.trim().to_string());
+            break;
         }
     }
-    if msg.trim().is_empty() {
-        anyhow::bail!("adb root 超时（15s 内设备未以 root 回来）")
-    } else {
-        anyhow::bail!("{}（15s 未生效）", msg.trim())
+    let err1 = direct_err.unwrap_or_else(|| {
+        if msg.trim().is_empty() {
+            "adb root 超时（15s 内设备未以 root 回来）".to_string()
+        } else {
+            format!("{}（15s 未生效）", msg.trim())
+        }
+    });
+    // ② Ss4 经网关兜底（① 已失败；①② 报错各自透传）
+    if matches!(
+        crate::platform::detect_platform_live(serial).id(),
+        crate::platform::PlatformId::Ss4
+    ) {
+        match ss4_root_via_gateway(serial) {
+            Ok(detail) => return Ok(format!("已获取 root 权限（{}）", detail)),
+            Err(e2) => anyhow::bail!("① {}；② 经网关 rootandroid.sh 也失败：{}", err1, e2),
+        }
     }
+    anyhow::bail!("{}", err1)
 }
 
 /// 推送 agent 到设备（设备上不存在或大小/mtime 不一致时）
@@ -684,11 +745,25 @@ fn device_online(serial: Option<&str>) -> bool {
     }
     match crate::utils::resolve_serial(serial) {
         // get-state：正常输出 "device"；offline/unauthorized/serial 无效时 adb 报错（status != 0）
-        Some(_) => adb()
-            .arg("get-state")
-            .output()
-            .map(|o| o.status.success() && String::from_utf8_lossy(&o.stdout).trim() == "device")
-            .unwrap_or(false),
+        Some(eff) => {
+            let online = || {
+                adb()
+                    .arg("get-state")
+                    .output()
+                    .map(|o| o.status.success() && String::from_utf8_lossy(&o.stdout).trim() == "device")
+                    .unwrap_or(false)
+            };
+            if online() {
+                return true;
+            }
+            // SS4 桥接伪设备（localhost:<port>）：GVM 重启掉线后无人重新 connect
+            // 会永远等不回——先经 bridge 自愈（按规则存在性重建 + connect），
+            // 再探活一次（设计 §4.3.2；GUI 侧监视器 3s 轮询经 refresh 双保险）
+            if eff.starts_with("localhost:") && crate::bridge::reconnect(&eff) {
+                return online();
+            }
+            false
+        }
         None => true,
     }
 }

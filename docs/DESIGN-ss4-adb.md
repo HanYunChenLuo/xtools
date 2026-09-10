@@ -3,9 +3,12 @@
 > **目标**：SS4 真机（接 hppc）上，xtools 的设备枚举/agent 部署/采样/深挖全链路
 > 无感支持 SS4 的「MindRT（Linux 主控）+ Android（GVM）」双系统拓扑。
 >
-> **状态**：设计稿 v1.1（2026-09-10）。已完成一轮自 review 修正（冷却语义统一 /
-> GUI 网关过滤三处收敛 / serial 稳定性不变量 / §5.2 断言软化 / R8 并项），
-> **待真机预验证（S0）——假设推翻先改设计再动工**。
+> **状态**：设计稿 v1.2（2026-09-10）。自 review 修正（冷却语义统一 /
+> GUI 网关过滤三处收敛 / serial 稳定性不变量 / §5.2 断言软化 / R8 并项）后，
+> **S0 真机预验证已完成（hppc，结论见 §8 表「实测结论」列）**：R1/R2/R3/R4/R5/R7
+> 全部成立（R3/R4 比假设更乐观）；**R8 推翻——ligfxprofilerd 在 MindRT 侧而非 GVM
+> logcat**，GPU 通道须按 R8 fallback 改为 host 侧经网关读取（属 H 节 GPU 项）。
+> 桥接主设计（方案 A）零改动，可进 S1-S6 实施。
 > **依据**：飞书《SS4.0 (8797) USB ADB调试指南》
 > （https://li.feishu.cn/docx/ID7JduPFEoM9G4xWH6ocbMZVnZe），
 > 平台代码现状（`platform/ss4.rs` 桩 + `detect_platform` 的 SS4 单测），
@@ -34,7 +37,9 @@
 SS4（SA8797P）是 hypervisor 双系统：**MindRT（Linux PVM，主控）** 直接挂 USB，
 **Android（GVM）** 不在 USB 上——PC 的 `adb devices` 默认**只能看到 MindRT**。
 Android 在 MindRT 侧的地址是 `172.31.101.51:5555`，MindRT 上有中继服务监听
-`tcp:5557`（⚠ 假设：常驻、无需额外启动命令），把 PC 侧流量转进 Android adbd。
+`tcp:5557`（✅ S0 实测：常驻、无需额外启动命令；实为 MindRT 上一个 `adb` 进程
+LISTEN `127.0.0.1:5557`，跨 GVM 重启存活、跨 MindRT adbd 重启也存活），
+把 PC 侧流量转进 Android adbd。
 
 指南给出的进 Android 三条路（均以 USB 连 MindRT 为前提）：
 
@@ -47,9 +52,10 @@ Android 在 MindRT 侧的地址是 `172.31.101.51:5555`，MindRT 上有中继服
 root/remount Android 的方法（同表，节选与本项目相关的）：
 
 - **标准 adb 路径**（方法 3.3/3.4）：`adb shell rootandroid.sh` / `remountandroid.sh`
-  ——**脚本跑在 MindRT 上**，由它把 Android 的 adbd 提到 root。⚠ 隐含假设：
-  `adb -s localhost:5559 root` 对标准 adb **不可用**（否则文档不需要脚本路径；
-  另 AOSP adbd 本就常拒绝 TCP 连接上的 root），待真机确认。
+  ——**脚本跑在 MindRT 上**（S0 实测在 `/system_ext/bin/`，PATH 内），由它把 Android
+  的 adbd 提到 root。~~⚠ 隐含假设：`adb -s localhost:5559 root` 对标准 adb 不可用~~
+  **✅ S0 实测推翻：标准 adb 直接 `root` 成功（无 TCP root 限制）**，rootandroid.sh
+  降级为兜底路径（也实测成功）。
 - 厂商 tool 路径（3.1/3.2）：`adb root-android` 或 connect 后 `adb -s localhost:5559 root`。
 
 push 文件到 Android：root+remount 后经 `localhost:5559` push（推 `/system` 等分区才
@@ -274,15 +280,16 @@ SS2/SS3/手机与 SS4 混连（含本次 review 补充确认）：全部走 `-s`
 
 ## 6. root 链路设计
 
-SS4 Android root 的三条候选路径（真机按序探测，R3 定稿）：
+SS4 Android root 路径（**S0 已实测定稿**）：
 
 ```
 try_adb_root(serial=localhost:5559) / acquire_root(serial) 的 Ss4 分支：
   ① 直接 adb -s localhost:5559 root → wait → shell id
-     （⚠ 疑似被 TCP root 限制拒绝；厂商 tool 文档路径暗示可行，标准 adb 待实测）
-  ② 失败 → 经网关：adb -s <mindrt> shell rootandroid.sh
+     （✅ S0 实测成功——本机 adbd 无 TCP root 限制，① 即主路径）
+  ② 失败 → 经网关：adb -s <mindrt> shell rootandroid.sh（/system_ext/bin/，PATH 内）
      → adb connect localhost:5559（adbd 提权重启会掉连接，重连）
      → 轮询 adb -s localhost:5559 shell id（复用 acquire_root 15s 轮询骨架）
+     （✅ S0 实测成功，作为 ① 的兜底保留）
   验证口径不变：uid=0；XPERF_NO_AUTO_ROOT 门控 ①②。
 ```
 
@@ -333,14 +340,28 @@ remount 本项目不需要（只写 /data/local/tmp）。
 
 R1-R5 为 S0 预验证必做项；R7 顺手；R8 与 H 节第 3 项合并验证。
 
+### S0 实测结论（2026-09-10，hppc：MindRT `42087266b1f` usb:1-12.3 + SS3 + SS2MAX 三机同连）
+
+| # | 结论 | 实测证据 |
+|---|---|---|
+| R1 | ✅ **成立，F1 不需要** | 手工 forward+connect 后推 agent 起 daemon，`forward tcp:15559 localabstract:xperf-agent` + `nc 127.0.0.1 15559` 收到 hello（`ncores:12, version:2`）——localabstract 穿 5557 中继无阻碍 |
+| R2 | ✅ **成立** | 真机 `adb devices -l` 与设计预期逐字一致：MindRT 行无 product 字段；桥接后 `localhost:5559 device product:HU_SS4 model:HU_Smart_space_4_0 device:HU_SS4`（`test_detect_ss4` 单测形态即真机形态） |
+| R3 | ✅ **比假设乐观** | 标准 adb `adb -s localhost:5559 root` **直接成功**（uid=0，无 TCP root 限制）→ §6 ① 为主路径；② MindRT `rootandroid.sh`（`/system_ext/bin/`，PATH 内）也实测成功，留作兜底 |
+| R4 | ✅ **比假设乐观** | MindRT adbd 为 uid=2000(adb)（未 root）时 forward+connect 即成功——bootstrap 的 MindRT root 保持 best-effort（对齐文档顺序），**非必要步骤** |
+| R5 | ✅ **成立，零干预自愈** | `adb -s localhost:5559 reboot`（只重启 GVM）：serial **不从 `adb devices` 消失**（offline 态）→ **~24s 自动回 device**；forward 规则 / connect 对象 / 5557 中继全程存活，期间 `adb connect` 返回 "already connected"（无害 no-op）。另实测：**MindRT adbd 重启（`adb root` 提权）会清掉其 forward 规则**（relay 进程存活）→ refresh 的「按规则存在性重建」路径必需，§5.2 软化断言成立（消亡派） |
+| R7 | ✅ **成立** | `getprop ro.build.version.release` = **Android 16**（FPS 图层名按 A12+ BLAST 形态）；shell/push/install/`am start -W`（gltf viewer COLD 310ms）全正常 |
+| R8 | ⚠ **推翻，走 fallback** | ligfxprofilerd 跑在 **MindRT**（`/usr/bin/ligfxprofilerd` pid 8770），**GVM logcat 无任何 ligfx 输出** → agent `gpu/ligfx.rs`（读 GVM logcat）不成立，GPU 通道改 host 侧 `adb -s <mindrt> shell logcat -s ligfxprofilerd` 流式读取（R8 fallback，H 节 GPU 项实施）。实测数据形态：每 **~5s** 一个帧块；Sys 行 `Frequency: 1000 Hz, Tasks: N, GSL Timestamp, Global: Busy/Queued/Utilization`；Proc 行 `GVM_<comm 15字符截断>-<会话id>`（id **非 GVM pid 且跨重启变化**——reboot 后 surfaceflinger 7320→1573333，**归因只能按 comm**，与 agent `lookup_pid` 截断匹配语义一致）；负载对照：gltf viewer 渲染时 Global Busy 11%→29% 且出现 `GVM_d.filament.gltf` 行。**Frequency 恒 1000**（空闲/负载不变；GPU 经 VFIO 直通 GVM——MindRT 仅见 `vfio_kgsl*` 平台设备、GVM 无 `/sys/class/kgsl`，两侧均无频率节点可对照）——单位（Hz 标注疑似 MHz）与是否定频占位待 H 节 GPU 项结合厂商资料定论 |
+
+**设备环境备忘**（S0 后状态）：MindRT 已被 `adb root`（提权后 adbd uid=0）；GVM 经 rootandroid.sh 提为 root；gltf viewer 已装 SS4（包名 `com.google.android.filament.gltf`）；测试 agent daemon 已随 GVM 重启清除。
+
 ---
 
 ## 9. 实施计划
 
 分支 `feature/ss4-adb-bridge`，一步一 commit（对齐 ssh-remote 的实施风格）：
 
-- **S0 预验证（无代码）**：hppc 上按 §8 清单手工验证 R1-R5/R7/R8，结论回填本文
-  （含 `adb devices -l` 实际形态、root 行为、中继恢复时长）。**假设推翻则先改设计再动工。**
+- **S0 预验证（无代码）**（✅ 2026-09-10 完成，结论见 §8「S0 实测结论」表：
+  R1-R5/R7 成立、R8 推翻走 fallback；主设计零改动）。
 - **S1 `bridge.rs` 核心**：BridgeState + refresh/bootstrap/reconnect + forward
   --list 解析/端口分配/网关判定（纯函数拆出可单测：`parse_forward_list`、
   `allocate_port`、`classify_gateway`）。

@@ -122,6 +122,10 @@ pub struct AdbDevice {
     /// 纯解析不填，恒为空串，`list_adb_devices` 逐台补齐；取失败为 `?`）。
     /// 采集方式与 Android 版本相关（如 BLAST 合成层是 12+ 特性），供选路参考。
     pub android_version: String,
+    /// SS4 MindRT 网关（Linux 主控，非 Android 采样目标；桥接宿主）。
+    /// `parse_adb_devices` 纯解析恒为 false，由 `bridge::refresh` 落标记；
+    /// true 时 CLI `pick_device` 跳过、GUI 前端隐藏，采样命令拒绝。
+    pub is_gateway: bool,
 }
 
 /// 解析 `adb devices -l` 输出为在线设备列表（跳过 `offline`/`unauthorized` 行）。
@@ -148,6 +152,7 @@ pub fn parse_adb_devices(output: &str) -> Vec<AdbDevice> {
             product: field("product"),
             model: field("model"),
             android_version: String::new(),
+            is_gateway: false,
         });
     }
     out
@@ -156,9 +161,25 @@ pub fn parse_adb_devices(output: &str) -> Vec<AdbDevice> {
 /// 拉取在线设备列表（`adb devices -l`；`-s` 对 `devices` 子命令无效，恒列全部），
 /// 并逐台 `getprop ro.build.version.release` 补 Android 版本（采集方式与版本相关，
 /// 如 BLAST 合成层是 12+ 特性；取失败标 `?`）
+///
+/// 尾部经 [`crate::bridge::refresh`] 收敛 SS4 桥接：网关（MindRT）打 `is_gateway`
+/// 标记，新建/接回 `localhost:<port>` 伪设备后有界重枚举（≤2 轮）纳入返回值——
+/// CLI 启动、GUI `list_devices`、热插拔监视器、`ensure_device_online`
+/// 全部自动获得桥接能力，无需各自记得调用。
 pub fn list_adb_devices() -> Result<Vec<AdbDevice>> {
-    let out = run_adb(&["devices", "-l"]).context("执行 adb devices -l 失败")?;
-    let mut devices = parse_adb_devices(&out.stdout);
+    let parse = || -> Result<Vec<AdbDevice>> {
+        let out = run_adb(&["devices", "-l"]).context("执行 adb devices -l 失败")?;
+        Ok(parse_adb_devices(&out.stdout))
+    };
+    let mut devices = parse()?;
+    // 桥接收敛：refresh 幂等——首轮可能新建连接需重枚举纳入 android 伪设备；
+    // 重枚举后再过一轮 refresh 补 is_gateway 标记（不再 connect → 返回 false 退出）
+    for _ in 0..2 {
+        if !crate::bridge::refresh(&mut devices) {
+            break;
+        }
+        devices = parse()?;
+    }
     for d in &mut devices {
         let ver = run_adb(&["-s", &d.serial, "shell", "getprop", "ro.build.version.release"])
             .ok()
@@ -172,7 +193,14 @@ pub fn list_adb_devices() -> Result<Vec<AdbDevice>> {
 
 /// 设备选择策略：`preferred`（须在在线列表中）> 单台自动 > 多台报错（错误信息带设备清单）。
 /// 返回选中的设备；由调用方负责 `set_target_serial(Some(serial))` 生效。
+/// SS4 网关（MindRT，`is_gateway`）先过滤——单台 SS4 连接时列表有 MindRT +
+/// `localhost:<port>` 两台，过滤后自动选中 Android；多台报错清单也只列 Android。
 pub fn pick_device(preferred: Option<&str>, devices: &[AdbDevice]) -> Result<AdbDevice> {
+    let filtered: Vec<AdbDevice> = devices.iter().filter(|d| !d.is_gateway).cloned().collect();
+    let devices = filtered.as_slice();
+    if devices.is_empty() && preferred.is_none() {
+        anyhow::bail!("无 adb 设备在线（adb devices 为空或仅 SS4 MindRT 网关在线、Android 未桥接）");
+    }
     if let Some(p) = preferred {
         return devices
             .iter()
@@ -307,7 +335,7 @@ mod tests {
         assert_eq!(devices.len(), 2); // offline 行跳过
         assert_eq!(
             devices[0],
-            AdbDevice { serial: "1280da60".into(), product: "dada".into(), model: "24129PN74C".into(), android_version: String::new() }
+            AdbDevice { serial: "1280da60".into(), product: "dada".into(), model: "24129PN74C".into(), android_version: String::new(), is_gateway: false }
         );
         assert_eq!(devices[1].serial, "6eb792dfb0f");
         assert_eq!(devices[1].product, "HU_SS3");
@@ -335,10 +363,37 @@ mod tests {
         assert!(pick_device(None, &[]).is_err());
     }
 
+    #[test]
+    fn test_pick_device_filters_gateway() {
+        let gw = |serial: &str, is_gateway: bool, product: &str| AdbDevice {
+            serial: serial.into(), product: product.into(), model: String::new(),
+            android_version: String::new(), is_gateway,
+        };
+        // 单台 SS4：MindRT（网关）+ localhost:5559（Android）→ 过滤后自动选中 Android
+        let ss4 = vec![gw("42087266b1f", true, ""), gw("localhost:5559", false, "HU_SS4")];
+        assert_eq!(pick_device(None, &ss4).unwrap().serial, "localhost:5559");
+        // 多台报错清单只列 Android（不含 MindRT）
+        let multi = vec![
+            gw("42087266b1f", true, ""),
+            gw("localhost:5559", false, "HU_SS4"),
+            gw("6eb792dfb0f", false, "HU_SS3"),
+        ];
+        let e = pick_device(None, &multi).unwrap_err().to_string();
+        assert!(e.contains("localhost:5559") && e.contains("6eb792dfb0f"));
+        assert!(!e.contains("42087266b1f"));
+        // 全网关 → 报错（提示 Android 未桥接）
+        let only_gw = vec![gw("42087266b1f", true, "")];
+        let e = pick_device(None, &only_gw).unwrap_err().to_string();
+        assert!(e.contains("未桥接"));
+        // 显式指定网关 → 按不在线处理（错误信息列出的在线清单已过滤网关）
+        let e = pick_device(Some("42087266b1f"), &ss4).unwrap_err().to_string();
+        assert!(e.contains("不在线"));
+    }
+
     // ---- 热插拔 diff ----
 
     fn dev(serial: &str) -> AdbDevice {
-        AdbDevice { serial: serial.into(), product: String::new(), model: String::new(), android_version: String::new() }
+        AdbDevice { serial: serial.into(), product: String::new(), model: String::new(), android_version: String::new(), is_gateway: false }
     }
 
     // ---- adb_command 传输注入（S3）----

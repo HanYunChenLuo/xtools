@@ -7,6 +7,47 @@
 
 ---
 
+## 2026-09-10(3) — SS4 adb 自动桥接实施 S1-S6（WORKSPACE H，`feature/ss4-adb-bridge`）
+
+**任务**：按 `docs/DESIGN-ss4-adb.md` §9 实施 bridge 模块（S1-S5）+ 真机回归（S6）。
+
+**commit**：5018c11（S1 bridge.rs 核心）→ 03aa440（S2 utils 集成）→ e184ddc（S3+S4 root 链路与自愈）→ fa5cc6f（S5 GUI 过滤）→ f957d8c（review 修复：acquire_root 补 Ss4 兜底 + bootstrap 每轮重读规则防多网关端口撞车）。文档收尾（CLAUDE.md 桥接段/WORKSPACE/SESSION）随合并提交。
+
+**实现要点**（详见 CLAUDE.md「SS4 adb 自动桥接」）：
+- `bridge.rs`：refresh（forward --list 恢复映射/已知网关 connect 每轮都试/候选 bootstrap 60s 冷却/≤2 轮有界重枚举）+ reconnect（按规则存在性重建+connect）+ 纯函数 parse_forward_list/allocate_port/classify_device（9 单测）；serial 恒 `localhost:<port>` 字面（serial 稳定性不变量）
+- 集成点恰好四处：list_adb_devices 尾部 hook、device_online localhost 分支、try_adb_root/acquire_root Ss4 兜底（rootandroid.sh）、pick_device 过滤 is_gateway
+- GUI：`visible_devices` 统一收敛三处 payload（devices_json 内聚/list_devices/监视器 diff 前）；ensure_device_online 拒绝网关并指引；前端零改动
+
+**S6 真机回归基线**（全部 --remote hppc，SS4+SS3+SS2MAX 三机同连）：
+- 清桥接状态后 CLI 自动 bootstrap 成功：多台报错清单只列 3 台 Android（`localhost:5559 HU_Smart_space_4_0 Android 16` 自动桥接出现，MindRT 被过滤）
+- `--device localhost:5559` 采样：auto-root ①直连成功、平台 SS4/12 核/hello root、CPU 500ms 样本（gltf ~10-14%）/线程明细/流式 CSV/退出图表全通
+- **采样中 GVM reboot**：连接断开 → bridge 自愈 → 自动重连恢复；重连竞态中 root ①直连与 ②网关 rootandroid.sh 兜底**均真实触发成功**
+- 三机并行采样（SS4+SS3+SS2MAX 各一 CLI 进程）：18/21/14 样本互不干扰
+- 静态：全量测试 94 绿（core 90+7ignored/gui 8/cli 5/xrm 2 减重复计数）、clippy 0、cargo doc 0
+
+**遗留**：九项指标逐项实测 + C 类回归 + platform/ss4.rs 桩补实（WORKSPACE H 剩余项，独立会话）——ligfx 通道须改 host 侧经网关读 MindRT logcat（S0/R8）；ligfx Frequency 恒 1000 单位存疑；hello maxkhz 全 0 待查。GUI 桥接路径为命令级验证（未跑 GUI 进程目验 tab 行为，payload 过滤由 devices_json 单点收敛）。
+
+---
+
+## 2026-09-10(2) — SS4 S0 真机预验证（WORKSPACE H，无代码）
+
+**任务**：按 `docs/DESIGN-ss4-adb.md` §8 清单在 hppc 上手工 adb 预验证 R1-R5/R7/R8，结论回填设计文档。
+
+**环境**：SS4 接 hppc（MindRT `42087266b1f` usb:1-12.3，无 product 字段）+ SS3 + SS2MAX 三机同连；纯 ssh hppc 手工 adb，无代码改动。
+
+**结论**（设计文档已回填 v1.2，**方案 A 主设计零改动，可进 S1-S6**）：
+- **R1 ✅（最高风险排除）**：`forward tcp:15559 localabstract:xperf-agent` 穿 5557 中继成功，nc 收 agent hello（12 核/version 2）——F1（agent --tcp-port 模式）不需要。
+- **R2 ✅**：真机 `adb devices -l` 形态与设计/单测逐字一致（桥接后 `localhost:5559 product:HU_SS4 model:HU_Smart_space_4_0`）。
+- **R3 ✅ 比假设乐观**：标准 adb `adb -s localhost:5559 root` **直接成功**（无 TCP root 限制）→ root 主路径；MindRT `rootandroid.sh`（/system_ext/bin）兜底也实测成功。
+- **R4 ✅ 比假设乐观**：MindRT 未 root（adbd uid=2000）即可 forward+connect——bootstrap 的 MindRT root 非必要，保持 best-effort。
+- **R5 ✅**：`adb -s localhost:5559 reboot` 只重启 GVM；serial **不消失**（offline 态）→ **~24s 自动回 device**，forward 规则/connect/中继全程存活，零干预自愈（connect 返 "already connected" 为无害 no-op）。**另实测：MindRT adbd 重启（root 提权）清 forward 规则**（relay 是 MindRT 上一个 adb 进程 LISTEN 127.0.0.1:5557，跨重启存活）→ refresh 重建路径必需。
+- **R7 ✅**：**Android 16**（FPS 图层按 A12+ BLAST 形态）；push/install/`am start -W`（gltf viewer COLD 310ms）正常。
+- **R8 ⚠ 推翻**：ligfxprofilerd 在 **MindRT 侧**（/usr/bin/ligfxprofilerd），**GVM logcat 无 ligfx 输出** → agent `gpu/ligfx.rs` 通道不成立，走 fallback：host 侧 `adb -s <mindrt> shell logcat -s ligfxprofilerd` 流式读取（H 节 GPU 项实施）。数据形态：~5s/帧块；Sys=Frequency/Busy/Queued/Utilization；Proc=`GVM_<comm 15字符截断>-<会话id>`（id 非 GVM pid、跨重启变化，归因按 comm）；负载对照 gltf viewer Global Busy 11%→29%。**Frequency 恒 1000**（GPU VFIO 直通 GVM，MindRT/GVM 均无 kgsl/devfreq 节点可对照；Hz 标注疑似 MHz，单位与定频问题留 H 节 GPU 项）。
+
+**遗留**：进 S1（bridge.rs 核心）→ S6，实施计划与测试设计见 `docs/DESIGN-ss4-adb.md` §9/§10；ligfx Frequency 单位核实并入 H 节 GPU 项。设备收尾状态：MindRT 已 root、GVM 已 root（rootandroid.sh）、gltf viewer 已装 SS4、测试 agent daemon 已随 GVM 重启清除。
+
+---
+
 ## 2026-09-10 — SS4 adb 桥接方案设计（WORKSPACE H 前置，无代码）
 
 **任务**：读飞书《SS4.0 (8797) USB ADB调试指南》，设计 SS4（SA8797P）双系统拓扑的 adb 接入方案；一轮自 review 后定稿，交接新会话实施。
