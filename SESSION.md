@@ -21,6 +21,8 @@
 
 **遗留**：SS4 FPS 数据源选型 + ligfx host 侧通道（WORKSPACE H 剩余项）。
 
+**补充（2026-09-10 晚，gltf 无 FPS 深挖）**：gltf 反复崩溃 = **RemoteServer 8082 端口冲突**（filament-utils 调试服务器，Application Error 窗遮挡 → 无上屏帧）；force-stop 清场重启后恢复。**frametimeline 归因粒度局限确证**：BLAST 层（SurfaceView 直渲应用）帧折叠进 layer_name=NULL 的 display 级合成流（vsync 合并），per-layer `TX -` 行仅覆盖非 BLAST 系统窗——A/B 对照：gltf 动画时 NULL 359 帧/6s≈60fps，杀掉后 122 帧/6s≈20fps（系统底噪）。**单动画源场景 NULL 流 ≈ 应用 FPS**（基线扣除系统动画）；真 per-layer 归因与 --latency 同被 QCM 构建阉割。
+
 ---
 
 ## 2026-09-10(3) — SS4 adb 自动桥接实施 S1-S6（WORKSPACE H，`feature/ss4-adb-bridge`）
