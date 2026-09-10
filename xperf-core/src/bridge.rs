@@ -227,7 +227,10 @@ pub fn refresh(devices: &mut [AdbDevice]) -> bool {
         if with_state(|s| cooldown_active(&s.failed, &serial, Instant::now())) {
             continue;
         }
-        match bootstrap_gateway(&serial, &rules) {
+        // 每轮重读规则：多网关同轮 bootstrap 时端口分配须看到上一台新建的规则
+        // （否则两台撞同端口，connect 会错接到第一台网关的 Android）
+        let fresh_rules = forward_rules();
+        match bootstrap_gateway(&serial, &fresh_rules) {
             Some(info) => {
                 with_state(|s| {
                     s.gateways.insert(serial.clone(), info);

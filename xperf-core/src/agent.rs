@@ -439,6 +439,8 @@ fn ss4_root_via_gateway(serial: Option<&str>) -> Result<String, String> {
 /// `adb root` 会重启 adbd：设备短暂离线、设备端 daemon 被杀，采样中会话走既有
 /// 重连恢复（新 daemon 继承 root 身份，新 hello root=true）。轮询 `id` 确认
 /// （adbd 重启需数秒），上限 15s；生产构建拒 root 时透传 adb 原文报错。
+/// Ss4 兜底（设计 §6 ②）：直连失败时经 MindRT 网关 `rootandroid.sh`，
+/// ①② 报错各自透传区分。
 /// `serial`：目标设备（多设备并行会话用，`None` 回退全局选择）。
 pub fn acquire_root(serial: Option<&str>) -> Result<String> {
     use std::time::{Duration, Instant};
@@ -448,6 +450,7 @@ pub fn acquire_root(serial: Option<&str>) -> Result<String> {
         .context("adb root 执行失败")?;
     let msg = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
     let deadline = Instant::now() + Duration::from_secs(15);
+    let mut direct_err: Option<String> = None;
     while Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(500));
         let id = crate::utils::run_adb_command_for(serial, &["shell", "id"]).map(|o| o.stdout).unwrap_or_default();
@@ -456,14 +459,28 @@ pub fn acquire_root(serial: Option<&str>) -> Result<String> {
         }
         // adbd 已回来但仍 shell 且 adb root 明确拒绝（生产构建）：fail-fast 报原文
         if id.contains("uid=") && msg.contains("cannot") {
-            anyhow::bail!("{}", msg.trim());
+            direct_err = Some(msg.trim().to_string());
+            break;
         }
     }
-    if msg.trim().is_empty() {
-        anyhow::bail!("adb root 超时（15s 内设备未以 root 回来）")
-    } else {
-        anyhow::bail!("{}（15s 未生效）", msg.trim())
+    let err1 = direct_err.unwrap_or_else(|| {
+        if msg.trim().is_empty() {
+            "adb root 超时（15s 内设备未以 root 回来）".to_string()
+        } else {
+            format!("{}（15s 未生效）", msg.trim())
+        }
+    });
+    // ② Ss4 经网关兜底（① 已失败；①② 报错各自透传）
+    if matches!(
+        crate::platform::detect_platform_live(serial).id(),
+        crate::platform::PlatformId::Ss4
+    ) {
+        match ss4_root_via_gateway(serial) {
+            Ok(detail) => return Ok(format!("已获取 root 权限（{}）", detail)),
+            Err(e2) => anyhow::bail!("① {}；② 经网关 rootandroid.sh 也失败：{}", err1, e2),
+        }
     }
+    anyhow::bail!("{}", err1)
 }
 
 /// 推送 agent 到设备（设备上不存在或大小/mtime 不一致时）
