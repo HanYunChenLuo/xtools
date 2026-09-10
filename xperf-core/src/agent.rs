@@ -275,6 +275,11 @@ impl AgentStream {
             let mut line = String::new();
             let n = self.reader.read_line(&mut line)?;
             if n == 0 {
+                // EOF 前先放尽已排队的 host 合成事件（如通道退出终态 err），
+                // 否则随 None 返回被静默丢弃
+                if let Some(ev) = self.take_extra() {
+                    return Ok(Some(ev));
+                }
                 return Ok(None); // EOF
             }
             let line = line.trim();

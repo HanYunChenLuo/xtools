@@ -21,6 +21,9 @@
 //! display 级合成流（vsync 合并）。因此事件语义 = **display 合成 FPS ≈ 被测应用
 //! FPS（单动画源场景）**，含系统低频动画底噪（静止时非 0），不做 per-layer 归因；
 //! `layer` 字段固定 `(display)` 标注。应用进程不在时不发事件（底噪不归因）。
+//!
+//! 注意：合成事件的 `ts` 取 **host 墙钟**，设备端事件取设备墙钟——GVM 时钟与
+//! host 漂移时两类事件在时间轴上会有固定偏移（已知局限，车机通常 NTP 同步）。
 
 use crate::agent::AgentEvent;
 use crate::platform::PlatformId;
@@ -119,11 +122,13 @@ fn spawn_frametimeline(pkg: String, serial: Option<String>, tx: HostTx, stop: Ar
             match record_and_parse_window(&tp, serial.as_deref(), FPS_WINDOW_SECS) {
                 Ok(frames) => {
                     fails = 0;
+                    // 水位无条件推进（含应用死亡窗口的底噪帧），否则复活后首个
+                    // 样本把死亡期累积帧全部计入（fps/jank 虚高）
+                    let (n, fps, jank) = summarize_window(&frames, &mut watermark, FPS_WINDOW_SECS as f32);
                     // 应用进程不在时不发事件（display 流含系统底噪，不归因给死进程）
                     let Some(pid) = first_pid_of(serial.as_deref(), &pkg) else {
                         continue;
                     };
-                    let (n, fps, jank) = summarize_window(&frames, &mut watermark, FPS_WINDOW_SECS as f32);
                     let ev = AgentEvent::Fps {
                         ts: now_ms(),
                         pid,
@@ -192,10 +197,12 @@ fn record_window(serial: Option<&str>, secs: u64, dev_path: &str) -> Result<()> 
             Some(_) => break,
             None if crate::utils::is_interrupted() => {
                 let _ = child.kill();
+                let _ = child.wait(); // 回收僵尸进程
                 bail!("录制被 Ctrl-C 中断");
             }
             None if Instant::now() > deadline => {
                 let _ = child.kill();
+                let _ = child.wait();
                 bail!("perfetto 录制超时（>{}s）", secs + 15);
             }
             None => std::thread::sleep(Duration::from_millis(100)),
@@ -208,26 +215,53 @@ fn record_window(serial: Option<&str>, secs: u64, dev_path: &str) -> Result<()> 
     Ok(())
 }
 
-/// 拉回窗口 trace 到本地临时文件
+/// 拉回窗口 trace 到本地临时文件（30s 超时兜底：通道是循环结构，pull 挂起
+/// 会永久 wedge 通道线程，不像一次性 --trace 可以接受无超时）
 fn pull_window(serial: Option<&str>, dev_path: &str, local_path: &Path) -> Result<()> {
-    let pull = crate::utils::adb_for(serial)
+    let mut child = crate::utils::adb_for(serial)
         .arg("pull")
         .arg(dev_path)
         .arg(local_path)
-        .output()
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
         .context("执行 adb pull 失败")?;
-    if !pull.status.success() {
-        bail!("adb pull 失败: {}", String::from_utf8_lossy(&pull.stderr).trim());
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        match child.try_wait()? {
+            Some(status) => {
+                if !status.success() {
+                    let mut err = String::new();
+                    if let Some(mut e) = child.stderr.take() {
+                        let _ = std::io::Read::read_to_string(&mut e, &mut err);
+                    }
+                    bail!("adb pull 失败: {}", err.trim());
+                }
+                return Ok(());
+            }
+            None if crate::utils::is_interrupted() => {
+                let _ = child.kill();
+                let _ = child.wait();
+                bail!("pull 被 Ctrl-C 中断");
+            }
+            None if Instant::now() > deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                bail!("adb pull 超时（>30s）");
+            }
+            None => std::thread::sleep(Duration::from_millis(100)),
+        }
     }
-    Ok(())
 }
 
 /// trace_processor 解析窗口 trace，返回 display 合成流帧时间戳（ns，升序）
 fn parse_window(tp: &Path, local_path: &Path) -> Result<Vec<i64>> {
     let sql_path = local_path.with_extension("sql");
     std::fs::write(&sql_path, FRAMETIMELINE_SQL)?;
-    let (stdout, _stderr) = crate::trace::run_trace_processor(tp, local_path, &sql_path)?;
+    // 先取结果再删临时文件：查询失败路径也不遗留 .sql
+    let res = crate::trace::run_trace_processor(tp, local_path, &sql_path);
     let _ = std::fs::remove_file(&sql_path);
+    let (stdout, _stderr) = res?;
     Ok(parse_frame_rows(&stdout))
 }
 
@@ -254,7 +288,9 @@ fn parse_frame_rows(tp_stdout: &str) -> Vec<i64> {
 /// 窗口汇总：帧时间戳（ns，boot 钟）经水位去重后计 fps/jank。
 ///
 /// 返回 (新帧数, fps, jank 数)。窗口无新帧时 fps=0（静止是真实状态）。
-/// jank 口径与 agent fps.rs 一致：帧间隔 > 2×窗口中位间隔，<3 帧不计。
+/// jank 阈值语义与 agent fps.rs 一致（间隔 > 2×窗口中位间隔，间隔数 <3 不计），
+/// 但**不含跨窗口边界间隔**（agent 的 prev 末帧语义此处不适用：相邻两次录制之间
+/// 有 ~1-2s 盲区，边界间隔混入的是录制间隙而非真实卡顿）。
 /// `watermark` 为跨窗口帧去重水位（顺序录制窗口本不相交，水位为防御性保底）。
 fn summarize_window(frames_ns: &[i64], watermark: &mut i64, wall_secs: f32) -> (u32, f32, u32) {
     let kept: Vec<i64> = frames_ns.iter().copied().filter(|ts| *ts > *watermark).collect();
@@ -263,7 +299,7 @@ fn summarize_window(frames_ns: &[i64], watermark: &mut i64, wall_secs: f32) -> (
     }
     let n = kept.len() as u32;
     let fps = if wall_secs > 0.0 { n as f32 / wall_secs } else { 0.0 };
-    let jank = if kept.len() >= 3 {
+    let jank = if kept.len() >= 4 {
         let mut iv: Vec<i64> = kept.windows(2).map(|w| w[1] - w[0]).collect();
         iv.sort_unstable();
         let median = iv[iv.len() / 2];
@@ -294,9 +330,13 @@ fn now_ms() -> u64 {
 
 /// ligfx 通道的进程内独占登记（按 Android serial）。logcat 是只读通道，跨进程无
 /// QNX 统计链式的写冲突；进程内独占防止多会话在同一 MindRT 上重复起 logcat 读流。
-static LIGFX_BUSY: Mutex<Vec<String>> = Mutex::new(Vec::new());
+///
+/// 条目附带会话 stop 标志的弱引用：重连路径上 reconnect_agent 先 spawn 新会话、
+/// 后 drop 旧流（旧线程滞后退出），若按「登记在即占用」判定会让重连后的会话
+/// 永远被前任占位禁用。弱引用升级失败或 stop 已置位的前任视为可接管。
+static LIGFX_BUSY: Mutex<Vec<(String, std::sync::Weak<AtomicBool>)>> = Mutex::new(Vec::new());
 
-/// ligfx logcat 断流后的重连间隔
+/// ligfx logcat 断流/启动失败后的重连间隔
 const LIGFX_RECONNECT_SECS: u64 = 2;
 
 /// ligfx 行解析结果（归一自系统行/进程行；移植自 xperf-agent gpu/ligfx.rs，
@@ -336,7 +376,11 @@ fn parse_ligfx_line(line: &str) -> Option<LigfxEvent> {
         let gvm_pos = line.find("GVM_")?;
         let after = &line[gvm_pos + 4..];
         let name_end = after.find(':').unwrap_or(after.len());
-        let name = after[..name_end].split('-').next()?.trim().to_string();
+        // 格式 `GVM_<comm>-<会话id>`：rsplit 剥最后一段会话 id（comm 本身可含 '-'，
+        // 如 `GVM_my-proc-123` → `my-proc`；agent 侧 ligfx.rs 的 split('-').next()
+        // 同源缺陷不在此修复——该通道在 SS4 永不命中）
+        let raw = &after[..name_end];
+        let name = raw.rsplit_once('-').map(|(n, _)| n).unwrap_or(raw).trim().to_string();
         let busy = parse_pct_after(line, "Busy=")?;
         let _ = parse_pct_after(line, "Utilization=")?; // 字段缺失的行整体丢弃
         return Some(LigfxEvent::Proc { name, busy });
@@ -385,7 +429,8 @@ impl CommMap {
         })
     }
 
-    /// 重建映射：`pidof <pkg>` → 逐 pid 读 `/proc/<pid>/comm`（内核已截断 15 字符）
+    /// 重建映射：`pidof <pkg>` → 逐 pid 读 `/proc/<pid>/comm`（内核已截断 15 字符）。
+    /// pid token 先解析校验再拼 shell 命令（纵深防御；pidof 输出虽可信）
     fn refresh(&mut self, serial: Option<&str>, pkg: &str) {
         self.last_refresh = Instant::now();
         let Ok(out) = crate::utils::run_adb_command_for(serial, &["shell", "pidof", pkg]) else {
@@ -393,48 +438,92 @@ impl CommMap {
         };
         let mut m = HashMap::new();
         for pid in out.stdout.split_whitespace() {
+            let Ok(pid) = pid.parse::<u32>() else {
+                continue;
+            };
             let Ok(comm) =
                 crate::utils::run_adb_command_for(serial, &["shell", "cat", &format!("/proc/{pid}/comm")])
             else {
                 continue;
             };
-            if let Ok(pid) = pid.parse::<u32>() {
-                m.insert(comm.stdout.trim().to_string(), pid);
-            }
+            m.insert(comm.stdout.trim().to_string(), pid);
         }
         self.map = m;
     }
 }
 
+/// ligfx 通道独占登记：占用者为活会话（stop 未置位）返回 false；前任已停/已死
+/// 则接管并返回 true
+fn ligfx_register(serial: &str, stop: &Arc<AtomicBool>) -> bool {
+    let mut g = LIGFX_BUSY.lock().unwrap();
+    if let Some(pos) = g.iter().position(|(s, _)| s == serial) {
+        let incumbent_alive = g[pos].1.upgrade().map(|f| !f.load(Ordering::Relaxed)).unwrap_or(false);
+        if incumbent_alive {
+            return false;
+        }
+        g.remove(pos);
+    }
+    g.push((serial.to_string(), Arc::downgrade(stop)));
+    true
+}
+
+/// 带重连宽限的登记：重连路径上 reconnect_agent 先 spawn 新会话、后 drop 旧流
+/// （旧线程经看门狗 ~250ms 级才退出并释放登记）——登记被拒时按 500ms×20 重试，
+/// 宽限内前任退出即接管；宽限耗尽仍被占才认定是真并发会话，报错放弃
+fn ligfx_register_with_grace(serial: &str, stop: &Arc<AtomicBool>, tx: &HostTx) -> bool {
+    for _ in 0..20 {
+        if stop.load(Ordering::Relaxed) {
+            return false;
+        }
+        if ligfx_register(serial, stop) {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    let _ = tx.send(Ok(AgentEvent::Err {
+        msg: "SS4 GPU（ligfx）：通道被本进程另一会话占用，本会话 GPU busy 禁用（显存不受影响）".into(),
+    }));
+    false
+}
+
+/// 释放独占登记：仅摘除指向本会话 stop 的条目（可能已被重连后的新会话接管）
+fn ligfx_unregister(serial: &str, stop: &Arc<AtomicBool>) {
+    LIGFX_BUSY.lock().unwrap().retain(|(s, w)| {
+        !(s == serial && w.upgrade().map(|f| Arc::ptr_eq(&f, stop)).unwrap_or(false))
+    });
+}
+
 /// 启动 ligfx GPU 线程：经桥接网关在 MindRT 上跑 `logcat -s ligfxprofilerd`，
 /// 系统行 → Gpu 事件，进程行 → GpuProc 事件（comm 归因到被测包 pid）。
-/// 流断（MindRT 重启/桥接重建）后按 [`LIGFX_RECONNECT_SECS`] 间隔重连。
+///
+/// 断流（MindRT 重启/桥接重建/adb 离线退出）后按 [`LIGFX_RECONNECT_SECS`] 间隔
+/// 重连，网关 serial 每次尝试重新解析（桥接重建后可能变化）；连续速败达
+/// [`MAX_CONSECUTIVE_FAILURES`] 次报错退出（与 frametimeline 通道同口径，
+/// 断连恢复由 reconnect_agent → spawn_agent 重启通道）。
 fn spawn_ligfx(pkg: String, serial: Option<String>, tx: HostTx, stop: Arc<AtomicBool>) {
     // 生效 serial（None 走全局目标）；bridged SS4 的 Android serial 恒为 localhost:<port>
     let Some(android_serial) = crate::utils::resolve_serial(serial.as_deref()) else {
         let _ = tx.send(Ok(AgentEvent::Err { msg: "SS4 GPU（ligfx）：无目标设备 serial，通道未启动".into() }));
         return;
     };
-    let Some(gateway) = crate::bridge::gateway_for_android(&android_serial) else {
-        let _ = tx.send(Ok(AgentEvent::Err {
-            msg: format!("SS4 GPU（ligfx）：{android_serial} 无桥接网关信息（bridge 未收敛？），通道未启动"),
-        }));
-        return;
-    };
-    // 进程内独占（后到会话 err 禁用）
-    {
-        let mut g = LIGFX_BUSY.lock().unwrap();
-        if g.contains(&android_serial) {
-            let _ = tx.send(Ok(AgentEvent::Err {
-                msg: "SS4 GPU（ligfx）：通道被本进程另一会话占用，本会话 GPU busy 禁用（显存不受影响）".into(),
-            }));
+    std::thread::spawn(move || {
+        // 登记入线程内带宽限重试（重连竞态：新 spawn 先于旧流 drop，旧线程
+        // 滞后退出——同步登记必败，见 ligfx_register_with_grace）
+        if !ligfx_register_with_grace(&android_serial, &stop, &tx) {
             return;
         }
-        g.push(android_serial.clone());
-    }
-    std::thread::spawn(move || {
         let mut comms = CommMap::new();
+        let mut fails = 0u32;
         while !stop.load(Ordering::Relaxed) {
+            // 网关每次尝试重新解析（桥接重建后映射可能变化）
+            let Some(gateway) = crate::bridge::gateway_for_android(&android_serial) else {
+                fails += 1;
+                if ligfx_fail(&tx, fails, "无桥接网关信息（bridge 未收敛？）") || fails >= MAX_CONSECUTIVE_FAILURES {
+                    break;
+                }
+                std::thread::sleep(Duration::from_secs(LIGFX_RECONNECT_SECS));
+                continue;
+            };
             // -T 0：不回放 logcat 历史缓冲（旧块会以当前时刻批量入账，污染时序）
             let child = crate::utils::adb_for(Some(&gateway))
                 .args(["shell", "logcat", "-T", "0", "-s", "ligfxprofilerd"])
@@ -444,7 +533,8 @@ fn spawn_ligfx(pkg: String, serial: Option<String>, tx: HostTx, stop: Arc<Atomic
             let mut child = match child {
                 Ok(c) => c,
                 Err(e) => {
-                    if tx.send(Ok(AgentEvent::Err { msg: format!("SS4 GPU（ligfx）：logcat 启动失败: {e}") })).is_err() {
+                    fails += 1;
+                    if ligfx_fail(&tx, fails, &format!("logcat 启动失败: {e}")) || fails >= MAX_CONSECUTIVE_FAILURES {
                         break;
                     }
                     std::thread::sleep(Duration::from_secs(LIGFX_RECONNECT_SECS));
@@ -452,18 +542,34 @@ fn spawn_ligfx(pkg: String, serial: Option<String>, tx: HostTx, stop: Arc<Atomic
                 }
             };
             let Some(stdout) = child.stdout.take() else {
+                let _ = child.kill();
+                let _ = child.wait();
                 std::thread::sleep(Duration::from_secs(LIGFX_RECONNECT_SECS));
                 continue;
             };
-            let mut stream_dead = false;
+            // 看门狗：stop 置位时杀掉 logcat 子进程解除阻塞读（ligfx 静默期
+            // 无线程可读行，仅靠行到达检查 stop 会让线程/子进程永久驻留）
+            let conn_done = Arc::new(AtomicBool::new(false));
+            let child_shared = Arc::new(Mutex::new(child));
+            let wd = {
+                let (c, s, d) = (child_shared.clone(), stop.clone(), conn_done.clone());
+                std::thread::spawn(move || loop {
+                    std::thread::sleep(Duration::from_millis(250));
+                    if s.load(Ordering::Relaxed) || d.load(Ordering::Relaxed) {
+                        if let Ok(mut c) = c.lock() {
+                            let _ = c.kill();
+                        }
+                        break;
+                    }
+                })
+            };
+            let mut got_line = false;
             for line in BufReader::new(stdout).lines() {
                 if stop.load(Ordering::Relaxed) {
                     break;
                 }
-                let Ok(line) = line else {
-                    stream_dead = true;
-                    break;
-                };
+                let Ok(line) = line else { break }; // 流断
+                got_line = true;
                 let Some(ev) = parse_ligfx_line(&line) else { continue };
                 let ts = now_ms();
                 let out = match ev {
@@ -476,18 +582,45 @@ fn spawn_ligfx(pkg: String, serial: Option<String>, tx: HostTx, stop: Arc<Atomic
                     }
                 };
                 if tx.send(Ok(out)).is_err() {
-                    stream_dead = true;
+                    break; // 会话结束（receiver 已析构）
+                }
+            }
+            // 收尾：置位让看门狗退出，杀+wait 回收子进程，join 看门狗
+            conn_done.store(true, Ordering::Relaxed);
+            if let Ok(mut c) = child_shared.lock() {
+                let _ = c.kill();
+                let _ = c.wait();
+            }
+            let _ = wd.join();
+            if stop.load(Ordering::Relaxed) {
+                break;
+            }
+            // 读到过行的连接视为健康（断流属正常重启场景）；零行速败计失败
+            // （adb 离线立即 EOF，不计数会形成无间隔热重连循环刷 adb server）
+            if got_line {
+                fails = 0;
+            } else {
+                fails += 1;
+                if ligfx_fail(&tx, fails, "logcat 流零行即断（设备离线？）") || fails >= MAX_CONSECUTIVE_FAILURES {
                     break;
                 }
             }
-            let _ = child.kill();
-            if stream_dead && !stop.load(Ordering::Relaxed) {
-                std::thread::sleep(Duration::from_secs(LIGFX_RECONNECT_SECS));
-            }
+            std::thread::sleep(Duration::from_secs(LIGFX_RECONNECT_SECS));
         }
-        // 释放进程内独占
-        LIGFX_BUSY.lock().unwrap().retain(|s| s != &android_serial);
+        // 释放进程内独占（仅摘本会话条目，重连接管者不受影响）
+        ligfx_unregister(&android_serial, &stop);
     });
+}
+
+/// ligfx 通道失败上报：true = 发送端已死（调用方直接退出线程）。
+/// 连续失败上限在调用点判定（终态文案由这里统一发）
+fn ligfx_fail(tx: &HostTx, fails: u32, detail: &str) -> bool {
+    let msg = if fails >= MAX_CONSECUTIVE_FAILURES {
+        format!("SS4 GPU（ligfx）连续 {fails} 次失败，通道退出（最后: {detail}）")
+    } else {
+        format!("SS4 GPU（ligfx）{detail}（{fails}/{MAX_CONSECUTIVE_FAILURES}，{LIGFX_RECONNECT_SECS}s 后重连）")
+    };
+    tx.send(Ok(AgentEvent::Err { msg })).is_err()
 }
 
 #[cfg(test)]
@@ -589,5 +722,56 @@ mod tests {
         assert!(parse_ligfx_line("[GPU0] Frame 1: Frequency: 1000 Hz").is_none()); // 无 ligfxprofilerd 标签
         let no_util = "x ligfxprofilerd: [GPU0]   GVM_abc-1: Busy=1.0%";
         assert!(parse_ligfx_line(no_util).is_none());
+        // comm 含 '-'：rsplit 只剥会话 id 后缀
+        let dash = "x ligfxprofilerd: [GPU0]   GVM_my-proc-123: Busy=1.0%, Utilization=1.0%";
+        match parse_ligfx_line(dash) {
+            Some(LigfxEvent::Proc { name, .. }) => assert_eq!(name, "my-proc"),
+            _ => panic!("应为 Proc"),
+        }
+    }
+
+    /// 独占登记：活会话占用被拒；前任 stop 置位（重连竞态）可接管；
+    /// 释放只摘本会话条目，不误伤接管者
+    #[test]
+    fn test_ligfx_registry_takeover() {
+        let serial = "test-serial-registry";
+        let stop1 = Arc::new(AtomicBool::new(false));
+        assert!(ligfx_register(serial, &stop1));
+        // 活会话占用 → 拒绝
+        let stop2 = Arc::new(AtomicBool::new(false));
+        assert!(!ligfx_register(serial, &stop2));
+        // 前任 stop 置位（重连：新 spawn 先于旧流 drop）→ 接管
+        stop1.store(true, Ordering::Relaxed);
+        assert!(ligfx_register(serial, &stop2));
+        // 前任滞后的释放不得误伤接管者
+        ligfx_unregister(serial, &stop1);
+        let stop3 = Arc::new(AtomicBool::new(false));
+        assert!(!ligfx_register(serial, &stop3), "接管者应仍在位");
+        // 正常释放后清空
+        ligfx_unregister(serial, &stop2);
+        assert!(ligfx_register(serial, &stop3));
+        ligfx_unregister(serial, &stop3);
+    }
+
+    /// 带宽限的登记：前任 300ms 后释放（模拟重连竞态下旧线程滞后退出），
+    /// 宽限内应接管成功
+    #[test]
+    fn test_ligfx_register_grace() {
+        let serial = "test-serial-grace";
+        let stop1 = Arc::new(AtomicBool::new(false));
+        let stop2 = Arc::new(AtomicBool::new(false));
+        assert!(ligfx_register(serial, &stop1));
+        // 300ms 后前任停止并释放
+        {
+            let (s1, serial) = (stop1.clone(), serial.to_string());
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(300));
+                s1.store(true, Ordering::Relaxed);
+                ligfx_unregister(&serial, &s1);
+            });
+        }
+        let (tx, _rx) = mpsc::channel();
+        assert!(ligfx_register_with_grace(serial, &stop2, &tx));
+        ligfx_unregister(serial, &stop2);
     }
 }
