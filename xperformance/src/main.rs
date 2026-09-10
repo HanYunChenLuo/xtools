@@ -114,6 +114,11 @@ struct Args {
     #[arg(long)]
     compare_baseline: bool,
 
+    /// 强制停止包名对应的应用进程后退出（am force-stop——清场用，如 SS4 上
+    /// 释放 gltf viewer RemoteServer 占用的 8082 端口）
+    #[arg(long)]
+    force_stop: bool,
+
     /// 清理缓存与采集数据后退出（~/.cache/xperf 的 perfetto UI 镜像 + /tmp/xperf 的全部
     /// 采集产物 + xperf-core/simpleperf_scripts/ 的火焰图脚本下载缓存，下次使用重新
     /// 下载；更新用 --update-simpleperf-scripts）
@@ -1474,6 +1479,21 @@ async fn main() -> Result<()> {
         xperf_core::shutdown_remote();
         eprintln!("❌ {}", e);
         std::process::exit(1);
+    }
+    // --force-stop：杀进程清场后即退出（不进监控流程）
+    if args.force_stop {
+        let r = xperf_core::coldstart::force_stop(&package, None);
+        xperf_core::shutdown_remote();
+        return match r {
+            Ok(()) => {
+                println!("已强制停止: {}", package);
+                Ok(())
+            }
+            Err(e) => {
+                eprintln!("❌ 强制停止失败: {}", e);
+                std::process::exit(1);
+            }
+        };
     }
     let cold_start_ms = run_cold_start(&args);
     let result = monitor_process(&args, cold_start_ms).await;

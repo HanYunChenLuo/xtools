@@ -498,6 +498,25 @@ class DeviceSession {
     }
   }
 
+  // ---- 停止应用（am force-stop 清场） ----
+  async stopApp() {
+    const pkg = this.package();
+    if (!pkg) { this.setStatus('请先填写包名'); return; }
+    const btn = this.el('stop-app-btn');
+    btn.disabled = true;
+    this.setStatus(`停止应用中: ${pkg}…`);
+    try {
+      const msg = await invoke('stop_app', { serial: this.serial, package: pkg });
+      this.setStatus(msg);
+      _diag(`[${this.serial}] 停止应用: ${msg}`);
+    } catch (e) {
+      this.setStatus(`停止应用失败: ${e && e.message ? e.message : e}`);
+      _diag(`[${this.serial}] 停止应用 ERROR: ` + (e && e.message ? e.message : JSON.stringify(e)));
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
   // PID 变化时刷新状态栏：PIDs 融入「监控中」文案（如「监控中: pkg（PID 4428）」）。
   // 已退出（stopped）的 PID 不展示——防止列表无限增长。
   renderPidList() {
@@ -944,6 +963,7 @@ class DeviceSession {
     this.el('root-btn').addEventListener('click', () => this.acquireRoot());
     this.el('launch-btn').addEventListener('click', () => this.launchOrRestart('打开'));
     this.el('restart-btn').addEventListener('click', () => this.launchOrRestart('重启'));
+    this.el('stop-app-btn').addEventListener('click', () => this.stopApp());
     this.el('interval-select').addEventListener('change', () => this.updateEffectiveRates());
     for (const id of ['cpu', 'memory', 'fps', 'freq', 'thermal', 'gpu', 'io', 'net']) {
       this.metricBox(id).addEventListener('change', () => this.onMetricToggle());

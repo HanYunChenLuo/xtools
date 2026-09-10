@@ -850,6 +850,18 @@ async fn restart_app(serial: String, package: String, activity: String) -> Resul
     xperf_core::coldstart::measure(&package, &activity, Some(&serial)).map_err(|e| e.to_string())
 }
 
+/// 强制停止指定设备上包名对应的应用进程（`am force-stop`）——清场用
+/// （如 SS4 上释放 gltf viewer RemoteServer 占用的 8082 端口）；进程持有的
+/// socket/内存等资源随进程死亡由内核回收。采样监控中时 agent 端自动感知
+/// exit 并重扫包名进程（进程重现时新 PID 发现）。
+#[tauri::command]
+async fn stop_app(serial: String, package: String) -> Result<String, String> {
+    validate_package(&package)?;
+    ensure_device_online(&serial)?;
+    xperf_core::coldstart::force_stop(&package, Some(&serial)).map_err(|e| e.to_string())?;
+    Ok(format!("已强制停止: {}", package))
+}
+
 /// 显式获取设备 root 权限（侧栏「获取 root」按钮，结果文案直接反馈到状态栏）。
 /// `adb root` 重启 adbd：设备短暂离线、daemon 被杀；采样中会话走既有重连恢复
 /// （新 daemon 以 root 身份重建，新 hello 带 root=true，前端据此更新徽章/解禁 IO）。
@@ -1479,6 +1491,7 @@ fn main() {
             startup_sessions,
             launch_app,
             restart_app,
+            stop_app,
             acquire_root,
             export_csv,
             save_baseline,
