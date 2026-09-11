@@ -151,7 +151,8 @@ fps_sample_round(pid)                    ← agent 内每 PID 每 FPS 轮一次�
 | `--freq` | 每核 `scaling_cur_freq`（KHz；hello 带 `maxkhz` 基线） | 每轮（µs 级） | `{"t":"freq","khz":[...]}` |
 | `--io` | `/proc/<pid>/io` 计数器差值 → KB/s（r/w=rchar/wchar 逻辑读写，dr/dw=read_bytes/write_bytes 磁盘读写） | 每轮 | `{"t":"io","pid":..,"r":..,"w":..,"dr":..,"dw":..}` |
 | `--net` | `/proc/net/dev` 物理口聚合（排除 lo/sit/tun/gre/dummy/vti/ip6*）→ KB/s | 每轮 | `{"t":"net","rx":..,"tx":..}` |
-| `--gpu` | 三级探测：kgsl `gpubusy`（GVM 直通；`GpuBusyCalc` 自适应累计/窗口两种内核语义——SS2MAX 为窗口语义，读数自含占比）→ **QNX telnet**（hypervisor：QNX host 的 kgsl slog，真 busy%/util%/频率+每进程 busy）→ `dumpsys gpu` 每 PID 显存（保底，限频 ≥1s） | 每轮 / QNX 1s / 保底 ≥1s | `{"t":"gpu","busy":..,"util":..,"mhz":..,"maxmhz":..}` / `{"t":"gpuproc","pid":..,"busy":..}` / `{"t":"gpumem","pid":..,"bytes":..,"global":..}` |
+| `--gpu` | busy 三级探测：kgsl `gpubusy`（GVM 直通；`GpuBusyCalc` 自适应累计/窗口两种内核语义——SS2MAX 为窗口语义，读数自含占比）→ **QNX telnet**（hypervisor：QNX host 的 kgsl slog，真 busy%/util%/频率+每进程 busy）；无源则 err 禁用 | 每轮 / QNX 1s | `{"t":"gpu","busy":..,"util":..,"mhz":..,"maxmhz":..}` / `{"t":"gpuproc","pid":..,"busy":..}` |
+| `--gpu-mem` | `dumpsys gpu` 每 PID 显存（独立开关，v7 起与 busy 解耦；一次性探测无 Memory snapshot 段则 err 禁用——如 SS2MAX） | 限频 ≥1s | `{"t":"gpumem","pid":..,"bytes":..,"global":..}` |
 | `--thermal` | `dumpsys thermalservice`（温度 sensors + Thermal Status 热降频级别） | 限频 ≥2s（~50ms dumpsys 会拖长低间隔节拍轮） | `{"t":"temp","status":..,"sensors":[[名,类型,°C]]}` |
 
 关键设计点：
@@ -186,7 +187,7 @@ CLI 退出图表用通用 helper `generate_multi_line_chart`（xperformance/util
 
 Platform trait + `adb devices -l` product 字段自动检测（HU_SS3/HU_SS2MAXF/HU_SS2PRO/HU_SS4 → 对应平台，否则 Android）。host 检测后经 spawn_agent 传 `--platform`/`--qnx-host` 给 agent。
 
-**GPU 通道按平台选路**（agent `detect_gpu_path_ex`）：kgsl sysfs（Android/SS2）→ QNX telnet（SS3：172.31.101.52，写 /dev/kgsl-control 开统计，slog2info -W 流读，独立线程）→ topgpu（SS2MAX，需 push 工具）→ ligfxprofilerd logcat（SS4，**GVM 内无输出永不命中**，实际走 host 侧 ligfx 通道，见「SS4 host 侧指标通道」）→ dumpsys gpu 显存保底。SS3/SS4 有每进程 GPU busy（gpuproc 事件，按 comm 名归因，`lookup_pid` 15 字符截断匹配）。
+**GPU busy 通道按平台选路**（agent `detect_gpu_path_ex`，v7 起显存独立）：kgsl sysfs（Android/SS2）→ QNX telnet（SS3：172.31.101.52，写 /dev/kgsl-control 开统计，slog2info -W 流读，独立线程）→ topgpu（SS2MAX，需 push 工具）→ ligfxprofilerd logcat（SS4，**GVM 内无输出永不命中**，实际走 host 侧 ligfx 通道，见「SS4 host 侧指标通道」）；GPU 显存为独立开关 `--gpu-mem`（dumpsys gpu Memory snapshot，无源平台 err 禁用）。SS3/SS4 有每进程 GPU busy（gpuproc 事件，按 comm 名归因，`lookup_pid` 15 字符截断匹配）。
 
 **SS2MAX 特性**：温度走 sysfs thermal zones 兜底（thermalservice sensors 列表为空但 HAL 有数据，条件须 `!sensors.is_empty()`）；IO 需 root（车机平台 auto-root 覆盖；非 root 时 /proc/<pid>/io 拒读发 err 禁用）；GPU 显存无数据源（dumpsys gpu 无 Memory snapshot 段，/sys/kernel/debug 未编译进内核，/proc/kgsl 不存在——2026-09-07 root 下确证）；**gpubusy 是窗口语义**（读数为上一 ~1s 窗口的 busy/total µs，total 恒 ≈1e6，非累计计数器；按累计差值解析曾出 1662% 荒谬值）——`GpuBusyCalc` 自动判别累计/窗口双语义（幅值/回退/>100% 三判据锁定），窗口语义直读 busy/total、与 `gpu_busy_percentage` 节点同刻值互证一致；gpubusy 节点 shell 可读（非 root 亦可采 GPU busy%）。
 

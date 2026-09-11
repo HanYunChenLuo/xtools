@@ -69,6 +69,25 @@ pub trait Platform: Send + Sync {
     fn description(&self) -> &'static str { "" }
 }
 
+/// 按 product 字段推导平台（`adb devices -l` 行内匹配；detect_platform 与
+/// AdbDevice.platform 共用，单一事实源）。product 缺失/未识别 → Android。
+pub fn platform_from_product(product: &str) -> PlatformId {
+    match product {
+        "HU_SS2MAXF" => PlatformId::Ss2Max,
+        "HU_SS2PRO" => PlatformId::Ss2Pro,
+        "HU_SS3" => PlatformId::Ss3,
+        "HU_SS4" => PlatformId::Ss4,
+        _ => {
+            // 桥接行可能无 product 字段但整行含 SS4 标识（无 product 传入恒空串 → Android）
+            if product.contains("HU_SS4") || product.contains("Smart_space_4") {
+                PlatformId::Ss4
+            } else {
+                PlatformId::Android
+            }
+        }
+    }
+}
+
 /// 从 adb devices -l 输出检测平台
 pub fn detect_platform(adb_devices_output: &str) -> Box<dyn Platform> {
     let mut matched: Vec<PlatformId> = Vec::new();
@@ -76,14 +95,8 @@ pub fn detect_platform(adb_devices_output: &str) -> Box<dyn Platform> {
         let line = line.trim();
         if line.is_empty() || !line.contains("device") { continue; }
         if let Some(product) = line.split("product:").nth(1).and_then(|s| s.split_whitespace().next()) {
-            let id = match product {
-                "HU_SS2MAXF" => Some(PlatformId::Ss2Max),
-                "HU_SS2PRO" => Some(PlatformId::Ss2Pro),
-                "HU_SS3" => Some(PlatformId::Ss3),
-                "HU_SS4" => Some(PlatformId::Ss4),
-                _ => None,
-            };
-            if let Some(id) = id { matched.push(id); continue; }
+            let id = platform_from_product(product);
+            if id != PlatformId::Android { matched.push(id); continue; }
         }
         if line.contains("HU_SS4") || line.contains("Smart_space_4") {
             matched.push(PlatformId::Ss4);
@@ -162,6 +175,16 @@ mod tests {
     fn test_detect_android_fallback() {
         let out = "List of devices attached\n12345  device product:SomePhone model:Pixel device:foo transport_id:1\n";
         assert_eq!(detect_platform(out).id(), PlatformId::Android);
+    }
+
+    #[test]
+    fn test_platform_from_product() {
+        assert_eq!(platform_from_product("HU_SS2MAXF"), PlatformId::Ss2Max);
+        assert_eq!(platform_from_product("HU_SS2PRO"), PlatformId::Ss2Pro);
+        assert_eq!(platform_from_product("HU_SS3"), PlatformId::Ss3);
+        assert_eq!(platform_from_product("HU_SS4"), PlatformId::Ss4);
+        assert_eq!(platform_from_product("dada"), PlatformId::Android);
+        assert_eq!(platform_from_product(""), PlatformId::Android);
     }
 
     // ---- 多设备同连：目标设备行过滤 ----

@@ -29,6 +29,9 @@ pub struct MetricFlags {
     pub thermal: bool,
     /// GPU busy%（按平台选路：kgsl/QNX/topgpu/ligfx/显存保底）
     pub gpu: bool,
+    /// GPU 显存（dumpsys gpu Memory snapshot，每 PID + 整机；与 busy 独立开关——
+    /// SS2MAX 等平台无此数据源，GUI 按平台禁用勾选）
+    pub gpu_mem: bool,
     /// 每 PID IO 速率
     pub io: bool,
     /// 整机网络速率
@@ -38,7 +41,7 @@ pub struct MetricFlags {
 impl MetricFlags {
     /// 是否至少开启一项
     pub fn any(&self) -> bool {
-        self.cpu || self.memory || self.fps || self.freq || self.thermal || self.gpu || self.io || self.net
+        self.cpu || self.memory || self.fps || self.freq || self.thermal || self.gpu || self.gpu_mem || self.io || self.net
     }
 
     fn to_agent_args(self) -> Vec<String> {
@@ -50,6 +53,7 @@ impl MetricFlags {
         if self.io { args.push("--io".into()); }
         if self.net { args.push("--net".into()); }
         if self.gpu { args.push("--gpu".into()); }
+        if self.gpu_mem { args.push("--gpu-mem".into()); }
         if self.thermal { args.push("--thermal".into()); }
         args
     }
@@ -235,7 +239,9 @@ pub enum AgentEvent {
 /// v5：SS4 --latency 修复（A16 SF 要求图层名带 `<hex> ` 别名前缀，agent fps.rs
 /// 查询名双轨），SS4 --fps 短路撤销，设备端 FPS 路径恢复。
 /// v6：daemon bind 失败自愈 + 高版本替代低版本（多宿主竞态确定性收敛）。
-pub const AGENT_PROTOCOL_VERSION: u32 = 6;
+/// v7：GPU busy 与 GPU 显存拆分为独立开关（`--gpu` / `--gpu-mem`；此前 --gpu 隐含
+/// 显存补采，SS2MAX 等无显存源平台拆出后 GUI 可按平台禁用）。
+pub const AGENT_PROTOCOL_VERSION: u32 = 7;
 
 /// daemon 的抽象 socket 名（设备端 `localabstract:xperf-agent`）
 const AGENT_ABSTRACT_SOCK: &str = "xperf-agent";

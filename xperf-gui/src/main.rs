@@ -461,6 +461,7 @@ async fn start_sampling(
     freq: bool,
     thermal: bool,
     gpu: bool,
+    gpu_mem: bool,
     io: bool,
     net: bool,
     fresh: bool,
@@ -487,7 +488,7 @@ async fn start_sampling(
         return Err(bail(&session, e));
     }
 
-    let flags = MetricFlags { cpu, memory, fps, freq, thermal, gpu, io, net };
+    let flags = MetricFlags { cpu, memory, fps, freq, thermal, gpu, gpu_mem, io, net };
     spawn_sampling(app, serial, package, interval, flags, session.running.clone(), fresh);
 
     Ok(())
@@ -914,7 +915,7 @@ fn devices_json(devices: Vec<xperf_core::AdbDevice>) -> serde_json::Value {
     serde_json::json!({
         "devices": visible_devices(devices)
             .into_iter()
-            .map(|d| serde_json::json!({ "serial": d.serial, "model": d.model, "version": d.android_version }))
+            .map(|d| serde_json::json!({ "serial": d.serial, "model": d.model, "version": d.android_version, "platform": d.platform.as_str() }))
             .collect::<Vec<_>>(),
     })
 }
@@ -1411,6 +1412,7 @@ fn main() {
         freq: has_flag("--freq"),
         thermal: has_flag("--thermal"),
         gpu: has_flag("--gpu"),
+        gpu_mem: has_flag("--gpu-mem"),
         io: has_flag("--io"),
         net: has_flag("--net"),
     };

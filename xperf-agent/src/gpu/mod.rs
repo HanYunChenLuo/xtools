@@ -1,13 +1,13 @@
-//! GPU 采样：五通道按平台/探测结果选择（detect_gpu_path_ex）。
+//! GPU 采样：busy 通道按平台/探测结果选择（detect_gpu_path_ex）。
 //! - Kgsl：标准 Android / SS2，sysfs gpubusy 直通（GVM 内有 kgsl）
 //! - Qnx：SS3/8295，QNX host 侧 kgsl slog（GVM 内无 kgsl，telnet 读 QNX）
 //! - TopGpu：SS2MAX/8155，topgpu 工具（push 到 /data/，读 sysfs 或 ftrace）
 //! - Ligfx：SS4/8797，PVM 侧 logcat -s ligfxprofilerd（每帧 Utilization + 每进程 busy）
-//! - DumpMem：保底，dumpsys gpu 每 PID 显存
 //!
 //! QNX/TopGpu/Ligfx 是流式通道（子进程持续输出行），共用一套读线程骨架
 //! （spawn_stream_parser）：逐行读 stdout → 解析成 GpuEvent → emit；
-//! kgsl/DumpMem 由主循环按节拍轮询。
+//! kgsl 由主循环按节拍轮询。GPU 显存是独立开关（--gpu-mem，dumpsys gpu
+//! Memory snapshot），由主循环补采，与 busy 通道解耦。
 
 mod kgsl;
 mod ligfx;
@@ -26,7 +26,6 @@ pub(crate) enum GpuPath {
     Qnx,
     TopGpu,
     Ligfx,
-    DumpMem,
 }
 
 /// 设置 QNX 地址（main 启动时调用一次，必须在任何通道探测之前）
@@ -45,43 +44,40 @@ pub(crate) fn qnx_stop_once(ip: Option<&str>, period_ms: u64) {
 pub(crate) fn detect_gpu_path_ex(platform: Option<&str>) -> Option<GpuPath> {
     match platform {
         Some("ss3") => {
-            // SS3：跳过 kgsl，QNX 优先，失败则 dumpsys 保底
-            if qnx::available() {
-                Some(GpuPath::Qnx)
-            } else {
-                dumpsys(&["gpu"]).and_then(|s| parse_gpu_mem_snapshot(&s).map(|_| GpuPath::DumpMem))
-            }
+            // SS3：跳过 kgsl，QNX 优先（显存已拆分到 --gpu-mem 独立补采，不作 busy 保底）
+            if qnx::available() { Some(GpuPath::Qnx) } else { None }
         }
         Some("ss2max") | Some("ss2pro") => {
-            // SS2 系列：kgsl sysfs 优先（直通），失败则 topgpu 工具，再失败 dumpsys 保底
+            // SS2 系列：kgsl sysfs 优先（直通），失败则 topgpu 工具（本系列无 GPU 显存源，
+            // --gpu-mem 由主循环一次性探测后如实禁用）
             if let Some(k) = kgsl::detect_kgsl() {
                 Some(GpuPath::Kgsl(k))
             } else if topgpu::available() {
                 Some(GpuPath::TopGpu)
             } else {
-                dumpsys(&["gpu"]).and_then(|s| parse_gpu_mem_snapshot(&s).map(|_| GpuPath::DumpMem))
+                None
             }
         }
         Some("ss4") => {
             // SS4：GPU busy 由 host 侧 ligfx 通道提供（ligfxprofilerd 在 MindRT 侧，
-            // GVM logcat 无输出 → 本机 ligfx::available() 恒 false，仅作探测保留）。
-            // kgsl（可能有）兜底，再失败 dumpsys 显存保底
+            // GVM logcat 无输出 → 本机 ligfx::available() 恒 false，仅作探测保留）；
+            // kgsl（可能有）兜底
             if ligfx::available() {
                 Some(GpuPath::Ligfx)
             } else if let Some(k) = kgsl::detect_kgsl() {
                 Some(GpuPath::Kgsl(k))
             } else {
-                dumpsys(&["gpu"]).and_then(|s| parse_gpu_mem_snapshot(&s).map(|_| GpuPath::DumpMem))
+                None
             }
         }
         _ => {
-            // 自动探测 / android：kgsl 优先，QNX 次之，dumpsys 保底
+            // 自动探测 / android：kgsl 优先，QNX 次之（显存已拆分独立补采）
             if let Some(k) = kgsl::detect_kgsl() {
                 Some(GpuPath::Kgsl(k))
             } else if qnx::available() {
                 Some(GpuPath::Qnx)
             } else {
-                dumpsys(&["gpu"]).and_then(|s| parse_gpu_mem_snapshot(&s).map(|_| GpuPath::DumpMem))
+                None
             }
         }
     }
@@ -206,7 +202,7 @@ fn lookup_pid(pid_names: &HashMap<String, u32>, name: &str) -> Option<u32> {
     })
 }
 
-/// 启动流式通道读线程（QNX/TopGpu/Ligfx）；kgsl/DumpMem 由主循环按节拍轮询。
+/// 启动流式通道读线程（QNX/TopGpu/Ligfx）；kgsl 由主循环按节拍轮询。
 /// io/stop 见 spawn_stream_parser；会话结束时 stop 置位，读线程/看门狗随收。
 pub(crate) fn start_stream_channels(
     gpu_path: &GpuPath,
@@ -219,8 +215,14 @@ pub(crate) fn start_stream_channels(
         GpuPath::Qnx => qnx::start(interval_ms, pid_names, io, stop),
         GpuPath::TopGpu => topgpu::start(interval_ms, pid_names, io, stop),
         GpuPath::Ligfx => ligfx::start(pid_names, io, stop),
-        GpuPath::Kgsl(_) | GpuPath::DumpMem => {}
+        GpuPath::Kgsl(_) => {}
     }
+}
+
+/// GPU 显存数据源可用性（dumpsys gpu Memory snapshot 段存在）。
+/// `--gpu-mem` 会话启动时一次性探测，无则如实 err 禁用（如 SS2MAX，2026-09-07 root 确证）。
+pub(crate) fn gpumem_available() -> bool {
+    dumpsys(&["gpu"]).and_then(|s| parse_gpu_mem_snapshot(&s).map(|_| ())).is_some()
 }
 
 /// 保底/补采路径：dumpsys gpu Memory snapshot → 每 PID GPU 显存（限频由主循环控制）。
