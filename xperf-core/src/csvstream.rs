@@ -168,10 +168,11 @@ impl CsvStream {
         );
     }
 
-    /// 内存 CSV 行（MB，单位统一口径：展示/图表/CSV 全 MB；协议与基线 JSON 存储仍 KB）
+    /// 内存 CSV 行（MB，单位统一口径：展示/图表/CSV 全 MB；协议与基线 JSON 存储仍 KB）。
+    /// DMA-BUF 列（协议 v8 起）已从 Other 扣减单列；低间隔/非 root 路径该列为 0.0
     pub fn mem_row(&mut self, pkg: &str, pid: u32, t: DateTime<Local>, d: &crate::MemoryDetails) {
         let row = format!(
-            "{},{:.1},{:.1},{:.1},{:.1},{:.1},{:.1},{:.1},{:.1}",
+            "{},{:.1},{:.1},{:.1},{:.1},{:.1},{:.1},{:.1},{:.1},{:.1}",
             t.format(CSV_TS_FMT),
             d.total_pss as f64 / 1024.0,
             d.java_heap as f64 / 1024.0,
@@ -179,13 +180,14 @@ impl CsvStream {
             d.code as f64 / 1024.0,
             d.stack as f64 / 1024.0,
             d.graphics as f64 / 1024.0,
+            d.dmabuf as f64 / 1024.0,
             d.private_other as f64 / 1024.0,
             d.system as f64 / 1024.0
         );
         stream_write(
             &mut self.broken, &mut self.root, pkg, &mut self.mem, pid,
             "memory", format!("memory_{}_data.csv", pid),
-            "Timestamp,Total PSS (MB),Java Heap (MB),Native Heap (MB),Code (MB),Stack (MB),Graphics (MB),Private Other (MB),System (MB)", &row,
+            "Timestamp,Total PSS (MB),Java Heap (MB),Native Heap (MB),Code (MB),Stack (MB),Graphics (MB),DMA-BUF (MB),Other (MB),System (MB)", &row,
         );
     }
 

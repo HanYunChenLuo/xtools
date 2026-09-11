@@ -22,8 +22,10 @@
 //! {"t":"hello","ncores":8,"maxkhz":[...],"version":3,"root":true}   // root: agent 进程是否 uid=0（继承 adbd 权限身份）
 //! {"t":"cpu","ts":<wall_ms>,"pid":29697,"cpu":15.4,"th":[[29697,"main",5.1],...]}
 //! {"t":"mem","ts":<wall_ms>,"pid":29697,"pss":484880,"rss":612000,
-//!  "java":..,"native":..,"code":..,"stack":..,"gfx":..,"other":..,"sys":..}
-//! （内存分类字段仅 interval≥500ms 的 dumpsys meminfo 路径有值，低间隔 smaps_rollup 路径为 0）
+//!  "java":..,"native":..,"code":..,"stack":..,"gfx":..,"other":..,"sys":..,"dmabuf":..}
+//! （内存分类字段仅 interval≥500ms 的 dumpsys meminfo 路径有值，低间隔 smaps_rollup 路径为 0；
+//!  dmabuf=DMA-BUF 显存拆分（root 下扫 smaps 按 VMA 名聚合，已从 other 扣减单列），
+//!  低间隔/非 root（smaps 不可读）路径为 0）
 //! {"t":"fps","ts":<wall_ms>,"pid":29697,"layer":"SVM Container#0","fps":30.0,"frames":32,"jank":0}
 //! {"t":"freq","ts":<wall_ms>,"khz":[2592000,...]}              // 每核当前频率，下标对应 hello 的 maxkhz
 //! {"t":"io","ts":<wall_ms>,"pid":29697,"r":12.3,"w":4.5,"dr":0.0,"dw":1.2}  // KB/s；r/w=rchar/wchar 逻辑读写，dr/dw=read_bytes/write_bytes 磁盘读写
@@ -88,7 +90,9 @@ use proc::PidState;
 /// 多宿主/重连竞态下收敛到「恰好一个健康 daemon」。
 /// v7：GPU busy 与 GPU 显存拆分独立开关（--gpu / --gpu-mem，此前 --gpu 隐含
 /// 显存补采；SS2MAX 等无显存源平台拆出后 host 可按平台禁用）。
-const PROTOCOL_VERSION: u32 = 7;
+/// v8：mem 事件增加 `dmabuf` 字段（Full 模式 root 下从 Private Other 拆出的
+/// DMA-BUF PSS；core 侧 serde(default) 兼容缺省——老 daemon v7 直发不带该字段亦可解析）。
+const PROTOCOL_VERSION: u32 = 8;
 
 /// daemon 模式的最大并发会话（host）数
 const MAX_SESSIONS: usize = 10;

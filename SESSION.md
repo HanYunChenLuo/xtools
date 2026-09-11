@@ -7,6 +7,31 @@
 
 ---
 
+## 2026-09-11(5) — DMA-BUF 拆分实施落地（协议 v8，`feat/dmabuf-split` 合 main）
+
+**任务**：按 WORKSPACE D 节交接条目（①-⑧）完成 Private Other 拆分 DMA-BUF 的剩余实施。
+
+**commit**：758b5cc（前会话 WIP：agent 聚合函数）→ e5071da（本会话全链路）+ docs 收尾。
+
+**完成内容**：
+- **agent**（mem.rs）：`sample_memory` Full 模式（≥500ms）接线——root 下扫全量 smaps 按 VMA 名聚合 Pss 单列 `dmabuf` 随 mem 事件发出，`other = bd.other.saturating_sub(dmabuf)`；Smaps/DumpsysFallback/非 root（smaps 不可读）dmabuf=0。**修正 WIP 解析器**：头行从固定列切片（`line.get(73..)`，列宽随地址/inode 位数浮动不可靠）改为按字段解析（hex 开头 + 首 token 含 `-` 判头行，第 6 字段首 token 前缀匹配 `/dmabuf`/`[anon:dmabuf`）。
+- **协议 v8**：mem 事件增 `dmabuf` 字段（纯增字段——core `AgentEvent::Mem`/`MemoryDetails` 均 `#[serde(default)]`，老 daemon 缺省可解析、老 host 忽略未知字段，双向兼容）；两侧版本常量同步 bump，版本契约注释更新为「v3 起向后兼容」。
+- **CLI**：verbose 打印加 DMA-BUF + Private Other 改名 Other；退出内存图表加 DMA-BUF 序列（9 条）。
+- **GUI**：`map_event` 透传；前端实时面板加 `└ DMA-BUF` 行、Private Other 改名「其他」（`setLive` 动态建行零 HTML 改动）。
+- **CSV**：`mem_row` 加 `DMA-BUF (MB)` 列（Graphics 后），表头 `Private Other` 改 `Other`（10 列）。
+- **测试**：agent `parse_dmabuf_pss` 真机片段单测 2 条（`/dmabuf:` 与 `[anon:dmabuf` 前缀/Pss 累计/非 dmabuf 不计/空输入）；core Mem 事件 v8 带字段与缺省两态解析。agent 测试经 scp→hppc→adb push 到 SS3 设备执行（主机 compile_error 限 Android 目标），32 全绿；host 95+8+5+2 全绿，clippy/cargo doc 零警告。
+
+**真机验证**（均经 `--remote hppc`）：
+- **SS4 gltf（root，500ms Full）**：稳态 `DMA-BUF 615.6MB / Other 9.0MB`，8 分类合计 728.3 ≈ PSS 728.4 ✓（与勘察 114 个 dmabuf VMA ≈614MB 吻合）。**发现并已录档**：场景加载尖峰期 dumpsys 与 smaps 两次快照不同步，dmabuf 可暂超 other（other saturating 归零、合计可暂超 PSS，如 939.9 total 时 DMA-BUF 887.1）——选择如实反映不钳制（钳制会在分配增长尖峰低报 dmabuf），CLAUDE.md 内存采样节已写明该口径。
+- **SS3 gltf（root，500ms）**：DMA-BUF 533.9MB / Other 11.9MB，合计 649.4 = PSS ✓ 回归通过。
+- **非 root SS2MAX（shell，XPERF_NO_AUTO_ROOT=1，500ms）**：dmabuf=0 不破坏，7 类合计 622.9 ≈ PSS 622.8 ✓（该机 gltf 大头 512.9MB 落 Graphics 桶——kgsl 节点名命中，与 SS4 GVM 无 kgsl 节点的分布差异互为印证）。验证后已 `adb root` 恢复设备状态。
+- **低间隔（SS3 root，100ms Smaps 路径）**：48 样本分类全 0 含 DMA-BUF=0，PSS 正常流动，CSV 10 列表头正确。
+
+**遗留**：gltf APK 去 RemoteServer、QNX proc 链停链命令两项旧遗留不变；GUI 面板新增行的渲染为目验项（链路同既有 setLive 行）。
+
+---
+
+
 ## 2026-09-11(4) — GPU 缓冲记账原理勘察 + Private Other 拆分 DMA-BUF 方案（WIP 交接）
 
 **任务**：用户问"为什么 GPU 缓冲不走 Android Graphics 记账"，随后提出 Private Other 名称可读性差、要更好的统计方案；用户要求交接新会话完成。
