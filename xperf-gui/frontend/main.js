@@ -835,7 +835,8 @@ class DeviceSession {
       package: this.package(),
       interval: parseInt(this.el('interval-select').value, 10),
       cpu: g('cpu'), memory: g('memory'), fps: g('fps'), freq: g('freq'),
-      thermal: g('thermal'), gpu: g('gpu'), gpumem: g('gpumem'), io: g('io'), net: g('net'),
+      // 注意：tauri 命令参数 snake_case → camelCase（gpu_mem → gpuMem），键名写错报 missing required key
+      thermal: g('thermal'), gpu: g('gpu'), gpuMem: g('gpumem'), io: g('io'), net: g('net'),
     };
   }
   resetSessionData() {
