@@ -2,7 +2,7 @@
 
 > 本文件记录跨会话的待办事项（backlog）。每次会话的历史总结见 `SESSION.md`。
 > 完成一项就把状态改为 ✅ 并注明完成的 commit；新增想法随时追加。
-> 最后更新：2026-09-10（深夜）：**SS4 FPS 根因反转并回归设备端路径**（agent v5 / 7683720：A16 `--latency` 图层名须带 `<hex> ` 前缀——getfps 逆向揭示，v4"平台阉割"误判撤销，host frametimeline 通道删除；另发现多宿主协议版本战坑，见 E 节）。H 节指标适配（任务 A-E）当日早些时候完成，详见 SESSION 当日条目
+> 最后更新：2026-09-11：**内存 DMA-BUF 拆分方案定稿并 WIP 交接**（`feat/dmabuf-split` 分支，见 D 节首条：Private Other 无语义兜底桶的真机根因 = 114 个 `/dmabuf:` VMA 共 614MB；agent smaps 聚合函数已写未接线，剩余 ①-⑧ 步骤逐条列明，新会话按此实施）。当日另完成：GPU 显存独立开关+SS2MAX 禁用+FPS 默认勾选（协议 v7 / 96d875a）、内存分类显示补全（5c21047）
 
 ## 当前状态速览
 
@@ -43,6 +43,7 @@
 
 ## D. 结构改进（下轮候补）
 
+- [ ] **内存 Private Other 拆分 DMA-BUF 分类**（2026-09-11 用户提出，`feat/dmabuf-split` 分支 WIP 已推 hppc，758b5cc）：Private Other 是无语义兜底桶（名称可读性差/无指向）；真机勘察（SS4 gltf pid 11473 smaps 全量聚合）证实其大头是 **114 个 `/dmabuf:` VMA 共 614MB PSS**（gralloc/dma-heap 图形/媒体缓冲的 CPU mmap）——Graphics 桶只按 kgsl/drm 设备节点名匹配（GPU 命令缓冲一类小块），dmabuf 映射不命中；内核级 `/proc/<pid>/dmabuf`（CONFIG_DMABUF_SYSFS_STATS，AOSP 按需单列的正路）此 GVM 未编译（实测不存在）。**方案**：agent root 下扫 `/proc/<pid>/smaps` 按 VMA 名（`/dmabuf` 或 `[anon:dmabuf` 前缀）聚合 Pss 单列 DMA-BUF，`other = private_other.saturating_sub(dmabuf)`（8 分类合计仍恒等 PSS）；smaps 不可读（非 root）dmabuf=0 不破坏原 7 类。**已完成**：mem.rs `read_dmabuf_pss`/`parse_dmabuf_pss`（未接线）。**剩余步骤**：① mem.rs `sample_memory` Full 模式接线（可读 → emit 加 `"dmabuf":N` 字段 + other 扣减；DumpsysFallback/Smaps 模式 dmabuf=0）+ `parse_dmabuf_pss` 单测（真机片段：/dmabuf: 与 [anon:dmabuf 前缀、Pss 累计、非 dmabuf 行不计）② 协议 bump v8 两侧（Mem 事件加字段）③ core `AgentEvent::Mem` 加 `#[serde(default)] dmabuf: u64`、`MemoryDetails` 加 `dmabuf` ④ GUI `map_event`（main.rs ~69 行）与前端内存面板加 `└ DMA-BUF` 行、Private Other 改名"其他" ⑤ CLI 打印（main.rs ~587）加 DMA-BUF + MemoryDetails 构造（~607）⑥ `csvstream::mem_row` + 表头加 DmaBuf 列 ⑦ 真机验证：SS4 dmabuf≈614MB/other≈23MB/8 类合计=PSS、SS3 回归、非 root dmabuf=0 七类合计不破 ⑧ 文档收尾（CLAUDE.md 内存采样节补 dmabuf 口径与 Graphics 记账原理、E 节核销、SESSION）。**注意**：smaps 全量 ~3MB 文本 ~4452 mapping，Rust 解析 <50ms，Full 模式（≥500ms 节拍）叠加 dumpsys ~100ms 可承受；勿在低间隔路径接入
 - ~~SS4 FPS 数据源升级候选：getfps -w~~（**已核销**，2026-09-10 晚）：getfps 逆向发现其底层即 `dumpsys SurfaceFlinger --latency`，价值是揭示了 SS4/A16 的图层名须带 `<hex> ` 别名前缀——agent v5 据此修复查询名，设备端 per-layer 路径恢复（见 E 节 FPS 条目终态）
 - [x] ~~agent 单文件拆分~~（531798a + 99d1b74 review 修复）：main.rs 1848 行 → 10 文件（main 493 + proc/mem/fps/thermal + gpu/{mod,kgsl,qnx,topgpu,ligfx}），三份读线程骨架抽公共 `gpu::spawn_stream_parser`，四段相同的 gpumem 补采臂合并；测试 23 个随模块迁移全绿。真机回归：SS2MAX 新旧 agent 同机对比事件分布/wire 格式/smaps 值一致。附带修复 host 侧 `ensure_agent_built` 只盯 main.rs 的 mtime 检查（改扫 src 树，touch 子模块已验证触发重建）
 - [x] ~~SS3 QNX 通道真机回归 + kgsl 统计链停滞修复~~（2026-09-03）：回归发现 QNX frame 流"1 条后停走、跨会话交替通/停"。黑盒实验（重启车机前后共 10+ 组对照）定位根因：**kgsl 统计链是驱动全局的，会话/fd 关闭都不清理**（泄漏直到整机重启）；`echo >` 式即开即死连接写入撞存量链只 flush 一窗即停，长活连接（`exec 3>`）写入则全链重相位持续输出；多链锁步产生重复行。修复（qnx.rs）：① 启动命令改 `exec 3>` 持 fd 写入；② slog 行按"与上一行完全相同"去重（Sys/Proc 各一条）；③ 看门狗兜底（frame 静默超 3×周期经 fd3 重写自愈，≤3 次）。真机验证：4 条泄漏链硬场景下启动顿 ~5s + 1 次自愈后稳定 1/s；gpu/gpuproc/gpumem 三类事件与 CSV 全通（eid→pid 9671 归因正确）；连续多轮 kill/重跑稳定。已知残留：存量链的窗口 flush 会带来少量同值重复样本（数值正确，重启清零）

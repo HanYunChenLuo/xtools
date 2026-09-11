@@ -7,6 +7,25 @@
 
 ---
 
+## 2026-09-11(4) — GPU 缓冲记账原理勘察 + Private Other 拆分 DMA-BUF 方案（WIP 交接）
+
+**任务**：用户问"为什么 GPU 缓冲不走 Android Graphics 记账"，随后提出 Private Other 名称可读性差、要更好的统计方案；用户要求交接新会话完成。
+
+**勘察结论**（SS4 gltf pid 11473，smaps 全量聚合 4452 mapping）：
+- **meminfo Graphics 行是按 VMA 名字匹配图形设备节点的启发式**（Qualcomm 主要 `/dev/kgsl-3d0` 等 = GPU 命令缓冲/memstore 小块），不是"应用 GPU 内存"的权威口径。
+- gltf 的 **614MB PSS = 114 个 `/dmabuf:` VMA**（gralloc/dma-heap 缓冲 CPU mmap）——不匹配 Graphics 桶 → 落 Other mmap → App Summary **Private Other**（无语义兜底桶，占该应用 PSS 85%）。
+- 内核不知道 dmabuf 的"图形用途"（语义在 userspace 分配器）；AOSP 正路是 `/proc/<pid>/dmabuf`（CONFIG_DMABUF_SYSFS_STATS，带 exporter 名）——**此 GVM 内核未编译**（实测不存在）→ 只能 root 下自扫 smaps 按 VMA 名拆。
+- GPU 内存的权威口径 = `dumpsys gpu` Memory snapshot（`--gpu-mem` 采的 672MB）；两者本就该分开读。
+- 排查工具沉淀：`adb shell cat /proc/<pid>/smaps` 拉回本地后 python 聚合（VMA 头行正则 `^[0-9a-f]+-[0-9a-f]+ \S+ \S+ \S+ \S+ *(.*)$` + Pss/Rss 行），比 dumpsys 全量表更能定位到 mapping 名。
+
+**方案与进度**：见 WORKSPACE D 节「内存 Private Other 拆分 DMA-BUF 分类」——`feat/dmabuf-split` 分支（758b5cc，已推 hppc）含 agent 侧 `read_dmabuf_pss`/`parse_dmabuf_pss`（未接线）；剩余 ①-⑧ 步骤（接线/协议 v8/core 类型/GUI/CLI/CSV/真机验证/文档）在交接条目中逐条列明。
+
+**本会话早些时候完成**：内存分类显示补全（5c21047，CLI/GUI 补全 7 类——解析无 bug，纯显示漏列）；GPU 显存独立开关 + SS2MAX 禁用 + FPS 默认勾选（96d875a，协议 v7）。
+
+**遗留**：dmabuf 拆分待新会话按 D 节交接条目实施；gltf APK 去 RemoteServer、QNX proc 链停链命令两项旧遗留不变。
+
+---
+
 ## 2026-09-11(3) — 内存分类显示补全（Private Other 大头漏列致"PSS 与分类之和差距大"）
 
 **任务**：用户反馈 SS4 内存显示的分类之和与 PSS 差距很大。
