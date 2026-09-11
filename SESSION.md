@@ -33,7 +33,9 @@
 
 **测试**：core 102（+mirror 5：forward 行解析/端口池三态/MirrorExit 三态）+ GUI 9 + CLI 5 + xrm 2 全绿；clippy/doc/missing_docs 零警告。
 
-**遗留**：GUI 关窗时镜像清理路径未经目验（AX 自动化本轮不稳定——设备 tab 切换后 AX 树整体剪枝；路径与 stop 按钮共用，机制有单测兜底），见 WORKSPACE E 节。harness 注意：run_cmd 结束时其后台进程组会被收割（本次并行模式验证一度被此干扰）——后台验证须在同一命令内完成 SIGINT+等待闭环。
+**遗留**：GUI 关窗时镜像清理路径已经用户真机目验闭环（开镜像→关主窗口→scrcpy 随之关闭 ✓，E 节已核销）。harness 注意：run_cmd 结束时其后台进程组会被收割（本次并行模式验证一度被此干扰）——后台验证须在同一命令内完成 SIGINT+等待闭环。
+
+**同日补丁（a99dee7，用户实撞驱动）**：SS3 镜像在跑时 SS4 起不来（"Server connection failed"）。根因（scrcpy v4.1 源码 `adb_tunnel.c`/`server.c` 锁定）：**`--tunnel-port` 只钉本地 connect 口；`adb forward` 注册口由 `-p/--port`（port_range，默认 27183:27199）在 adb server 侧扫描**——只传 tunnel-port 时，注册口扫描结果（远端 27183 常空闲，因先跑镜像的规则建连后即撤）与连接口（27184）错配。修复：`-p P --tunnel-port=P` 双钉同号。勘察教训：**nc -z 探测 hop#2 是侵入性的**（会消费 scrcpy-server 的首个视频连接，污染实验）；scrcpy 的 `[server] INFO: Device:` 行是设备端进程启动日志，**不能作为连接成功判据**（真连接判据 = lsof ESTABLISHED / 保活超 10s 重试窗）。回归：SS3(27183)+SS4(27184) 并行双 ESTABLISHED、单镜像池首回归、退出零残留。
 
 ---
 

@@ -66,7 +66,7 @@
 - ~~**多宿主协议版本战**~~（**已代码修复**，2026-09-11 v6 / 9685438）：曾实测 v4 GUI + v5 CLI 并存时互相 suicide+重推对方 daemon（无限循环/无人监听残留）。**v6 起版本契约**：host 接受 daemon ≥ 自身（wire 自 v3 稳定）；daemon bind 竞争高版本胜出、挂死（SIGSTOP 类持有 socket 不应答）被清场接管——任何启动交错收敛到「恰好一个健康 daemon 且为最高版本」，真机四场景验证（升级重推/升级接管/挂死接管/等版本让位）。**过渡期残留**：exact-match 时代旧宿主（≤v5 二进制）连 v6 daemon 仍会自杀重推降级——各宿主升级一次 v6 后绝迹
 - **bridge 边缘态（2026-09-10 review 记录）**：bootstrap 探测失败冷却期（60s）内 MindRT 以 `is_gateway=false` 漏进设备列表（pick_device 可选中/GUI 可建 tab）——仅中继坏掉时出现，选中后采样会按普通设备失败；不修（正常路径 bootstrap 秒成，冷却语义是防反复探测）
 - ~~GUI 基线/应用操作按钮与设备 tab 切换的点击渲染为人工目验项~~（**已闭环**，2026-09-11：macOS GUI + System Events AX 树/AXPress 自动化点击实测全通，见 SESSION 当日 (5)「GUI 目验闭环」——含 gpuMem 键名修复的真机确认、v8 DMA-BUF 面板行、SS2MAX 显存禁用勾选、基线/重启/获取 root 按钮端到端）
-- **GUI 关窗时镜像清理路径未经真机目验**（2026-09-11 scrcpy 集成遗留）：CloseRequested → stop 全部镜像 + 监护线程 cleanup（摘 hop#2/扫规则）→ shutdown_remote，代码路径与 stop 按钮共用（stop 按钮已真机验证），机制由 core `test_wait_exit_stopped` 锁定；验证方式：GUI 开镜像后直接关主窗口，确认 scrcpy 窗口随之关闭。AX 自动化本轮不稳定（设备 tab 切换后 AX 树整体剪枝，重启 GUI 才恢复——既有现象）
+- ~~GUI 关窗时镜像清理路径未经真机目验~~（**已闭环**，2026-09-11 深夜用户实测：开镜像 → 关主窗口 → scrcpy 随之关闭 ✓。路径：CloseRequested → stop 全部镜像 + 监护线程 cleanup（摘 hop#2/扫规则）→ shutdown_remote）
 
 ## F. SSH 远程调试（已完成）
 
@@ -111,7 +111,7 @@
 > 三条均要求 **SSH 远程后端（`--remote`）下可用**。形态细节（GUI 内嵌 vs 拉起外部、交互式 vs 单条）在实施会话中确认。
 
 - [ ] **logcat 支持**：设备 logcat 抓取/查看接入工具链（按包/时间窗过滤、与采样时间轴对齐等形态待定）。SSH 远程注意：adb 命令天然走 hop#1 隧道，落盘在本机，预期改动小。
-- [x] ~~**scrcpy 集成**~~（**已完成**，2026-09-11 深夜，`feature/scrcpy-mirror` 合 main）：形态=拉起外部 scrcpy 窗口（解码/触控归 scrcpy）。core `mirror.rs` + `SshTunnel::add_forward_pinned`（固定端口 hop#2——**实测 adb reverse 在远端 server 拓扑下流回不到 TCP 客户端，不可用**；远程走 `--tunnel-port=P` 隐含 force-adb-forward，端口池 27183..=27199 两侧同号空闲扫描）；CLI `--mirror`（与采样并行 / 单独镜像-only）；GUI 每设备侧栏「屏幕镜像」toggle + 监护线程事件复位按钮（stopped/closed/failed 三态——scrcpy 正常运行也有 stderr 日志，凭 exit status 分流而非 stderr 非空）。真机：SS3/SS2MAX/SS4 远程全通、双设备并行端口隔离、SIGINT 全清理零残留
+- [x] ~~**scrcpy 集成**~~（**已完成**，2026-09-11 深夜，`feature/scrcpy-mirror` 合 main + 补丁 `a99dee7`）：形态=拉起外部 scrcpy 窗口（解码/触控归 scrcpy）。core `mirror.rs` + `SshTunnel::add_forward_pinned`（固定端口 hop#2——**实测 adb reverse 在远端 server 拓扑下流回不到 TCP 客户端，不可用**；远程走 `-p P --tunnel-port=P` 双钉同号——**scrcpy 4.x 的 --tunnel-port 只钉本地 connect 口，adb forward 注册口由 -p/port_range 在 server 侧扫描**（v4.1 源码），只传 tunnel-port 时多镜像并存错配必败，用户实撞 SS3+SS4 场景修复）；端口池 27183..=27199 两侧同号空闲扫描。CLI `--mirror`（与采样并行 / 单独镜像-only）；GUI 每设备侧栏「屏幕镜像」toggle + 监护线程事件复位按钮（stopped/closed/failed 三态——scrcpy 正常运行也有 stderr 日志，凭 exit status 分流而非 stderr 非空）。真机：SS3/SS2MAX/SS4 远程全通、双设备并行端口隔离、SIGINT 全清理零残留
 - [ ] **命令行输入**：GUI 提供设备 shell 命令输入能力（交互式 shell or 单条执行，形态待定）。SSH 远程注意：命令通道同 adb 走 hop#1；若做成交互式长连接 shell 则类似 agent 流需 hop#2 式映射。
 
 ---
