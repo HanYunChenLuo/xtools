@@ -1311,7 +1311,7 @@ mod tests {
         assert_eq!(stmts.last().unwrap().0, "END");
         // 每条语句以分号结尾；段名随标记切换、帧时间线查询归属正确
         assert!(stmts.iter().all(|(_, s)| s.ends_with(";\n")));
-        let frame = stmts
+        stmts
             .iter()
             .find(|(n, s)| n == "frame_stats" && s.contains("actual_frame_timeline_slice"))
             .expect("frame_stats 段应包含帧时间线查询");

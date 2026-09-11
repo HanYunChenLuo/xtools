@@ -326,6 +326,63 @@ pub fn start_mirror(serial: Option<&str>) -> Result<MirrorHandle> {
 mod tests {
     use super::*;
 
+    /// 测试用手柄构造（包一层假子进程；hop2/sweep 在测试环境为空操作——
+    /// serial 不存在于任何 forward 规则）
+    fn handle_for(child: Child) -> MirrorHandle {
+        MirrorHandle {
+            serial: "test-nonexistent-serial".into(),
+            child: Arc::new(Mutex::new(child)),
+            stderr_tail: Arc::new(Mutex::new(VecDeque::new())),
+            hop2_port: None,
+            cleaned: Arc::new(Mutex::new(false)),
+            stopped: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        }
+    }
+
+    #[test]
+    fn test_wait_exit_stopped() {
+        // stop() 主动停止 → Stopped 且子进程确死（GUI 停止按钮/关窗收尾路径）
+        let child = Command::new("sleep").arg("30").spawn().unwrap();
+        let h = handle_for(child);
+        assert!(h.is_alive());
+        h.stop();
+        assert!(matches!(h.wait_exit(), MirrorExit::Stopped));
+        assert!(!h.is_alive());
+    }
+
+    #[test]
+    fn test_wait_exit_closed() {
+        // 子进程 exit 0（用户关窗路径）→ Closed
+        let child = Command::new("true").spawn().unwrap();
+        let h = handle_for(child);
+        assert!(matches!(h.wait_exit(), MirrorExit::Closed));
+    }
+
+    #[test]
+    fn test_wait_exit_failed() {
+        // 子进程非零退出（连接失败等）→ Failed（带 stderr 尾行）
+        let mut child = Command::new("sh")
+            .args(["-c", "echo some-error 1>&2; exit 1"])
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let tail = Arc::new(Mutex::new(VecDeque::new()));
+        spawn_stderr_drain(&mut child, tail.clone());
+        // 字面量构造（MirrorHandle 有 Drop，不可用结构更新语法移动字段）
+        let h = MirrorHandle {
+            serial: "test-nonexistent-serial".into(),
+            child: Arc::new(Mutex::new(child)),
+            stderr_tail: tail,
+            hop2_port: None,
+            cleaned: Arc::new(Mutex::new(false)),
+            stopped: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        };
+        match h.wait_exit() {
+            MirrorExit::Failed(t) => assert!(t.contains("some-error"), "尾行应含 stderr: {t}"),
+            other => panic!("应为 Failed，实得 {:?}", other),
+        }
+    }
+
     #[test]
     fn test_parse_forward_line() {
         assert_eq!(

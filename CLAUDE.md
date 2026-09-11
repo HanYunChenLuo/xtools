@@ -295,6 +295,14 @@ hop#2: 本机 P_loc → 远端 adb forward 分配端口（agent 事件流，每�
 
 ---
 
+### scrcpy 屏幕镜像（`xperf-core/src/mirror.rs`，CLI `--mirror` / GUI 侧栏「屏幕镜像」按钮）
+
+形态：**拉起外部 scrcpy 窗口**（视频解码/触控注入由 scrcpy 客户端承担，本工具只管进程与隧道生命周期），不做 GUI 内嵌视频。CLI 与 GUI 共用 core `mirror` 模块；依赖本机安装 scrcpy（`find_scrcpy`：PATH → `/opt/homebrew/bin` 等常见位置兜底——GUI 从 Finder 启动时 PATH 不含 homebrew；scrcpy-server 由客户端内嵌随版本走，不需额外 vendor）。
+
+**SSH 远程链路（2026-09-11 实测锁定）**：scrcpy 默认的 `adb reverse` 在远端 server 拓扑下**不可用**——reverse 规则注册成功但设备侧连接的路由终点是远端 adb server，流回不到经隧道的 TCP 客户端（实测 `nc` 监听零到达）。因此远程必须 `--tunnel-port=P`（隐含 `--force-adb-forward`）：scrcpy 把 `adb forward tcp:P localabstract:scrcpy-<scid>` 注册到**远端** server，再连本机 `127.0.0.1:P`——该端口由 hop#2 固定端口映射（`SshTunnel::add_forward_pinned`，local==remote 同号）承载，P 须在**本机与远端两侧同时空闲**（端口池 27183..=27199，与 scrcpy 默认候选范围一致；远端忙端口从 `forward --list` 读全集——forward 端口是 server 全局资源跨 serial）。本地模式零隧道参数（reverse 默认路径直接用）。
+
+**生命周期**：`MirrorHandle`（child Arc + stderr 有界尾行 drain 线程 + hop#2 端口 + 幂等 cleanup）；`wait_exit` 阻塞等退出并返回 `MirrorExit::{Stopped,Closed,Failed}`——**scrcpy 正常运行也往 stderr 打启动日志，不能凭 stderr 非空判异常**（真机踩坑），靠 exit status + 主动停止标志分流。清理 = 杀子进程 → 摘 hop#2 → `sweep_scrcpy_rules`（按 serial 清扫残留 `localabstract:scrcpy-*` 规则；scrcpy 被 SIGKILL 无自清机会；注意 scrcpy 正常建立连接后会自己撤掉 forward 规则，`forward --list` 看不到属正常）。CLI：`--mirror` 与采样/深挖并行（启动失败不阻断采样），或单独使用（无 --package，持续到 Ctrl-C/关窗）；清理顺序 drop(mirror) 先于 shutdown_remote（摘 hop#2 需经隧道）。GUI：每设备 toggle 按钮 + 监护线程（wait_exit → 清槽位 + emit `mirror {serial, stage: stopped|closed|failed}` 复位按钮）；关窗收尾停全部镜像再收远程隧道。
+
 ### perfetto 深挖模式（`--trace N`，xperf-core/src/trace.rs，CLI 与 GUI 共用）
 
 「录制-分析」模式，与实时采样互补：采样回答"什么时候高"，trace 回答"为什么高"。CLI 侧可与采样指标并行（`--cpu --trace 10`：后台线程录制 + 采样限时同窗口，到点自动结束）或单独使用（无指标 flag 时只录 trace）；GUI 侧深挖按钮与采样会话并行（采样不限时，窗口对照靠时间戳）。core 模块不打印不建目录：输出目录由调用方传入，报告以文本返回（CLI println / GUI 走 Tauri `trace` 事件 `{stage: recording|progress|recorded|done|error, message}`——progress 为每秒录制进度（elapsed/Ns，core `record` 的 `progress` 回调），done 的 message 即完整报告）。
