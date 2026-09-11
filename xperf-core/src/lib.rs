@@ -13,6 +13,8 @@ pub mod baseline;
 /// SS4 双系统（MindRT + Android GVM）adb 自动桥接：网关识别/forward+connect
 /// 引导/断线自愈（设计 `docs/DESIGN-ss4-adb.md`）。
 pub mod bridge;
+/// 设备屏幕截取：exec-out screencap 直写本机 PNG（零设备端残留）。
+pub mod capture;
 /// 冷启动时间测量与应用操作（am start -W / resolve-activity / force-stop）。
 pub mod coldstart;
 /// CPU 采样协议类型（线程级 CPU 信息）。
