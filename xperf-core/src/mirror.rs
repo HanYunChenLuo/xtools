@@ -26,6 +26,18 @@ const TUNNEL_PORT_MAX: u16 = 27199;
 /// stderr 尾行缓冲容量（诊断 scrcpy 启动失败用；scrcpy 日志量小，12 行足够）
 const STDERR_TAIL_CAP: usize = 12;
 
+/// 镜像退出的语义（供调用方区分「用户关窗」与「真异常」——scrcpy 正常运行也会
+/// 往 stderr 打启动日志，不能凭 stderr 非空判异常）
+#[derive(Debug)]
+pub enum MirrorExit {
+    /// 用户主动停止（[`MirrorHandle::stop`]）或宿主进程退出中（中断标志置位）
+    Stopped,
+    /// scrcpy 正常退出（exit code 0，典型为用户关闭镜像窗口）
+    Closed,
+    /// scrcpy 异常退出（非零 exit code；附 stderr 尾行诊断）
+    Failed(String),
+}
+
 /// scrcpy 可执行文件探测：PATH 各目录 → 常见安装位置兜底
 /// （GUI 从 Finder/桌面环境启动时 PATH 常不含 `/opt/homebrew/bin` 等）。
 /// 仅面向 macOS/Linux 宿主（无 .exe 探测）。
@@ -124,6 +136,8 @@ pub struct MirrorHandle {
     hop2_port: Option<u16>,
     /// 清理只执行一次（wait_exit/Drop 双入口）
     cleaned: Arc<Mutex<bool>>,
+    /// 用户主动停止标志（stop 置位；wait_exit 据此归因为 Stopped 而非异常）
+    stopped: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl MirrorHandle {
@@ -136,17 +150,22 @@ impl MirrorHandle {
     }
 
     /// 阻塞等待 scrcpy 退出（用户关窗/连接失败自杀）或全局中断标志置位
-    /// （进程退出中——CLI Ctrl-C / GUI 关窗）；返回后清理已完成。
-    /// 返回 stderr 尾行（无输出为空串，拼错误消息用）。
-    pub fn wait_exit(&self) -> String {
+    /// （进程退出中——CLI Ctrl-C / GUI 关窗）；返回前清理已完成。
+    /// 返回退出语义（[`MirrorExit`]）：主动停止/正常关窗/异常退出（附 stderr 尾行）。
+    pub fn wait_exit(&self) -> MirrorExit {
+        let mut status = None;
         loop {
             {
-                let exited = self
-                    .child
-                    .lock()
-                    .map(|mut g| !matches!(g.try_wait(), Ok(None)))
-                    .unwrap_or(true);
-                if exited {
+                let mut done = false;
+                if let Ok(mut g) = self.child.lock() {
+                    if let Ok(Some(s)) = g.try_wait() {
+                        status = Some(s);
+                        done = true;
+                    }
+                } else {
+                    done = true; // 锁损坏：按已退出处理，保证清理执行
+                }
+                if done {
                     break;
                 }
             }
@@ -156,11 +175,21 @@ impl MirrorHandle {
             std::thread::sleep(Duration::from_millis(150));
         }
         self.cleanup();
-        self.stderr_tail()
+        if self.stopped.load(std::sync::atomic::Ordering::Relaxed)
+            || crate::utils::is_interrupted()
+        {
+            return MirrorExit::Stopped;
+        }
+        match status {
+            Some(s) if s.success() => MirrorExit::Closed,
+            _ => MirrorExit::Failed(self.stderr_tail()),
+        }
     }
 
-    /// 停止镜像（杀子进程；隧道/规则清理由 wait_exit/Drop 路径的 cleanup 完成）
+    /// 停止镜像（置主动停止标志 + 杀子进程；隧道/规则清理由 wait_exit/Drop 路径
+    /// 的 cleanup 完成）
     pub fn stop(&self) {
+        self.stopped.store(true, std::sync::atomic::Ordering::Relaxed);
         if let Ok(mut g) = self.child.lock() {
             let _ = g.kill();
         }
@@ -280,6 +309,7 @@ pub fn start_mirror(serial: Option<&str>) -> Result<MirrorHandle> {
         stderr_tail,
         hop2_port,
         cleaned: Arc::new(Mutex::new(false)),
+        stopped: Arc::new(std::sync::atomic::AtomicBool::new(false)),
     };
 
     // 宽限期：scrcpy 的参数错误/隧道连接立败在此暴露（正常启动后窗口期间进程存活）

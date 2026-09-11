@@ -376,16 +376,24 @@ class DeviceSession {
     btn.disabled = false;
   }
 
-  // 镜像进程退出（用户关窗/连接断开/stop 生效）：复位按钮
+  // 镜像进程退出事件（stopped=用户停止 / closed=关窗正常退出 / failed=异常退出）：
+  // 三态统一复位按钮；注意不能凭 scrcpy stderr 非空判异常（正常运行也有启动日志）
   handleMirrorEvent(stage, message) {
-    if (stage !== 'exited') return;
-    this.mirrorRunning = false;
     const btn = this.el('mirror-btn');
+    this.mirrorRunning = false;
     btn.textContent = '屏幕镜像';
     btn.disabled = false;
-    // message 为 scrcpy stderr 尾行（正常关窗为空；异常退出带诊断）
-    this.setStatus(message ? '镜像异常退出: ' + message.split('\n').pop() : '镜像窗口已关闭');
-    _diag('[' + this.serial + '] mirror exited: ' + (message || '(clean)'));
+    if (stage === 'stopped') {
+      this.setStatus('镜像已停止');
+    } else if (stage === 'closed') {
+      this.setStatus('镜像窗口已关闭');
+    } else if (stage === 'failed') {
+      const last = (message || '').split('\n').filter(Boolean).pop() || '未知原因';
+      this.setStatus('镜像异常退出: ' + last);
+    } else {
+      return;
+    }
+    _diag('[' + this.serial + '] mirror ' + stage + (message ? ': ' + message : ''));
   }
 
   // ---- 状态栏（顶栏显示当前激活设备的状态；非激活设备暂存自己的状态） ----

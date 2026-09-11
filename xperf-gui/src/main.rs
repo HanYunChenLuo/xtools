@@ -895,7 +895,11 @@ async fn start_mirror(
     *session.mirror.lock().map_err(|e| e.to_string())? = Some(handle.clone());
     let s = serial.clone();
     std::thread::spawn(move || {
-        let tail = handle.wait_exit();
+        let (stage, message) = match handle.wait_exit() {
+            xperf_core::mirror::MirrorExit::Stopped => ("stopped", String::new()),
+            xperf_core::mirror::MirrorExit::Closed => ("closed", String::new()),
+            xperf_core::mirror::MirrorExit::Failed(tail) => ("failed", tail),
+        };
         if let Some(st) = app.try_state::<AppState>() {
             if let Ok(mut m) = st.session(&s).mirror.lock() {
                 *m = None;
@@ -903,7 +907,7 @@ async fn start_mirror(
         }
         let _ = app.emit(
             "mirror",
-            serde_json::json!({ "serial": s, "stage": "exited", "message": tail }),
+            serde_json::json!({ "serial": s, "stage": stage, "message": message }),
         );
     });
     Ok(format!("屏幕镜像已启动: {}", serial))

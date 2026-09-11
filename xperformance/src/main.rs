@@ -1566,9 +1566,12 @@ async fn main() -> Result<()> {
         })
         .ok();
         if let Some(m) = &mirror {
-            let tail = m.wait_exit();
-            if !tail.is_empty() && !xperf_core::utils::is_interrupted() {
-                eprintln!("scrcpy 已退出: {}", tail);
+            match m.wait_exit() {
+                xperf_core::mirror::MirrorExit::Stopped => {}
+                xperf_core::mirror::MirrorExit::Closed => println!("镜像窗口已关闭"),
+                xperf_core::mirror::MirrorExit::Failed(tail) => {
+                    eprintln!("scrcpy 异常退出: {}", tail)
+                }
             }
         }
         drop(mirror); // 镜像清理（摘 hop#2 需经隧道）须在 shutdown_remote 之前
