@@ -4,11 +4,15 @@
 //! SSH 远程模式（[`crate::transport::Transport::Ssh`]）：scrcpy 默认的 `adb reverse`
 //! 通道在该拓扑下不可用——reverse 规则的路由终点是远端 adb server，视频流回不到
 //! 经隧道的 TCP 客户端（2026-09-11 实测：规则注册成功但设备侧连接永不到达）。
-//! 故必须 `--tunnel-port=P`（隐含 `--force-adb-forward`）：scrcpy 把
-//! `adb forward tcp:P localabstract:scrcpy-<scid>` 注册到远端 server，再连接本机
-//! `127.0.0.1:P`——该端口须由 hop#2（[`crate::transport::SshTunnel::add_forward_pinned`]）
-//! 映射回远端同名端口，即 P 须在**本机与远端两侧同时空闲**（端口池 27183..=27199
-//! 扫描，与 scrcpy 默认候选范围一致）。
+//! 故必须 forward 模式，且**注册口与连接口必须同号钉死**（端口 P 经 hop#2
+//! `local==remote` 同号映射回远端）：scrcpy 4.x 的 `--tunnel-port` **只钉本地
+//! connect 口**，`adb forward` 注册口由 `-p/--port`（port_range，默认 27183:27199）
+//! 在 **adb server 侧**扫描决定（v4.1 源码 `adb_tunnel.c::enable_tunnel_forward_any_port`
+//! 扫 port_range，`server.c` connect 用 tunnel_port）——只传 `--tunnel-port` 时
+//! 注册口由远端扫描自选，与其他镜像并存时扫描结果漂移，连接口与注册口错配必败
+//! （"Server connection failed"，2026-09-11 用户实撞：SS3 镜像在跑时 SS4 起不来）。
+//! 因此传 `-p P --tunnel-port=P`（注册/连接双钉同号；`-p` 单口即 range {P,P}，
+//! 老版本 scrcpy 的 --tunnel-port 语义下同义，向后兼容）。
 
 use std::collections::{HashSet, VecDeque};
 use std::path::PathBuf;
@@ -276,6 +280,9 @@ pub fn start_mirror(serial: Option<&str>) -> Result<MirrorHandle> {
             "无可用隧道端口（{TUNNEL_PORT_MIN}..={TUNNEL_PORT_MAX} 全被本机或远端占用）"
         ))?;
         cmd.arg(format!("--tunnel-port={port}"));
+        // -p 钉死 adb forward 注册口（port_range 扫描默认 27183:27199 按远端空闲
+        // 自选，与本机连接口会错配——详见模块文档）；--tunnel-port 钉本地连接口
+        cmd.args(["-p", &port.to_string()]);
         cmd.env(
             "ADB_SERVER_SOCKET",
             format!("tcp:127.0.0.1:{}", tun.server_port()),
