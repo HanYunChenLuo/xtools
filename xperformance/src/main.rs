@@ -25,7 +25,7 @@ use xperf_core::simpleperf;
 #[command(version, about = "XPerformance Monitor - Android process CPU/memory monitor", long_about = None)]
 struct Args {
     /// Package name to monitor
-    #[arg(short, long, required_unless_present_any = ["clean_cache", "update_simpleperf_scripts"])]
+    #[arg(short, long, required_unless_present_any = ["clean_cache", "update_simpleperf_scripts", "mirror"])]
     package: Option<String>,
 
     /// 目标设备 serial（多台设备同连时必须指定，如 `adb devices` 列出的 6eb792dfb0f；
@@ -134,6 +134,12 @@ struct Args {
     /// xperf-core/simpleperf_scripts/ 的 vendor 文件，git 提交同步到其他机器）后退出
     #[arg(long)]
     update_simpleperf_scripts: bool,
+
+    /// 屏幕镜像：拉起 scrcpy 外部窗口（视频+触控，需本机安装 scrcpy）。
+    /// 与采样/深挖并行，会话结束时窗口关闭；单独使用（无 --package）则镜像持续到
+    /// Ctrl-C 或窗口关闭。SSH 远程模式经隧道转发视频流（自动固定端口 hop#2）
+    #[arg(long)]
+    mirror: bool,
 }
 
 /// 设备选择：`--device` 指定 > 单台自动；多台未指定报错并列出清单。
@@ -1462,10 +1468,24 @@ async fn main() -> Result<()> {
         println!("{msg}");
         return Ok(());
     }
-    // 监控流程必带 --package（clap required_unless_present 已保证非 clean_cache 时必填）
+    // 监控流程必带 --package（clap required_unless_present 已保证；--mirror 单独使用时除外）
     let package = args.package.clone().unwrap_or_default();
-    // 包名校验：启动时即报错，不延迟到 CSV 落盘
-    if let Err(e) = validate_package_name(&package) {
+    if package.is_empty() {
+        // 镜像-only 模式：其余能力（采样/深挖/冷启动/基线等）仍须包名
+        let needs_pkg = metric_flags(&args).any()
+            || args.trace.is_some()
+            || args.stack.is_some()
+            || args.cold_start.is_some()
+            || args.force_stop
+            || args.save_baseline
+            || args.compare_baseline
+            || !args.threshold.is_empty();
+        if needs_pkg {
+            eprintln!("❌ 采样/深挖/冷启动等能力需要 --package 指定包名（--mirror 单独使用时除外）");
+            std::process::exit(1);
+        }
+    } else if let Err(e) = validate_package_name(&package) {
+        // 包名校验：启动时即报错，不延迟到 CSV 落盘
         eprintln!("❌ 包名不合法: {}", e);
         std::process::exit(1);
     }
@@ -1511,8 +1531,54 @@ async fn main() -> Result<()> {
             }
         };
     }
+    // 屏幕镜像（--mirror）：拉起 scrcpy 外部窗口。失败不阻断采样
+    // （镜像-only 模式例外——镜像是唯一目的，失败即退出）
+    let samplingless =
+        !metric_flags(&args).any() && args.trace.is_none() && args.stack.is_none();
+    let mirror = if args.mirror {
+        match xperf_core::mirror::start_mirror(None) {
+            Ok(h) => {
+                println!("屏幕镜像已启动（scrcpy 外部窗口）");
+                Some(h)
+            }
+            Err(e) => {
+                if samplingless {
+                    xperf_core::shutdown_remote();
+                    eprintln!("❌ 屏幕镜像启动失败: {:#}", e);
+                    std::process::exit(1);
+                }
+                println!("{}", format!("屏幕镜像启动失败: {:#}（继续采样）", e).yellow());
+                None
+            }
+        }
+    } else {
+        None
+    };
+    // 镜像-only 模式（未选采样指标/深挖，有无 --package 均同）：等 Ctrl-C 或窗口关闭后退出
+    if args.mirror && samplingless {
+        if args.save_baseline || args.compare_baseline {
+            println!("{}", "基线对比需要采样会话（至少一个 --cpu/--memory/… 指标），本次跳过".yellow());
+        }
+        println!("镜像持续到 Ctrl-C 或窗口关闭…");
+        ctrlc::set_handler(|| {
+            xperf_core::utils::set_interrupt_flag();
+            println!("\n程序正在退出...");
+        })
+        .ok();
+        if let Some(m) = &mirror {
+            let tail = m.wait_exit();
+            if !tail.is_empty() && !xperf_core::utils::is_interrupted() {
+                eprintln!("scrcpy 已退出: {}", tail);
+            }
+        }
+        drop(mirror); // 镜像清理（摘 hop#2 需经隧道）须在 shutdown_remote 之前
+        xperf_core::shutdown_remote();
+        return Ok(());
+    }
     let cold_start_ms = run_cold_start(&args);
     let result = monitor_process(&args, cold_start_ms).await;
+    // 先关镜像再收隧道（镜像清理的摘 hop#2/扫规则都需经隧道；process::exit 不跑析构）
+    drop(mirror);
     // 退出前关远程隧道（process::exit 不跑析构，须显式清理：R9/R10）
     xperf_core::shutdown_remote();
     if let Err(e) = result {
