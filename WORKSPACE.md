@@ -6,7 +6,7 @@
 
 ## 当前状态速览
 
-- 采样架构：**设备端 agent（xperf-agent）daemon 化为唯一采样路径**——`--daemon` 常驻监听 `localabstract:xperf-agent`，host 经 adb forward+TCP 连接（版本握手/suicide 重推/start/stop/ping；多 host 上限 10；0 会话 60s 自杀）；断连自动重连恢复；模块化布局（main/proc/mem/fps/thermal + gpu/ 五通道）
+- 采样架构：**设备端 agent（xperf-agent）daemon 化为唯一采样路径**——`--daemon` 常驻监听 `localabstract:xperf-agent`，host 经 adb forward+TCP 连接（**版本契约 v6 起：host 接受 daemon ≥ 自身版本，wire 自 v3 稳定；daemon 间 bind 竞争高版本胜出、挂死者被清场接管——多宿主混跑不再打版本战**；start/stop/ping；多 host 上限 10；0 会话 60s 自杀）；断连自动重连恢复；模块化布局（main/proc/mem/fps/thermal + gpu/ 五通道）
 - 指标覆盖（9 项全实现）：CPU（单核口径）、内存、FPS、CPU 频率、温度/热降频、GPU、IO、网络、GPU 显存
 - **多设备 adb（两级）**：全局 `TARGET_SERIAL`（CLI）+ **会话级 `serial: Option<&str>` 参数**（core 各入口：spawn_agent/deploy/trace/simpleperf/coldstart/detect_platform，`adb_for`/`run_adb_command_for` 注入）；**GUI 每设备一 tab 并行**（详见 CLAUDE.md「多设备 adb」）
 - **GUI 多设备改版**：顶栏设备 tab（热插拔动态增删、断开灰显保留数据插回自动恢复）+ 每设备独立页（侧栏 + 性能指标/Perfetto/Simpleperf 三子 tab）+ `DeviceSession` 类（事件按 payload.serial 分发）+ **「应用操作」**（打开/重启应用，activity 留空自动 resolve-activity，`am start -W` 顺带测冷启动进「冷启动」面板，系统重定向警示）
@@ -62,7 +62,7 @@
 - QNX 双会话并发交互（五轮 review 实测）：①后启动会话的 fd3 写入给先启动方一次 ~7s GPU 停走（看门狗自愈恢复）；②各方 GPU 事件密度升至 ~2×（双方写入产生非锁步多链，行级全等去重不覆盖，值为真值仅密度偏高）；③退出清理已有并发保护（pgrep 检测其他 agent 跳过停链，agent 钩子 >1 / host 兜底 ≥1+收尸等待，真机验证）——并发监控本身罕见，记录不修
 - ~~GUI add_marker 不写 markers.csv~~（已失效：GUI 打点功能整体删除，78f93a9，仅剩 CLI socket 打点）
 - marker 每连接线程无界（有 10s 读超时兜底）
-- **多宿主协议版本战（2026-09-10 晚实测踩坑，协议 bump 期间必看）**：新旧两个 host 进程（如旧版 GUI + 新版 CLI）同时连同一设备时，各自 `ensure_daemon` 发现版本不符就 suicide+重推 daemon——两边版本不同则**互相杀死对方的 daemon 无限循环**，表现：会话 hello 后流冻结、设备端 daemon 进程与 `@xperf-agent` socket 堆积（实测 2 进程/6 socket）；另一残留形态：双启动 bind 竞态（"绑定失败：已有 daemon"）后原 daemon 空载退出 → 无人监听，新连接报 `daemon 启动失败：EOF while parsing a value`。**处理：杀掉全部旧宿主进程后重试即自愈**（ensure_daemon 冷启动链路已验证）；协议 bump 升级时旧宿主进程必须先退出；排查命令 `adb shell 'pgrep -f xperf-age[n]t; grep -c xperf-agent /proc/net/unix'`，清理 `pkill -f xperf-age[n]t`
+- ~~**多宿主协议版本战**~~（**已代码修复**，2026-09-11 v6 / 9685438）：曾实测 v4 GUI + v5 CLI 并存时互相 suicide+重推对方 daemon（无限循环/无人监听残留）。**v6 起版本契约**：host 接受 daemon ≥ 自身（wire 自 v3 稳定）；daemon bind 竞争高版本胜出、挂死（SIGSTOP 类持有 socket 不应答）被清场接管——任何启动交错收敛到「恰好一个健康 daemon 且为最高版本」，真机四场景验证（升级重推/升级接管/挂死接管/等版本让位）。**过渡期残留**：exact-match 时代旧宿主（≤v5 二进制）连 v6 daemon 仍会自杀重推降级——各宿主升级一次 v6 后绝迹
 - **bridge 边缘态（2026-09-10 review 记录）**：bootstrap 探测失败冷却期（60s）内 MindRT 以 `is_gateway=false` 漏进设备列表（pick_device 可选中/GUI 可建 tab）——仅中继坏掉时出现，选中后采样会按普通设备失败；不修（正常路径 bootstrap 秒成，冷却语义是防反复探测）
 - GUI 基线/应用操作按钮与设备 tab 切换的点击渲染为人工目验项（后端链路由命令级测试锁定：save/compare 端到端 + build_summary 口径 + 多会话隔离；真机日志已验手动开始/勾选重启/trace 录制全链路）
 
