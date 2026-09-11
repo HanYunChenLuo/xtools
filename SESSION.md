@@ -37,6 +37,8 @@
 
 **同日补丁（a99dee7，用户实撞驱动）**：SS3 镜像在跑时 SS4 起不来（"Server connection failed"）。根因（scrcpy v4.1 源码 `adb_tunnel.c`/`server.c` 锁定）：**`--tunnel-port` 只钉本地 connect 口；`adb forward` 注册口由 `-p/--port`（port_range，默认 27183:27199）在 adb server 侧扫描**——只传 tunnel-port 时，注册口扫描结果（远端 27183 常空闲，因先跑镜像的规则建连后即撤）与连接口（27184）错配。修复：`-p P --tunnel-port=P` 双钉同号。勘察教训：**nc -z 探测 hop#2 是侵入性的**（会消费 scrcpy-server 的首个视频连接，污染实验）；scrcpy 的 `[server] INFO: Device:` 行是设备端进程启动日志，**不能作为连接成功判据**（真连接判据 = lsof ESTABLISHED / 保活超 10s 重试窗）。回归：SS3(27183)+SS4(27184) 并行双 ESTABLISHED、单镜像池首回归、退出零残留。
 
+**独立 review 修复（341da84）**：①add_forward_pinned「同号复用」分支在并发双镜像下错误共享 hop#2 → 改 `Result<bool>` 占用信号 + start_mirror 候选端口循环（busy/本机占用/映射表已占/-O forward 失败均换下一口）；②双钉参数抽 `build_scrcpy_args` 纯函数 + 单测锚定；③sweep 双重解析清理。测试 103+9+5+2 三连跑全绿（注意：「释放后报闲」断言在并行测试下有抢端口 TOCTOU，只测忙向），真机并行复验通过。
+
 ---
 
 ## 2026-09-11(6) — QNX 「proc 链泄漏」核销：真凶是孤儿 tailer（协议 v9，`feat/qnx-orphan-reaper`）
