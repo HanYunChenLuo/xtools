@@ -585,14 +585,19 @@ async fn monitor_process_agent(
                     continue;
                 };
                 if verbose {
+                    // App Summary 全 7 分类（合计恒等于 PSS；Private Other 常是直渲染
+                    // 应用的大头——如 gltf 场景缓冲，漏列会显得"PSS 远大于分类之和"）
                     println!(
-                        "[{}] Memory Usage: {:.1} MB (Java: {:.1}, Native: {:.1}, Code: {:.1}, Graphics: {:.1}, RSS: {:.1}) [pid {}]",
+                        "[{}] Memory Usage: {:.1} MB (Java: {:.1}, Native: {:.1}, Graphics: {:.1}, Code: {:.1}, Stack: {:.1}, Private Other: {:.1}, System: {:.1}, RSS: {:.1}) [pid {}]",
                         t.format("%H:%M:%S"),
                         pss as f64 / 1024.0,
                         java as f64 / 1024.0,
                         native as f64 / 1024.0,
-                        code as f64 / 1024.0,
                         gfx as f64 / 1024.0,
+                        code as f64 / 1024.0,
+                        stack as f64 / 1024.0,
+                        other as f64 / 1024.0,
+                        sys as f64 / 1024.0,
                         rss as f64 / 1024.0,
                         pid.to_string().yellow()
                     );

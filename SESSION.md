@@ -7,6 +7,18 @@
 
 ---
 
+## 2026-09-11(3) — 内存分类显示补全（Private Other 大头漏列致"PSS 与分类之和差距大"）
+
+**任务**：用户反馈 SS4 内存显示的分类之和与 PSS 差距很大。
+
+**结论**：**解析无 bug**——SS4 App Summary 与解析器完全匹配（真机验证：7 分类相加 = TOTAL PSS 分毫不差）。差距来自**显示层漏列**：CLI 只打 Java/Native/Code/Graphics、GUI 面板只列 Native/Java/Code，而 gltf viewer 的大头在 **Private Other（~625MB，场景缓冲落在 Other mmap）**，Stack/System 也未列——SS4 上该应用 Private Other 占 PSS 的 ~85%，漏列后"分类合计 38MB vs PSS 729MB"。
+
+**修复**：CLI verbose 打印与 GUI 实时面板补全 App Summary 全 7 分类（Native/Java/Graphics/Code/Stack/Private Other/System——构造上合计恒等于 PSS）。数据链路（agent 解析/协议/CSV/基线）零改动——一直是对的。
+
+**真机验证**：SS4 gltf `738.6 MB (Java 22.9, Native 76.9, Graphics 0.0, Code 8.1, Stack 0.9, Private Other 624.9, System 4.8, RSS 895.2)`——7 项合计 = PSS。全量测试 94+8+5+2 绿。
+
+---
+
 ## 2026-09-11(2) — GPU 显存独立开关 + SS2MAX 平台禁用 + FPS 默认勾选（协议 v7）
 
 **任务**：用户要求——SS2MAX 无 GPU 显存源，其"GPU 显存"勾选框应不可勾选；性能指标默认勾选 FPS。
