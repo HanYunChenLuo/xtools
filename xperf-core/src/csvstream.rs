@@ -319,4 +319,32 @@ mod tests {
         let _csv = CsvStream::with_root(dir.clone());
         assert!(!dir.exists(), "无样本不落空目录");
     }
+
+    /// mem_row：表头与数据行列数一致（10 列，v8 起含 DMA-BUF），
+    /// DMA-BUF 列在 Graphics 与 Other 之间；锁表头/行对齐防回归
+    #[test]
+    fn test_mem_row_dmabuf_column() {
+        let dir = std::env::temp_dir().join(format!("xperf_csvtest_mem_{}", std::process::id()));
+        let d = crate::MemoryDetails {
+            java_heap: 1024, native_heap: 2048, code: 3072, stack: 4096,
+            graphics: 5120, dmabuf: 6144, private_other: 7168, system: 8192,
+            total_pss: 10240,
+        };
+        {
+            let mut csv = CsvStream::with_root(dir.clone());
+            csv.mem_row("com.test", 100, Local::now(), &d);
+        }
+        let content = std::fs::read_to_string(dir.join("memory/memory_100_data.csv")).unwrap();
+        let mut lines = content.lines();
+        let header = lines.next().unwrap();
+        let row = lines.next().unwrap();
+        assert_eq!(header.matches(',').count(), row.matches(',').count(), "表头/数据列数不一致");
+        assert!(header.contains("Graphics (MB),DMA-BUF (MB),Other (MB)"), "DMA-BUF 列位置: {}", header);
+        // 行值：Timestamp + 9 个 MB 值（KB/1024）：dmabuf 6144KB = 6.0MB
+        let cols: Vec<&str> = row.split(',').collect();
+        assert_eq!(cols.len(), 10);
+        assert_eq!(cols[7], "6.0", "DMA-BUF 列值（Graphics 后）");
+        assert_eq!(cols[8], "7.0", "Other 列值");
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }

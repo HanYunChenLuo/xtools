@@ -1734,5 +1734,37 @@ Host hppc          # 重复别名去重
         let e = r.unwrap_err();
         assert!(e.contains("未找到基线"));
     }
+
+    /// map_event 的 Mem→MemoryUpdate 透传（协议 v8）：dmabuf 进 details.dmabuf，
+    /// other 已是 agent 扣减后的值原样进 private_other；首见 PID 先补 PidDiscovered
+    #[test]
+    fn test_map_event_mem_dmabuf() {
+        let ev: AgentEvent = serde_json::from_str(
+            r#"{"t":"mem","ts":1788258836663,"pid":11473,"pss":746000,"rss":917000,"java":13107,"native":78848,"code":8294,"stack":922,"gfx":0,"other":9216,"sys":4915,"dmabuf":630374}"#,
+        )
+        .unwrap();
+        let mut known = std::collections::HashSet::new();
+        let out = map_event(ev, &mut known);
+        assert_eq!(out.len(), 2, "首见 PID 应补 PidDiscovered");
+        match &out[1] {
+            SampleEvent::MemoryUpdate { pid, total_pss, details, .. } => {
+                assert_eq!(pid, "11473");
+                assert_eq!(*total_pss, 746000);
+                assert_eq!(details.dmabuf, 630374);
+                assert_eq!(details.private_other, 9216);
+            }
+            other => panic!("应为 MemoryUpdate: {:?}", other),
+        }
+        // 缺省 dmabuf（老 daemon/低间隔路径）→ 0
+        let ev: AgentEvent = serde_json::from_str(
+            r#"{"t":"mem","ts":1788258836663,"pid":11473,"pss":1000,"rss":2000}"#,
+        )
+        .unwrap();
+        let out = map_event(ev, &mut known);
+        match &out[0] {
+            SampleEvent::MemoryUpdate { details, .. } => assert_eq!(details.dmabuf, 0),
+            other => panic!("应为 MemoryUpdate: {:?}", other),
+        }
+    }
 }
 
