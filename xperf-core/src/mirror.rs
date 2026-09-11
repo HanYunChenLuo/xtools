@@ -85,19 +85,29 @@ fn remote_busy_ports() -> HashSet<u16> {
     busy
 }
 
-/// 从端口池中选一个本机/远端两侧同时空闲的端口（纯函数便于单测；
-/// `local_free` 为可注入的本机可用性判定）
-fn pick_tunnel_port(
-    busy: &HashSet<u16>,
-    local_free: impl Fn(u16) -> bool,
-) -> Option<u16> {
-    (TUNNEL_PORT_MIN..=TUNNEL_PORT_MAX).find(|&p| !busy.contains(&p) && local_free(p))
-}
-
 /// 本机端口可用性判定（bind 即放；TOCTOU 窗口由 `-O forward` 的
 /// `ExitOnForwardFailure` 快速失败兜底）
 fn local_port_free(port: u16) -> bool {
     std::net::TcpListener::bind(("127.0.0.1", port)).is_ok()
+}
+
+/// 组装 scrcpy 命令行参数（纯函数，单测锁定双钉语义防漂移）：
+/// 本地模式 `tunnel_port=None`；远程模式 `Some(P)` → `-p P --tunnel-port=P`
+/// 注册口/连接口双钉同号（语义详见模块文档）
+fn build_scrcpy_args(serial: &str, tunnel_port: Option<u16>) -> Vec<String> {
+    let mut args: Vec<String> = vec![
+        "-s".into(),
+        serial.into(),
+        "--no-audio".into(),
+        "--window-title".into(),
+        format!("xperf: {serial}"),
+    ];
+    if let Some(p) = tunnel_port {
+        args.push(format!("--tunnel-port={p}"));
+        args.push("-p".into());
+        args.push(p.to_string());
+    }
+    args
 }
 
 /// 清扫指定设备残留的 scrcpy forward 规则（scrcpy 被 SIGKILL 时无自清机会，
@@ -109,14 +119,11 @@ pub fn sweep_scrcpy_rules(serial: &str) {
     };
     let list = String::from_utf8_lossy(&out.stdout).to_string();
     for line in list.lines() {
-        if let Some((s, _, target)) = parse_forward_line(line) {
+        if let Some((s, port, target)) = parse_forward_line(line) {
             if s == serial && target.starts_with("localabstract:scrcpy") {
-                let port = parse_forward_line(line).map(|(_, p, _)| p);
-                if let Some(p) = port {
-                    let _ = crate::utils::adb_for(Some(serial))
-                        .args(["forward", "--remove", &format!("tcp:{p}")])
-                        .output();
-                }
+                let _ = crate::utils::adb_for(Some(serial))
+                    .args(["forward", "--remove", &format!("tcp:{port}")])
+                    .output();
             }
         }
     }
@@ -255,7 +262,7 @@ fn spawn_stderr_drain(child: &mut Child, tail: Arc<Mutex<VecDeque<String>>>) {
 
 /// 启动一路屏幕镜像：探测 scrcpy → 清扫残留规则 →（远程模式）建固定端口 hop#2
 /// → spawn scrcpy（`-s <serial> --no-audio --window-title xperf:<serial>`，
-/// 远程追加 `--tunnel-port=P` + `ADB_SERVER_SOCKET` 指向 hop#1）。
+/// 远程追加 `-p P --tunnel-port=P` 双钉同号 + `ADB_SERVER_SOCKET` 指向 hop#1）。
 ///
 /// 启动后有 600ms 宽限期：参数错误/连接立败（如端口被抢）在此窗口内暴露为 Err
 /// （附带 stderr 尾行）；此后存活即视为成功，后续退出由调用方经
@@ -268,28 +275,37 @@ pub fn start_mirror(serial: Option<&str>) -> Result<MirrorHandle> {
     let eff = crate::utils::resolve_serial(serial).context("未选择目标设备（先连接设备）")?;
     sweep_scrcpy_rules(&eff);
 
-    let mut cmd = Command::new(&bin);
-    cmd.args(["-s", &eff, "--no-audio", "--window-title"])
-        .arg(format!("xperf: {eff}"));
-
     let mut hop2_port = None;
+    let mut cmd = Command::new(&bin);
     if matches!(crate::transport::transport(), crate::transport::Transport::Ssh(_)) {
         let tun = crate::transport::tunnel().context("远程模式但隧道不存在（未连接远程后端？）")?;
+        // 端口获取循环：远端规则占用（busy）/本机占用（bind 探测）/映射表已占
+        // （并发的另一路镜像）/-O forward 失败（TOCTOU 被抢）——均换下一候选端口
         let busy = remote_busy_ports();
-        let port = pick_tunnel_port(&busy, local_port_free).context(format!(
-            "无可用隧道端口（{TUNNEL_PORT_MIN}..={TUNNEL_PORT_MAX} 全被本机或远端占用）"
+        let mut pinned = None;
+        for port in TUNNEL_PORT_MIN..=TUNNEL_PORT_MAX {
+            if busy.contains(&port) || !local_port_free(port) {
+                continue;
+            }
+            match tun.add_forward_pinned(port, port) {
+                Ok(true) => {
+                    pinned = Some(port);
+                    break;
+                }
+                Ok(false) | Err(_) => continue,
+            }
+        }
+        let port = pinned.context(format!(
+            "无可用隧道端口（{TUNNEL_PORT_MIN}..={TUNNEL_PORT_MAX} 全被本机/远端/并发镜像占用）"
         ))?;
-        cmd.arg(format!("--tunnel-port={port}"));
-        // -p 钉死 adb forward 注册口（port_range 扫描默认 27183:27199 按远端空闲
-        // 自选，与本机连接口会错配——详见模块文档）；--tunnel-port 钉本地连接口
-        cmd.args(["-p", &port.to_string()]);
+        cmd.args(build_scrcpy_args(&eff, Some(port)));
         cmd.env(
             "ADB_SERVER_SOCKET",
             format!("tcp:127.0.0.1:{}", tun.server_port()),
         );
-        // 先建 hop#2 再放行 scrcpy：其 forward 注册在远端 server，视频流回本机依赖此映射
-        tun.add_forward_pinned(port, port)?;
         hop2_port = Some(port);
+    } else {
+        cmd.args(build_scrcpy_args(&eff, None));
     }
 
     let mut child = match cmd
@@ -391,6 +407,25 @@ mod tests {
     }
 
     #[test]
+    fn test_build_scrcpy_args() {
+        // 本地模式：无端口参数
+        let a = build_scrcpy_args("6eb792dfb0f", None);
+        assert_eq!(
+            a,
+            vec!["-s", "6eb792dfb0f", "--no-audio", "--window-title", "xperf: 6eb792dfb0f"]
+        );
+        // 远程模式：-p P --tunnel-port=P 双钉同号（注册口/连接口错配必败的回归锚）
+        let a = build_scrcpy_args("localhost:5559", Some(27184));
+        assert_eq!(
+            a,
+            vec![
+                "-s", "localhost:5559", "--no-audio", "--window-title", "xperf: localhost:5559",
+                "--tunnel-port=27184", "-p", "27184",
+            ]
+        );
+    }
+
+    #[test]
     fn test_parse_forward_line() {
         assert_eq!(
             parse_forward_line("6eb792dfb0f tcp:27183 localabstract:scrcpy-1234abcd"),
@@ -408,17 +443,12 @@ mod tests {
     }
 
     #[test]
-    fn test_pick_tunnel_port_skips_remote_busy() {
-        let busy: HashSet<u16> = (27183..=27185).collect();
-        // 远端占 27183-27185 → 应选 27186（本机全空闲）
-        assert_eq!(pick_tunnel_port(&busy, |_| true), Some(27186));
-        // 全池占用 → None
-        let all: HashSet<u16> = (TUNNEL_PORT_MIN..=TUNNEL_PORT_MAX).collect();
-        assert_eq!(pick_tunnel_port(&all, |_| true), None);
-        // 本机占 27183（local_free 判定）→ 跳过
-        let empty = HashSet::new();
-        assert_eq!(pick_tunnel_port(&empty, |p| p != 27183), Some(27184));
-        // 本机真实判定：池首端口空闲时应命中池首
-        assert_eq!(pick_tunnel_port(&empty, local_port_free), Some(27183));
+    fn test_port_pool_bounds_and_local_free() {
+        // 池界与 scrcpy 默认候选范围一致
+        assert_eq!((TUNNEL_PORT_MIN, TUNNEL_PORT_MAX), (27183, 27199));
+        // 本机判定：被占端口应报忙（只测忙向——释放后报闲在并行测试下有抢端口 TOCTOU）
+        let l = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let p = l.local_addr().unwrap().port();
+        assert!(!local_port_free(p), "被占端口应报忙");
     }
 }

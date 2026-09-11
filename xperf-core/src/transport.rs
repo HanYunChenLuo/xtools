@@ -165,19 +165,17 @@ impl SshTunnel {
 
     /// 建立**固定本机端口**的 hop#2（scrcpy `--tunnel-port` 等第三方工具要求其
     /// adb forward 端口与本机连接端口一致时用——映射必须 local==remote 同号）。
-    /// 已映射同号则复用；映射冲突/本机端口占用（`ExitOnForwardFailure` 快速失败）
-    /// 返回 Err，由调用方换端口重试。
-    pub fn add_forward_pinned(&self, local_port: u16, remote_port: u16) -> Result<()> {
+    /// 返回 `Ok(true)` = 新建成功；`Ok(false)` = 该远端端口已有映射（被占用，
+    /// 调用方应换端口重试——占坑复用对同号需求无意义）；`Err` = 建链失败
+    /// （本机端口占用 `ExitOnForwardFailure` 快速失败/隧道异常），同样换端口重试。
+    pub fn add_forward_pinned(&self, local_port: u16, remote_port: u16) -> Result<bool> {
         let mut map = self.lock_forwards();
-        if let Some(&local) = map.get(&remote_port) {
-            if local == local_port {
-                return Ok(()); // 同号映射已存在：复用（幂等）
-            }
-            anyhow::bail!("远端端口 {remote_port} 已映射到本机 {local}，无法固定到 {local_port}");
+        if map.contains_key(&remote_port) {
+            return Ok(false); // 已有映射（无论同号异号）= 被占用，调用方换端口
         }
         if self.ssh_control("forward", local_port, remote_port) {
             map.insert(remote_port, local_port);
-            return Ok(());
+            return Ok(true);
         }
         anyhow::bail!("-O forward 失败（本机端口 {local_port} → 远端 {remote_port} 被占用或隧道异常）")
     }
@@ -734,14 +732,14 @@ mod tests {
         assert_eq!(fwd_spec(51234, 5037), "51234:127.0.0.1:5037");
     }
 
-    /// 固定端口 hop#2（scrcpy 用）：同号映射幂等复用；异号冲突报错；
-    /// 伪隧道的 `-O forward` 必败（control socket 不存在）→ 新映射报错
+    /// 固定端口 hop#2（scrcpy 用）：已有映射 → Ok(false) 占用信号（无论同号异号）；
+    /// 伪隧道新映射必败（-O forward 无 master）→ Err
     #[test]
     fn test_add_forward_pinned_semantics() {
         let t = SshTunnel::for_test(12345);
         t.lock_forwards().insert(27183, 27183);
-        assert!(t.add_forward_pinned(27183, 27183).is_ok(), "同号已映射应幂等复用");
-        assert!(t.add_forward_pinned(27184, 27183).is_err(), "远端端口已映射异号应冲突");
+        assert!(!t.add_forward_pinned(27183, 27183).unwrap(), "已有映射应报占用");
+        assert!(!t.add_forward_pinned(27184, 27183).unwrap(), "异号同样报占用");
         assert!(t.add_forward_pinned(27184, 27184).is_err(), "伪隧道新映射必败（-O forward 无 master）");
     }
 
