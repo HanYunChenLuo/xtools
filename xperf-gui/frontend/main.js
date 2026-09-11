@@ -222,6 +222,9 @@ class DeviceSession {
     const dlId = 'pkgList-' + serial;
     this.root.querySelector('.package-input').setAttribute('list', dlId);
     this.root.querySelector('.pkg-list').id = dlId;
+    // 按平台禁用无数据源的指标项（info.platform 由 devices payload 提供）：
+    // SS2MAX 无 GPU 显存源（dumpsys gpu 无 Memory snapshot，2026-09-07 root 确证）
+    this.applyPlatformCaps();
 
     // 顶栏设备 tab
     this.tabBtn = document.createElement('button');
@@ -274,6 +277,15 @@ class DeviceSession {
   // ---- DOM 查找（设备页 root 内） ----
   el(cls) { return this.root.querySelector('.' + cls); }
   els(cls) { return this.root.querySelectorAll('.' + cls); }
+  // 平台能力：禁用对应指标 checkbox（强制不勾选 + 提示原因）。
+  // info 更新（断开重连 onDevicesChanged / addDevice）后重跑以覆盖热插拔场景
+  applyPlatformCaps() {
+    const box = this.metricBox('gpumem');
+    const noGpuMem = (this.info && this.info.platform === 'ss2max');
+    box.disabled = noGpuMem;
+    box.parentElement.title = noGpuMem ? 'SS2MAX 平台无 GPU 显存数据源' : '';
+    if (noGpuMem) box.checked = false;
+  }
   metricBox(id) { return this.el('metric-' + id); }
   package() { return this.el('package-input').value.trim(); }
 
@@ -354,7 +366,7 @@ class DeviceSession {
     const pairs = [
       ['cpu', 'chart-cpu-box'], ['memory', 'chart-mem-box'], ['fps', 'chart-fps-box'],
       ['freq', 'chart-freq-box'], ['thermal', 'chart-temp-box'], ['gpu', 'chart-gpu-box'],
-      ['gpu', 'chart-gpumem-box'], // --gpu 保底路径（hypervisor 平台）的显存图与 busy 图同开关
+      ['gpumem', 'chart-gpumem-box'], // GPU 显存独立开关（SS2MAX 等无数据源平台禁用）
       ['io', 'chart-io-box'], ['net', 'chart-net-box'],
     ];
     for (const [id, boxCls] of pairs) {
@@ -386,6 +398,7 @@ class DeviceSession {
       { id: 'freq',     name: '频率',   period: interval },
       { id: 'thermal',  name: '温度',   period: Math.ceil(2000 / interval) * interval },
       { id: 'gpu',      name: 'GPU',   period: Math.max(100, Math.min(interval, 1000)) },
+      { id: 'gpumem',  name: 'GPU 显存', period: Math.max(100, Math.min(interval, 1000)) },
       { id: 'io',       name: 'IO',    period: interval },
       { id: 'net',      name: '网络',   period: interval },
     ];
@@ -814,7 +827,7 @@ class DeviceSession {
       package: this.package(),
       interval: parseInt(this.el('interval-select').value, 10),
       cpu: g('cpu'), memory: g('memory'), fps: g('fps'), freq: g('freq'),
-      thermal: g('thermal'), gpu: g('gpu'), io: g('io'), net: g('net'),
+      thermal: g('thermal'), gpu: g('gpu'), gpumem: g('gpumem'), io: g('io'), net: g('net'),
     };
   }
   resetSessionData() {
@@ -924,7 +937,7 @@ class DeviceSession {
     if (args.flags) {
       const flagToMetric = {
         cpu: 'cpu', memory: 'memory', fps: 'fps', freq: 'freq',
-        thermal: 'thermal', gpu: 'gpu', io: 'io', net: 'net',
+        thermal: 'thermal', gpu: 'gpu', gpumem: 'gpumem', io: 'io', net: 'net',
       };
       for (const [f, m] of Object.entries(flagToMetric)) {
         if (args.flags[f]) this.metricBox(m).checked = true;
@@ -965,7 +978,7 @@ class DeviceSession {
     this.el('restart-btn').addEventListener('click', () => this.launchOrRestart('重启'));
     this.el('stop-app-btn').addEventListener('click', () => this.stopApp());
     this.el('interval-select').addEventListener('change', () => this.updateEffectiveRates());
-    for (const id of ['cpu', 'memory', 'fps', 'freq', 'thermal', 'gpu', 'io', 'net']) {
+    for (const id of ['cpu', 'memory', 'fps', 'freq', 'thermal', 'gpu', 'gpumem', 'io', 'net']) {
       this.metricBox(id).addEventListener('change', () => this.onMetricToggle());
     }
     this.el('time-window').addEventListener('change', (e) => {
@@ -1089,6 +1102,7 @@ const app = {
       // 已有会话（断开重连）：更新信息并恢复
       const s = this.sessions.get(info.serial);
       s.info = info;
+      s.applyPlatformCaps();
       s.setOnline();
       s.tabBtn.textContent = s.tabLabel();
       s.tabBtn.title = s.tabTitle();
@@ -1151,6 +1165,7 @@ const app = {
       if (this.sessions.has(d.serial)) {
         const s = this.sessions.get(d.serial);
         s.info = d;
+        s.applyPlatformCaps();
         s.setOnline();
         s.tabBtn.textContent = s.tabLabel();
         s.tabBtn.title = s.tabTitle();

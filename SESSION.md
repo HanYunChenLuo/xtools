@@ -7,6 +7,24 @@
 
 ---
 
+## 2026-09-11(2) — GPU 显存独立开关 + SS2MAX 平台禁用 + FPS 默认勾选（协议 v7）
+
+**任务**：用户要求——SS2MAX 无 GPU 显存源，其"GPU 显存"勾选框应不可勾选；性能指标默认勾选 FPS。
+
+**commit**：见本次合并（`feat: GPU busy 与显存拆分独立开关（协议 v7）`）。
+
+**实现**：
+- **协议 v7**：GPU busy（`--gpu`）与 GPU 显存（`--gpu-mem`）拆分独立开关——此前 `--gpu` 隐含显存补采（DumpMem 保底路径），拆出后无源平台可按需禁用。agent：`GpuPath::DumpMem` 变体删除（detect 只探 busy 源，无源 err 禁用）；gpumem 补采臂独立（`--gpu-mem` 一次性探测 Memory snapshot，无则 err "平台无数据源"）。
+- **平台到前端**：`AdbDevice.platform` 字段（product 推导，`platform_from_product` 纯函数与 detect_platform 共用；同一次 `adb devices -l` 输出内推导，零额外 adb 调用）；devices payload 携带 → 前端 `applyPlatformCaps` 按 platform 禁用 checkbox（SS2MAX → GPU 显存 disabled + 强制不勾 + title 提示"平台无 GPU 显存数据源"）。
+- **前端**：GPU 显存独立 checkbox（图/开关与 busy 解耦）；FPS 默认勾选。
+- CLI `--gpu-mem` flag 同步。
+
+**真机验证**：SS2MAX `--gpu --gpu-mem` → busy 80%（kgsl 正常）+ 显存如实 err 禁用、零 mem 事件；SS3 双开 → QNX busy 25%/util 20% + GPU Mem 609MB/2366MB 并行；SS4 `--gpu-mem` 单开 → 9 事件 672MB/4952MB（无 ligfx busy 干扰）。全量测试 94+8+5+2 绿（+platform_from_product 单测），clippy/doc 零警告。
+
+**遗留**：GUI 渲染目验（checkbox 禁用态/FPS 默认勾选）待用户 rebuild 后确认；SS2PRO 无真机未实测（同为 SS2 系列，前端禁用仅按 SS2MAX 收敛——如 SS2PRO 实测有源再放开）。
+
+---
+
 ## 2026-09-11(1) — daemon bind 自愈 + 高版本替代低版本（协议 v6，`fix/daemon-upgrade`）
 
 **任务**：用户要求从代码层解决双启动 bind 竞态（前一晚版本战曾致"无人监听"残留态，需手动清场），并要求 agent 具备完善的升级逻辑（高版本替代低版本）。

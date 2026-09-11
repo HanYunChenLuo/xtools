@@ -39,7 +39,7 @@
 //! ```
 //!
 //! 用法：`xperf-agent --package <pkg> [--pid N]... --interval 50 [--cpu] [--memory] [--fps]`
-//!                   `[--freq] [--io] [--net] [--gpu] [--thermal]`
+//!                   `[--freq] [--io] [--net] [--gpu] [--gpu-mem] [--thermal]`
 //!
 //! 模块划分：proc（/proc 与 sysfs 读取 + CPU 采样状态）/ mem（内存）/ fps（SurfaceFlinger）/
 //! thermal（温度）/ gpu（五通道）。本文件只保留参数解析、节拍主循环与公共输出工具。
@@ -86,7 +86,9 @@ use proc::PidState;
 /// 双轨），SS4 --fps 短路撤销、设备端 FPS 路径恢复，host frametimeline 兜底移除。
 /// v6：daemon bind 失败自愈（撞上已有 daemon 时探活让位/清场接管，替代裸退出），
 /// 多宿主/重连竞态下收敛到「恰好一个健康 daemon」。
-const PROTOCOL_VERSION: u32 = 6;
+/// v7：GPU busy 与 GPU 显存拆分独立开关（--gpu / --gpu-mem，此前 --gpu 隐含
+/// 显存补采；SS2MAX 等无显存源平台拆出后 host 可按平台禁用）。
+const PROTOCOL_VERSION: u32 = 7;
 
 /// daemon 模式的最大并发会话（host）数
 const MAX_SESSIONS: usize = 10;
@@ -108,6 +110,8 @@ struct Args {
     io: bool,
     net: bool,
     gpu: bool,
+    /// GPU 显存（dumpsys gpu Memory snapshot；与 busy 独立——SS2MAX 等平台无此数据源）
+    gpu_mem: bool,
     thermal: bool,
     /// 平台提示（ss2max/ss2pro/ss3/ss4/android），跳过运行时探测
     platform: Option<String>,
@@ -128,6 +132,7 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
     let mut io = false;
     let mut net = false;
     let mut gpu = false;
+    let mut gpu_mem = false;
     let mut thermal = false;
     let mut platform = None;
     let mut qnx_host = None;
@@ -160,6 +165,7 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
             "--io" => io = true,
             "--net" => net = true,
             "--gpu" => gpu = true,
+            "--gpu-mem" => gpu_mem = true,
             "--thermal" => thermal = true,
             "--platform" => {
                 i += 1;
@@ -176,13 +182,13 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
     if package.is_none() && pids.is_empty() {
         return Err("需要 --package 或 --pid".into());
     }
-    if !(cpu || memory || fps || freq || io || net || gpu || thermal) {
-        return Err("需要至少一个采样开关（--cpu/--memory/--fps/--freq/--io/--net/--gpu/--thermal）".into());
+    if !(cpu || memory || fps || freq || io || net || gpu || gpu_mem || thermal) {
+        return Err("需要至少一个采样开关（--cpu/--memory/--fps/--freq/--io/--net/--gpu/--gpu-mem/--thermal）".into());
     }
     if interval_ms < 50 {
         return Err("--interval 最小 50ms（更低会撞上 jiffies 粒度（10ms）且采样开销占比过高）".into());
     }
-    Ok(Args { package, pids, interval_ms, cpu, memory, fps, freq, io, net, gpu, thermal, platform, qnx_host })
+    Ok(Args { package, pids, interval_ms, cpu, memory, fps, freq, io, net, gpu, gpu_mem, thermal, platform, qnx_host })
 }
 
 // ---------- 输出与公共工具（crate 根私有项对所有子模块可见）----------
@@ -702,16 +708,26 @@ fn run_session(args: Args, io: Option<SessionIo>, stop: Arc<AtomicBool>) {
             g = None;
         }
         match &g {
-            None => emit("{\"t\":\"err\",\"msg\":\"GPU 数据源均不可用，--gpu 已禁用\"}"),
+            None => emit("{\"t\":\"err\",\"msg\":\"GPU busy 数据源均不可用，--gpu 已禁用\"}"),
             Some(GpuPath::Qnx) => emit("{\"t\":\"err\",\"msg\":\"--gpu 走 QNX host 通道（真利用率 + 每进程 busy + 频率）\"}"),
             Some(GpuPath::TopGpu) => emit("{\"t\":\"err\",\"msg\":\"--gpu 走 topgpu 工具通道（SS2 平台）\"}"),
             Some(GpuPath::Ligfx) => emit("{\"t\":\"err\",\"msg\":\"--gpu 走 ligfxprofilerd logcat 通道（SS4 平台）\"}"),
-            Some(GpuPath::DumpMem) => emit("{\"t\":\"err\",\"msg\":\"--gpu 降级为每 PID GPU 显存（dumpsys gpu）\"}"),
             Some(GpuPath::Kgsl(_)) => {}
         }
         g
     } else {
         None
+    };
+    // GPU 显存独立开关：一次性探测 Memory snapshot，无数据源的平台（如 SS2MAX）如实禁用
+    let gpumem_enabled = if args.gpu_mem {
+        if gpu::gpumem_available() {
+            true
+        } else {
+            emit("{\"t\":\"err\",\"msg\":\"dumpsys gpu 无 Memory snapshot 段，--gpu-mem 已禁用（平台无数据源，如 SS2MAX）\"}");
+            false
+        }
+    } else {
+        false
     };
     // 本会话是否持有 GPU 流式通道（结束时收 teardown + 释放独占）
     let holds_gpu_stream = matches!(gpu_path, Some(GpuPath::Qnx) | Some(GpuPath::TopGpu) | Some(GpuPath::Ligfx));
@@ -756,7 +772,7 @@ fn run_session(args: Args, io: Option<SessionIo>, stop: Arc<AtomicBool>) {
 
     // 绝对节拍：按起始时间推算每轮时刻，避免 sleep 累积漂移
     let interval = Duration::from_millis(args.interval_ms);
-    // 流式 GPU 通道读线程启动（QNX/TopGpu/Ligfx；kgsl/DumpMem 由主循环轮询）。
+    // 流式 GPU 通道读线程启动（QNX/TopGpu/Ligfx；kgsl 由主循环轮询）。
     // 先填进程名归因映射，保证读线程首批进程行即可归因。
     // daemon 会话：读线程/看门狗挂本会话的 TLS 输出通道；其停止标志用 gpu_stop——
     // 会话结束必须先跑 teardown（停链写 telnet）再放读线程杀子进程，否则竞态下
@@ -873,22 +889,18 @@ fn run_session(args: Args, io: Option<SessionIo>, stop: Arc<AtomicBool>) {
 
         // GPU：kgsl gpubusy 读数 → busy%（GpuBusyCalc 自适应累计/窗口两种内核语义，
         // 累计语义首轮建基线不出数）；QNX/TopGpu/Ligfx 路径的 busy% 由独立读线程
-        // 异步发（不占节拍），四条非 kgsl 路径都在这里补采 dumpsys gpu 每 PID 显存（限频 ≥1s）
-        match &gpu_path {
-            Some(GpuPath::Kgsl(g)) => {
-                if let Some((busy, total)) = gpu::read_gpu_busy(g.busy_path) {
-                    if let Some(pct) = gpu_busy_calc.sample(busy, total) {
-                        let mhz = g.clk_path.and_then(proc::read_u64_file).map(|hz| hz / 1_000_000).unwrap_or(0);
-                        emit(&format!("{{\"t\":\"gpu\",\"ts\":{},\"busy\":{:.2},\"mhz\":{}}}", ts, pct, mhz));
-                    }
+        // 异步发（不占节拍）；GPU 显存由 --gpu-mem 独立开关补采（限频 ≥1s）
+        if let Some(GpuPath::Kgsl(g)) = &gpu_path {
+            if let Some((busy, total)) = gpu::read_gpu_busy(g.busy_path) {
+                if let Some(pct) = gpu_busy_calc.sample(busy, total) {
+                    let mhz = g.clk_path.and_then(proc::read_u64_file).map(|hz| hz / 1_000_000).unwrap_or(0);
+                    emit(&format!("{{\"t\":\"gpu\",\"ts\":{},\"busy\":{:.2},\"mhz\":{}}}", ts, pct, mhz));
                 }
             }
-            Some(GpuPath::Qnx) | Some(GpuPath::TopGpu) | Some(GpuPath::Ligfx) | Some(GpuPath::DumpMem) => {
-                if round.is_multiple_of(gpumem_every) && !active_pids.is_empty() {
-                    gpu::emit_gpumem(&active_pids, ts);
-                }
-            }
-            None => {}
+        }
+        // GPU 显存（--gpu-mem 独立开关；限频 ≥1s，与 busy 通道解耦）
+        if gpumem_enabled && round.is_multiple_of(gpumem_every) && !active_pids.is_empty() {
+            gpu::emit_gpumem(&active_pids, ts);
         }
 
         // 温度/热降频：限频 ≥2s 一轮（dumpsys ~50ms 会拖长低间隔节拍轮）

@@ -74,6 +74,11 @@ struct Args {
     #[arg(long)]
     gpu: bool,
 
+    /// Monitor GPU memory (dumpsys gpu Memory snapshot, per-PID + global;
+    /// auto-disabled on platforms without the source, e.g. SS2MAX)
+    #[arg(long)]
+    gpu_mem: bool,
+
     /// Monitor per-process IO rate (KB/s, `/proc/<pid>/io`)
     #[arg(long)]
     io: bool,
@@ -339,6 +344,7 @@ fn metric_flags(args: &Args) -> xperf_core::MetricFlags {
         freq: args.freq,
         thermal: args.thermal,
         gpu: args.gpu,
+        gpu_mem: args.gpu_mem,
         io: args.io,
         net: args.net,
     }

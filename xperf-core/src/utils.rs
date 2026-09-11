@@ -126,6 +126,11 @@ pub struct AdbDevice {
     /// `parse_adb_devices` 纯解析恒为 false，由 `bridge::refresh` 落标记；
     /// true 时 CLI `pick_device` 跳过、GUI 前端隐藏，采样命令拒绝。
     pub is_gateway: bool,
+    /// 平台标识（按 product 字段推导，如 `HU_SS2MAXF` → Ss2Max）。
+    /// `parse_adb_devices` 纯解析恒为 Android，`list_adb_devices` 补齐
+    /// （product 在同一次 `adb devices -l` 输出内，零额外调用）。
+    /// 供 GUI 前端按平台禁用无数据源的指标项（如 SS2MAX 的 GPU 显存）。
+    pub platform: crate::platform::PlatformId,
 }
 
 /// 解析 `adb devices -l` 输出为在线设备列表（跳过 `offline`/`unauthorized` 行）。
@@ -153,6 +158,7 @@ pub fn parse_adb_devices(output: &str) -> Vec<AdbDevice> {
             model: field("model"),
             android_version: String::new(),
             is_gateway: false,
+            platform: crate::platform::PlatformId::Android,
         });
     }
     out
@@ -187,6 +193,8 @@ pub fn list_adb_devices() -> Result<Vec<AdbDevice>> {
             .filter(|v| !v.is_empty())
             .unwrap_or_else(|| "?".to_string());
         d.android_version = ver;
+        // 平台标识：product 字段推导（parse 阶段已取得，此处仅回填推导结果）
+        d.platform = crate::platform::platform_from_product(&d.product);
     }
     Ok(devices)
 }
@@ -335,7 +343,7 @@ mod tests {
         assert_eq!(devices.len(), 2); // offline 行跳过
         assert_eq!(
             devices[0],
-            AdbDevice { serial: "1280da60".into(), product: "dada".into(), model: "24129PN74C".into(), android_version: String::new(), is_gateway: false }
+            AdbDevice { serial: "1280da60".into(), product: "dada".into(), model: "24129PN74C".into(), android_version: String::new(), is_gateway: false, platform: crate::platform::PlatformId::Android }
         );
         assert_eq!(devices[1].serial, "6eb792dfb0f");
         assert_eq!(devices[1].product, "HU_SS3");
@@ -368,6 +376,7 @@ mod tests {
         let gw = |serial: &str, is_gateway: bool, product: &str| AdbDevice {
             serial: serial.into(), product: product.into(), model: String::new(),
             android_version: String::new(), is_gateway,
+            platform: crate::platform::platform_from_product(product),
         };
         // 单台 SS4：MindRT（网关）+ localhost:5559（Android）→ 过滤后自动选中 Android
         let ss4 = vec![gw("42087266b1f", true, ""), gw("localhost:5559", false, "HU_SS4")];
@@ -393,7 +402,7 @@ mod tests {
     // ---- 热插拔 diff ----
 
     fn dev(serial: &str) -> AdbDevice {
-        AdbDevice { serial: serial.into(), product: String::new(), model: String::new(), android_version: String::new(), is_gateway: false }
+        AdbDevice { serial: serial.into(), product: String::new(), model: String::new(), android_version: String::new(), is_gateway: false, platform: crate::platform::PlatformId::Android }
     }
 
     // ---- adb_command 传输注入（S3）----

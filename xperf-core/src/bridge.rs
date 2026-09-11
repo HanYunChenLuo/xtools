@@ -368,6 +368,7 @@ mod tests {
             product: product.to_string(),
             model: String::new(),
             android_version: String::new(),
+            platform: crate::platform::PlatformId::Android,
             is_gateway: false,
         }
     }
