@@ -224,12 +224,18 @@ pub enum AgentEvent {
 }
 
 /// 与 agent 的协议版本：与 xperf-agent 的 PROTOCOL_VERSION 同步 bump（改 wire 协议/命令时）。
-/// host 连接时校验 hello 的 version，不一致则通知 suicide + 强杀重推。
+/// host 连接时校验 hello 的 version。
+///
+/// **版本契约（v6 起）**：host 接受 daemon version **≥ 自身**——wire 协议自 v3 起稳定
+/// （此后 bump 均为行为差异，不改命令/事件格式），更高版本的 daemon 可正常服务低版本
+/// host，避免多宿主混跑时的降级战（低版本宿主反复重推旧 daemon）。仅当 daemon 版本
+/// **低于** host 时走升级路径（suicide + 重推）；daemon 侧 bind 竞争同规则高版本胜出。
 /// v3：hello 增加 `root` 字段。
 /// v4：agent 侧 SS4 --fps 短路（当时误判 SF --latency 被平台阉割）。
 /// v5：SS4 --latency 修复（A16 SF 要求图层名带 `<hex> ` 别名前缀，agent fps.rs
 /// 查询名双轨），SS4 --fps 短路撤销，设备端 FPS 路径恢复。
-pub const AGENT_PROTOCOL_VERSION: u32 = 5;
+/// v6：daemon bind 失败自愈 + 高版本替代低版本（多宿主竞态确定性收敛）。
+pub const AGENT_PROTOCOL_VERSION: u32 = 6;
 
 /// daemon 的抽象 socket 名（设备端 `localabstract:xperf-agent`）
 const AGENT_ABSTRACT_SOCK: &str = "xperf-agent";
@@ -636,9 +642,11 @@ fn ensure_daemon(serial: Option<&str>) -> Result<u16> {
                 .add_forward(remote_port)?,
         };
         match probe_daemon(port) {
-            Ok(v) if v == AGENT_PROTOCOL_VERSION => return Ok(port),
+            // daemon ≥ 本 host 版本即可用（版本契约见 AGENT_PROTOCOL_VERSION）：
+            // 更高版本 daemon 兼容服务，不重推降级
+            Ok(v) if v >= AGENT_PROTOCOL_VERSION => return Ok(port),
             Ok(old) => {
-                eprintln!("agent 协议版本不符（设备 v{} vs 宿主 v{}），通知 suicide 并重推", old, AGENT_PROTOCOL_VERSION);
+                eprintln!("agent 协议版本过低（设备 v{} < 宿主 v{}），通知 suicide 并重推升级", old, AGENT_PROTOCOL_VERSION);
                 if let Ok(mut t) = std::net::TcpStream::connect(("127.0.0.1", port)) {
                     use std::io::Write as _;
                     let _ = writeln!(t, "suicide");
@@ -706,10 +714,11 @@ fn start_daemon(serial: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-/// 等 daemon 监听就绪：daemon 进程 spawn + bind 需要数百 ms，探活重试 8×400ms。
+/// 等 daemon 监听就绪：daemon 进程 spawn + bind 需要数百 ms；bind 失败自愈路径
+/// （探活挂死在场者 2s + 清场 + 重绑）最长 ~3.5s，探活重试 10×400ms 覆盖。
 fn wait_probe(port: u16) -> Result<u32> {
     let mut last_err = String::new();
-    for _ in 0..8 {
+    for _ in 0..10 {
         match probe_daemon(port) {
             Ok(v) => return Ok(v),
             Err(e) => {

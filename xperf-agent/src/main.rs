@@ -84,8 +84,9 @@ use proc::PidState;
 /// v4：SS4 平台 --fps 短路（当时误判 SF --latency 被平台阉割）。
 /// v5：SS4 --latency 修复——A16 SF 要求图层名带 `<hex> ` 别名前缀（fps.rs 查询名
 /// 双轨），SS4 --fps 短路撤销、设备端 FPS 路径恢复，host frametimeline 兜底移除。
-/// bump 强制重推，避免 v4 短路版残留在设备。
-const PROTOCOL_VERSION: u32 = 5;
+/// v6：daemon bind 失败自愈（撞上已有 daemon 时探活让位/清场接管，替代裸退出），
+/// 多宿主/重连竞态下收敛到「恰好一个健康 daemon」。
+const PROTOCOL_VERSION: u32 = 6;
 
 /// daemon 模式的最大并发会话（host）数
 const MAX_SESSIONS: usize = 10;
@@ -405,8 +406,63 @@ fn running_as_root() -> bool {
         .unwrap_or(false)
 }
 
+/// 探测在场 daemon：健康则返回其版本号；不可达/挂死返回 None。
+/// 挂死 = 持有 socket 但不 accept/不应答（如 SIGSTOP），其会话早已不可用，
+/// 可安全清场。探活连接对健康 daemon 只是一次普通短连接（hello + EOF）。
+fn probe_incumbent_version() -> Option<u32> {
+    use std::io::{BufRead, BufReader};
+    use std::os::android::net::SocketAddrExt;
+    let addr = std::os::unix::net::SocketAddr::from_abstract_name(ABSTRACT_SOCK).ok()?;
+    let stream = std::os::unix::net::UnixStream::connect_addr(&addr).ok()?;
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(2000)));
+    let mut line = String::new();
+    let n = BufReader::new(stream).read_line(&mut line).ok()?;
+    if n == 0 || !line.contains("\"t\":\"hello\"") {
+        return None;
+    }
+    // hello 内嵌 "version":N（hello_line 格式），无需完整 JSON 解析
+    line.split("\"version\":")
+        .nth(1)?
+        .split([',', '}'])
+        .next()?
+        .trim()
+        .parse()
+        .ok()
+}
+
+/// 清场：kill 除自身外的全部 xperf-agent daemon 进程（bind 接管路径用）。
+/// 按 /proc cmdline 匹配 `xperf-agent` + `--daemon`（NUL 分隔转空格后包含判断），
+/// SIGKILL 后抽象 socket 随进程死亡即时释放。
+fn kill_other_daemon_processes() {
+    let my_pid = std::process::id();
+    let Ok(entries) = std::fs::read_dir("/proc") else { return };
+    for e in entries.flatten() {
+        let Some(name) = e.file_name().into_string().ok() else { continue };
+        let Ok(pid) = name.parse::<u32>() else { continue };
+        if pid == my_pid {
+            continue;
+        }
+        if let Ok(cmd) = std::fs::read_to_string(format!("/proc/{}/cmdline", pid)) {
+            let cmd = cmd.replace('\0', " ");
+            if cmd.contains("xperf-agent") && cmd.contains("--daemon") {
+                let _ = std::process::Command::new("kill")
+                    .args(["-9", &pid.to_string()])
+                    .status();
+            }
+        }
+    }
+}
+
 /// daemon 模式：监听抽象 socket，每连接一个会话（上限 MAX_SESSIONS），
-/// 0 会话持续 IDLE_EXIT_SECS 秒自杀。永不返回（bind 失败除外——已有 daemon 在跑）。
+/// 0 会话持续 IDLE_EXIT_SECS 秒自杀。永不返回（bind 失败且自愈无效除外，见下）。
+///
+/// **bind 失败自愈 + 高版本替代**（2026-09-11）：bind 撞上已有 daemon 时不再裸退出
+/// （曾致"双启动 bind 竞态 → 原 daemon 空载退出 → 无人监听"）。决策按在场者探测
+/// 结果（[probe_incumbent_version]）：
+/// - 在场者健康且版本 **≥ 本实例** → 让位退出（等版本去重；高版本在场绝不降级）
+/// - 在场者健康但版本 **< 本实例** → 升级接管（清场 + 重绑，高版本胜出）
+/// - 在场者不可达/挂死（持有 socket 但不应答）→ 清场接管
+/// 任何启动交错下收敛到「恰好一个健康 daemon，且是最高版本」。
 fn run_daemon() -> ! {
     use std::os::android::net::SocketAddrExt;
     use std::os::unix::net::UnixListener;
@@ -421,8 +477,42 @@ fn run_daemon() -> ! {
     let listener = match UnixListener::bind_addr(&addr) {
         Ok(l) => l,
         Err(e) => {
-            eprintln!("绑定 {} 失败（已有 daemon？）: {}", ABSTRACT_SOCK, e);
-            std::process::exit(1);
+            eprintln!("绑定 {} 失败（已有 daemon？）: {}，自愈流程启动", ABSTRACT_SOCK, e);
+            match probe_incumbent_version() {
+                Some(v) if v >= PROTOCOL_VERSION => {
+                    eprintln!("在场 daemon v{}（≥ 本实例 v{}），让位退出", v, PROTOCOL_VERSION);
+                    std::process::exit(0);
+                }
+                Some(v) => {
+                    eprintln!("在场 daemon v{} 低于本实例 v{}，升级接管", v, PROTOCOL_VERSION);
+                }
+                None => {
+                    eprintln!("在场 daemon 无响应（死亡/挂死），清场接管");
+                }
+            }
+            kill_other_daemon_processes();
+            // 清场后重试 bind（socket 随进程死亡即时释放；少量重试兜底时序）
+            let mut bound = None;
+            for _ in 0..5 {
+                std::thread::sleep(Duration::from_millis(200));
+                match UnixListener::bind_addr(&addr) {
+                    Ok(l) => {
+                        bound = Some(l);
+                        break;
+                    }
+                    Err(_) => continue,
+                }
+            }
+            match bound {
+                Some(l) => {
+                    eprintln!("清场接管成功，继续以 daemon 运行");
+                    l
+                }
+                None => {
+                    eprintln!("清场后仍无法绑定 {}，退出", ABSTRACT_SOCK);
+                    std::process::exit(1);
+                }
+            }
         }
     };
     eprintln!("xperf-agent daemon v{} 监听 localabstract:{}", PROTOCOL_VERSION, ABSTRACT_SOCK);
