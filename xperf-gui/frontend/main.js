@@ -212,6 +212,7 @@ class DeviceSession {
     this.currentTracePath = null;
     this.currentStackPath = null;
     this.restartTimer = null;
+    this.mirrorRunning = false;
 
     // DOM：克隆设备页模板并挂载
     const tpl = document.getElementById('devicePageTpl');
@@ -347,6 +348,44 @@ class DeviceSession {
       _diag('[' + this.serial + '] rootBtn ERROR: ' + (e && e.message ? e.message : JSON.stringify(e)));
       this.updatePermBadge(); // 失败回恢复按 rooted 状态决定按钮可用性
     }
+  }
+
+  // ---- 屏幕镜像（scrcpy 外部窗口；后端托管进程与 SSH 隧道映射） ----
+  async toggleMirror() {
+    const btn = this.el('mirror-btn');
+    btn.disabled = true;
+    try {
+      if (!this.mirrorRunning) {
+        const msg = await invoke('start_mirror', { serial: this.serial });
+        this.mirrorRunning = true;
+        btn.textContent = '停止镜像';
+        this.setStatus(msg);
+        _diag('[' + this.serial + '] mirrorBtn: started');
+      } else {
+        const msg = await invoke('stop_mirror', { serial: this.serial });
+        this.setStatus(msg);
+        _diag('[' + this.serial + '] mirrorBtn: stopped');
+        // 按钮复位由监护线程的 mirror exited 事件完成（进程真正退出后）
+      }
+    } catch (e) {
+      this.setStatus('屏幕镜像失败: ' + (e && e.message ? e.message : e));
+      _diag('[' + this.serial + '] mirrorBtn ERROR: ' + (e && e.message ? e.message : JSON.stringify(e)));
+      this.mirrorRunning = false;
+      btn.textContent = '屏幕镜像';
+    }
+    btn.disabled = false;
+  }
+
+  // 镜像进程退出（用户关窗/连接断开/stop 生效）：复位按钮
+  handleMirrorEvent(stage, message) {
+    if (stage !== 'exited') return;
+    this.mirrorRunning = false;
+    const btn = this.el('mirror-btn');
+    btn.textContent = '屏幕镜像';
+    btn.disabled = false;
+    // message 为 scrcpy stderr 尾行（正常关窗为空；异常退出带诊断）
+    this.setStatus(message ? '镜像异常退出: ' + message.split('\n').pop() : '镜像窗口已关闭');
+    _diag('[' + this.serial + '] mirror exited: ' + (message || '(clean)'));
   }
 
   // ---- 状态栏（顶栏显示当前激活设备的状态；非激活设备暂存自己的状态） ----
@@ -983,6 +1022,7 @@ class DeviceSession {
     this.el('stop-btn').addEventListener('click', () => this.stop());
     this.el('refresh-pkgs').addEventListener('click', () => this.loadPackages());
     this.el('root-btn').addEventListener('click', () => this.acquireRoot());
+    this.el('mirror-btn').addEventListener('click', () => this.toggleMirror());
     this.el('launch-btn').addEventListener('click', () => this.launchOrRestart('打开'));
     this.el('restart-btn').addEventListener('click', () => this.launchOrRestart('重启'));
     this.el('stop-app-btn').addEventListener('click', () => this.stopApp());
@@ -1220,6 +1260,11 @@ listen('stack', (e) => {
 listen('sampling-error', (e) => {
   const s = app.sessions.get(e.payload.serial);
   if (s) s.handleSamplingError(e.payload.message);
+});
+// 镜像进程退出事件（每设备；payload {serial, stage, message}）
+listen('mirror', (e) => {
+  const s = app.sessions.get(e.payload.serial);
+  if (s) s.handleMirrorEvent(e.payload.stage, e.payload.message);
 });
 listen('devices-changed', (e) => app.onDevicesChanged(e.payload));
 // 火焰图脚本更新进度（全局操作，路由到激活设备的状态栏；进度条按完成文件数铺开）

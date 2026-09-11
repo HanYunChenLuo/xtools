@@ -346,6 +346,8 @@ struct DeviceSession {
     /// 创建；导出 CSV = 复制该目录快照）。元组带包名：换包重采时判失配建新目录，
     /// 同包重采复用（指标勾选重启采样不丢 CSV 连续性）
     csv_dir: Arc<Mutex<Option<(String, std::path::PathBuf)>>>,
+    /// 屏幕镜像会话（scrcpy 外部窗口；None = 未开启；监护线程负责退出事件与槽位清空）
+    mirror: Arc<Mutex<Option<Arc<xperf_core::mirror::MirrorHandle>>>>,
 }
 
 impl DeviceSession {
@@ -357,6 +359,7 @@ impl DeviceSession {
             package: String::new(),
             startup_extra: None,
             csv_dir: Arc::new(Mutex::new(None)),
+            mirror: Arc::new(Mutex::new(None)),
         }
     }
 }
@@ -872,6 +875,53 @@ async fn stop_app(serial: String, package: String) -> Result<String, String> {
 async fn acquire_root(serial: String) -> Result<String, String> {
     ensure_device_online(&serial)?;
     xperf_core::agent::acquire_root(Some(&serial)).map_err(|e| e.to_string())
+}
+
+/// 启动屏幕镜像（侧栏「屏幕镜像」按钮）：拉起 scrcpy 外部窗口（视频+触控）。
+/// SSH 远程模式经 hop#2 固定端口映射（core `mirror` 模块封装细节）。
+/// 监护线程等窗口关闭/进程退出后清槽位并 emit `mirror {serial, stage:"exited"}` 复位前端按钮。
+#[tauri::command]
+async fn start_mirror(
+    serial: String,
+    state: State<'_, AppState>,
+    app: tauri::AppHandle,
+) -> Result<String, String> {
+    ensure_device_online(&serial)?;
+    let session = state.session(&serial);
+    if session.mirror.lock().map(|m| m.is_some()).unwrap_or(false) {
+        return Err("屏幕镜像已在运行".into());
+    }
+    let handle = Arc::new(xperf_core::mirror::start_mirror(Some(&serial)).map_err(|e| e.to_string())?);
+    *session.mirror.lock().map_err(|e| e.to_string())? = Some(handle.clone());
+    let s = serial.clone();
+    std::thread::spawn(move || {
+        let tail = handle.wait_exit();
+        if let Some(st) = app.try_state::<AppState>() {
+            if let Ok(mut m) = st.session(&s).mirror.lock() {
+                *m = None;
+            }
+        }
+        let _ = app.emit(
+            "mirror",
+            serde_json::json!({ "serial": s, "stage": "exited", "message": tail }),
+        );
+    });
+    Ok(format!("屏幕镜像已启动: {}", serial))
+}
+
+/// 停止屏幕镜像（按钮 toggle / 关窗收尾）：杀 scrcpy 进程；
+/// 隧道/规则清理由监护线程的 `wait_exit → cleanup` 完成
+#[tauri::command]
+async fn stop_mirror(serial: String, state: State<'_, AppState>) -> Result<String, String> {
+    let session = state.session(&serial);
+    let h = session.mirror.lock().map_err(|e| e.to_string())?.take();
+    match h {
+        Some(h) => {
+            h.stop();
+            Ok(format!("屏幕镜像已停止: {}", serial))
+        }
+        None => Err("屏幕镜像未在运行".into()),
+    }
 }
 
 /// 在线设备清单（顶栏设备 tab 用）：`{devices: [{serial, model, version}]}`
@@ -1496,6 +1546,8 @@ fn main() {
             restart_app,
             stop_app,
             acquire_root,
+            start_mirror,
+            stop_mirror,
             export_csv,
             save_baseline,
             compare_baseline,
@@ -1516,6 +1568,7 @@ fn main() {
                 xperf_core::utils::set_interrupt_flag();
                 let state = window.state::<AppState>();
                 let mut any_running = false;
+                let mut any_mirror = false;
                 if let Ok(map) = state.sessions.lock() {
                     for s in map.values() {
                         let mut running = s.running.lock().unwrap();
@@ -1523,11 +1576,23 @@ fn main() {
                             *running = false;
                             any_running = true;
                         }
+                        // 屏幕镜像：杀 scrcpy（监护线程的 wait_exit 随即收尾：
+                        // 摘 hop#2 + 清扫残留 forward 规则，需在 shutdown_remote 之前完成）
+                        if let Ok(mut m) = s.mirror.lock() {
+                            if let Some(h) = m.take() {
+                                h.stop();
+                                any_mirror = true;
+                            }
+                        }
                     }
                 }
                 if any_running {
                     // 等采样线程检测到 running=false 并退出（最长一个 interval 周期）
                     std::thread::sleep(std::time::Duration::from_millis(1200));
+                }
+                if any_mirror {
+                    // 等镜像监护线程完成 cleanup（kill → try_wait 轮询 ≤150ms → 摘 hop#2）
+                    std::thread::sleep(std::time::Duration::from_millis(600));
                 }
                 // 关窗收尾远程后端：清理 forward 规则 + 关隧道（R9/R10）
                 xperf_core::shutdown_remote();
