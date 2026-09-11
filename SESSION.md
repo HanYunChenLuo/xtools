@@ -33,7 +33,7 @@
 - v9 会话 #2（--gpu --gpu-mem @500ms）：27 gpu + 25 gpuproc 样本零自愈，退出后孤儿 0。
 - host 侧测试 96+9+5+2 全绿，clippy/cargo doc 零警告。
 
-**遗留**：gltf APK 去 RemoteServer 一项旧遗留不变。历史 E 节「QNX 双会话并发交互」条目中的密度 ×2 现象按旧模型归因（多链），新认知下应为互相重相位/重印 artifact——条目保留为历史观察记录，不阻塞。
+**遗留**：无。历史 E 节「QNX 双会话并发交互」条目中的密度 ×2 现象按旧模型归因（多链），新认知下应为互相重相位/重印 artifact——条目保留为历史观察记录，不阻塞。（gltf APK 的 RemoteServer 崩溃属 filament 样例自身问题，与本工具无关，移出 backlog——用户 2026-09-11 指示；规避方式仍为测前 `--force-stop` 清场。）
 
 ---
 
