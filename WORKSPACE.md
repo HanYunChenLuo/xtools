@@ -105,6 +105,16 @@
 
 ---
 
+## I. 新功能候补（2026-09-11 用户排期，各开新会话完成）
+
+> 三条均要求 **SSH 远程后端（`--remote`）下可用**。形态细节（GUI 内嵌 vs 拉起外部、交互式 vs 单条）在实施会话中确认。
+
+- [ ] **logcat 支持**：设备 logcat 抓取/查看接入工具链（按包/时间窗过滤、与采样时间轴对齐等形态待定）。SSH 远程注意：adb 命令天然走 hop#1 隧道，落盘在本机，预期改动小。
+- [ ] **scrcpy 集成**：屏幕镜像（GUI 内嵌视频 or 并排拉起 scrcpy 窗口，形态待定）。SSH 远程注意：scrcpy 的视频流 socket 走 adb forward/reverse，需参照 agent hop#2 端口映射经隧道转发（transport.rs 的 SshTunnel::add_forward 模式可复用）。
+- [ ] **命令行输入**：GUI 提供设备 shell 命令输入能力（交互式 shell or 单条执行，形态待定）。SSH 远程注意：命令通道同 adb 走 hop#1；若做成交互式长连接 shell 则类似 agent 流需 hop#2 式映射。
+
+---
+
 ## 已完成
 
 - ✅ GUI 多设备改版 + 应用操作/冷启动（2026-09-04 晚，01b28ce）：core serial 参数化（`adb_for`/`run_adb_command_for`/`resolve_serial`，各入口 `serial: Option<&str>`——None 回退全局 CLI 零变化）+ GUI 多会话（HashMap<serial, DeviceSession> + 命令/事件全带 serial）+ 前端设备 tab（template 克隆 DeviceSession 类 + 热插拔灰显/恢复）+ 冷启动模块下沉 core（resolve-activity 自动解析 + force-stop + GUI 打开/重启应用带测量进面板 + 重定向警示）；trace/stack 目录 `<pkg>/<ts>-<serial>` 防撞。真机 SS3+SS2MAX 双机并行全链路
