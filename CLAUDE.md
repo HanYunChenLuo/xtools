@@ -64,9 +64,10 @@ GUI:  start_sampling(serial) / 自动启动 → spawn_sampling()（std::thread �
         │
         └─ agent::spawn_agent(..., serial)
               ├─ ensure_daemon(serial)：adb forward（复用规则）→ probe hello 版本
-              │    ├─ 版本一致 → 直连
-              │    ├─ 版本不符 → 发 suicide + pkill 强杀 → 强制重推 → 重启 daemon → 探活
+              │    ├─ daemon ≥ 宿主版本 → 直连（版本契约 v6：wire 自 v3 稳定，高版本 daemon 兼容服务）
+              │    ├─ daemon < 宿主版本 → 发 suicide + pkill 强杀 → 强制重推 → 重启 daemon → 探活
               │    └─ 无 daemon → pkill 清残留 → 强制重推 → setsid nohup 启动 → 探活
+              │    （daemon 侧 bind 竞争自愈：高版本替代低版本 / 挂死者清场接管 / 等版本让位）
               ├─ TCP 连 127.0.0.1:<forward 端口> → 发 `start --package X --cpu ...`
               └─ AgentStream（reader 阻塞读 NDJSON + ping 线程 5s 保活）
 ```

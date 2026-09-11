@@ -7,6 +7,22 @@
 
 ---
 
+## 2026-09-11(1) — daemon bind 自愈 + 高版本替代低版本（协议 v6，`fix/daemon-upgrade`）
+
+**任务**：用户要求从代码层解决双启动 bind 竞态（前一晚版本战曾致"无人监听"残留态，需手动清场），并要求 agent 具备完善的升级逻辑（高版本替代低版本）。
+
+**commit**：9685438（agent bind 自愈 + host 版本契约）→ 本次（文档）。
+
+**实现**：
+- **daemon bind 失败自愈**（`run_daemon`）：撞上已有 daemon 时探在场者（连接读 hello，含版本）——健康且 ≥ 本版本 → 让位退出；健康但 < 本版本 → 清场升级接管；不可达/挂死（SIGSTOP 类持有 socket 不应答，2s 探活超时）→ 清场接管；重绑重试 5×200ms。任何启动交错收敛到「恰好一个健康 daemon 且为最高版本」。清场 = /proc cmdline 匹配 `xperf-agent`+`--daemon` 后 SIGKILL 除自身外。
+- **host 版本契约变更**（`ensure_daemon`）：接受 daemon ≥ 自身版本（wire 自 v3 稳定，此后 bump 均为行为差异不改命令/事件格式），仅低于时 suicide+重推——消灭多宿主混跑降级战；wait_probe 8→10 次覆盖自愈接管耗时。
+
+**真机验证（SS2MAX，四场景 + 端到端）**：① v5 daemon 在场 + v6 host → "协议版本过低…重推升级" + 采样通；② v5 持 socket + v6 直接启动（模拟并发竞态）→ "在场 daemon v5 低于本实例 v6，升级接管" → v6 监听；③ SIGSTOP 冻结 daemon → "无响应（死亡/挂死），清场接管" → 新 daemon 服务（单 daemon 单 socket）；④ 等版本 → 让位（daemon 数恒 1）；端到端 60fps。全量测试 94+8+5+2 绿，clippy/doc 零警告。
+
+**遗留**：过渡期——exact-match 时代旧宿主（≤v5）连 v6 daemon 仍会自杀重推降级，各宿主升级一次 v6 后绝迹（已记 WORKSPACE E 节）。
+
+---
+
 ## 2026-09-10(7) — SS4 FPS 根因反转：A16 --latency 图层名须带 hex 前缀，设备端路径恢复（agent v5）
 
 **任务**：用户反馈编译运行后仍拿不到 gltf FPS；用户提供线索 `getfps -w "<图层全名>"` 可取 SS4 FPS。
