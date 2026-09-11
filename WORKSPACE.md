@@ -2,7 +2,7 @@
 
 > 本文件记录跨会话的待办事项（backlog）。每次会话的历史总结见 `SESSION.md`。
 > 完成一项就把状态改为 ✅ 并注明完成的 commit；新增想法随时追加。
-> 最后更新：2026-09-11：**DMA-BUF 拆分完成并合 main**（`feat/dmabuf-split`，协议 v8 / e5071da：Private Other 拆出 DMA-BUF 单列；SS4 dmabuf≈616MB/8 类合计恒等 PSS、SS3 回归、非 root dmabuf=0、低间隔 smaps 路径四场景真机验证全过）
+> 最后更新：2026-09-11 晚：**QNX 孤儿 tailer 治理合 main**（`feat/qnx-orphan-reaper`，协议 v9）——E 节「proc 链泄漏」核销：黑盒勘察确认真凶是 telnet 断开后不死的 slog2info 孤儿（重印驱动行形似多链洪泛），修复 = 启动 slay 清场 + teardown `kill $!` 收尸，SS3 真机三连会话/注入自愈/qnx-stop 全零残留
 
 ## 当前状态速览
 
@@ -57,7 +57,7 @@
 - ~~SS2MAX gpubusy 计数器恒 `0 0` / busy% 可 >100%~~（**已修**，commit 见 SESSION 2026-09-07：根因是 SS2MAX 厂商内核的 gpubusy 为**窗口语义**——读数是上一 ~1s 窗口的 busy/total µs，total 恒 ≈1e6 非累计；按累计差值解析出 1662%。`GpuBusyCalc` 三判据自动锁定窗口语义直读 busy/total；真机对照内核 `gpu_busy_percentage` 均值 75.5 vs 74.7 一致。原"恒 0 0"即 GPU 空闲时的窗口读数，非停走）
 - ~~SS4 ligfx Frequency 单位待真机核实~~（**已核销**，2026-09-10 任务 B）：恒 `1000 Hz` 空闲/负载不变，GPU VFIO 直通两侧无 kgsl/devfreq 节点可对照——按「定频占位/单位标注存疑」处理，事件原样透传 mhz=1000，业务侧只看 Utilization。`persist.vendor.ligfxprofiler.sampling_interval_ms` 实测动态读取，但调小（1000）会致 ligfxprofilerd 停输出（恢复 5000 即好）——勿调
 - **SS4 GVM 无 cpufreq/thermal（2026-09-10 确证，VM 平台限制）**：`/sys/devices/system/cpu/cpu0/cpufreq/` 不存在（hello maxkhz 全 0 即此因，root 下同），`--freq` 探测禁用；`/sys/class/thermal/` 空 + thermalservice HAL Ready=false（连 SS3 的 test HAL 假数据都无），`--thermal` 探测禁用。PMU 未虚拟化（simpleperf cpu-cycles 8s 仅 6 样本 → core 自动改 cpu-clock，b8754bf）
-- **QNX proc 链泄漏（2026-09-07 发现，未修）**：三层清理只写 `gpubusystats`（frame 链），`gpu_per_process_busy` 进程链无停止手段（实测死写入者 toggle/写 0/log_level 0 均无效）——每 --gpu 会话泄漏一条，多日累积 ~20 条锁步洪泛，疑似挤占致 frame 链无法启动（两轮会话 0 frame 事件）。恢复 = `adb reboot`（整 SoC 复位含 QNX）。待找到正确停链命令后补进 agent 退出钩子与 host qnx_stop_stats
+- ~~**QNX proc 链泄漏（2026-09-07 发现）**~~（**已修并修正根因认知**，2026-09-11 晚，`feat/qnx-orphan-reaper`，协议 v9）：黑盒勘察（`echo help > /dev/kgsl-control` 吐出全命令表 + 干净单 tailer 对照实验）确认——①`gpu_per_process_busy` 写入 = 未跑则启动/在跑则重相位（**不新增链**，无停止命令，写 0 钳 1000ms 启动；开机 startup.sh frame/proc 各起一条 @5000，proc 流常驻是设计基态）；②历史「每会话泄漏一条、~20 条锁步洪泛」的**真凶是孤儿 tailer**：telnet 断开只杀登录 shell，后台 `slog2info|grep` 管道不死，ttyp 回收重用后孤儿把驱动行重印进新会话（同行多份同时间戳 = 「锁步多链」表象；~20 个孤儿 ≈ 历史会话积累，挤占 QNX CPU 疑似致 frame 停走）。修复：通道启动 `slay -f -Q slog2info` 清场（含 SIGKILL 残留的自愈收编）+ teardown/`--qnx-stop` 退出前 `kill $!` 收本会话 tailer。真机验证：v8 会话必漏 1 孤儿（基线实锤）→ v9 三连会话零残留、注入孤儿启动即清、`--qnx-stop` 清场且观察 tailer 自收、frame 停链/proc 常驻 ×1 正常
 - ~~孤儿 adb exec-out 泄漏~~（**已根治**，daemon 化 commit 见 SESSION 2026-09-07 晚条目：agent 常驻 daemon + host 经 forward/TCP 连接，host 死亡 → TCP 断开 → 会话即收，不再产生孤儿流；daemon 0 会话 60s 自杀。早前过渡方案 e692d4e 的 cleanup_orphan_agents/stdin EOF 监测已被 daemon 化取代并移除）
 - ~~多设备连接时所有 adb 命令不带 -s 会失败~~（**46bd161 已修**：全局 `-s` 注入 + CLI `--device` + GUI 设备下拉，SS3+手机双连真机回归；原候补转正，详见 CLAUDE.md「多设备 adb」）。GUI 多台未指定 `--device` 的自动启动跳过路径为逻辑验证 + 单测覆盖（验证时手机恰断开未双机复现，行为由 pick_device 单测锁定）
 - QNX 双会话并发交互（五轮 review 实测）：①后启动会话的 fd3 写入给先启动方一次 ~7s GPU 停走（看门狗自愈恢复）；②各方 GPU 事件密度升至 ~2×（双方写入产生非锁步多链，行级全等去重不覆盖，值为真值仅密度偏高）；③退出清理已有并发保护（pgrep 检测其他 agent 跳过停链，agent 钩子 >1 / host 兜底 ≥1+收尸等待，真机验证）——并发监控本身罕见，记录不修

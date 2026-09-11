@@ -3,7 +3,15 @@
 //! 被 SELinux 拒执行，故非 root 设备本通道同样可用）登录 QNX（root 免密）→
 //! exec 3> 长活连接写 /dev/kgsl-control 开统计 → slog2info -W 流式读 kgsl slog
 //! （-W 不回放历史，-w 会先倒 backlog；grep 挡 VHAL 刷屏）。
-//! 统计链为驱动全局且不随会话清理：多链锁步产生重复行（按上一行去重），看门狗兜底停走。
+//!
+//! 2026-09-11 黑盒勘察修正的驱动语义（SS3 真机逐命令实验）：
+//! - `gpubusystats`/`gpu_per_process_busy` 写入 = 未在跑则启动、在跑则重相位锁步
+//!   （写入**不新增链**；help 命令表无停止命令，proc 链写 0 被钳到 1000ms 并启动——
+//!   proc 流无停止手段，开机由 `/mnt/scripts/startup.sh` frame/proc 各起一条 @5000ms）；
+//! - 历史「多链锁步洪泛」的真凶是**孤儿 tailer**：telnet 断开只杀登录 shell，
+//!   后台 `slog2info|grep` 管道不死，ttyp 回收重用后孤儿把驱动行重印进新会话
+//!   （同一行多份同时间戳，形似多链锁步）。故启动时 `slay -f -Q` 清场孤儿、
+//!   teardown 以 `kill $!` 收本会话 tailer；行级全等去重保留作兜底。
 //! 读线程独立于节拍循环，不占用采样轮。
 
 use super::{spawn_stream_parser, GpuEvent};
@@ -174,6 +182,11 @@ impl QnxTelnet {
         self.read_until("login:", deadline)?;
         self.write_str("root\n").ok()?;
         self.read_until("# ", deadline)?;
+        // 先清场孤儿 tailer：telnet 断开只杀登录 shell，此前会话/一次性模式残留的
+        // slog2info|grep 后台管道不死（真机实测），ttyp 回收后孤儿会把驱动行重印进
+        // 本会话（同一行多份，历史上被误判为「多链锁步」）。grep 无需单独 slay：
+        // slog2info 死后管道 EOF，grep 自行退出。
+        self.write_str("slay -f -Q slog2info\n").ok()?;
         // 写入必须走 exec 3> 的长活连接（写入时连接存活 → 统计链重相位后持续输出）；
         // echo > 式即开即死连接撞上存量链时，链只 flush 一个窗口即停（真机实测）。
         // 注意：管道必须后台执行（&）。前台时 shell 阻塞在管道上，
@@ -278,9 +291,12 @@ fn spawn_qnx_gpu(period_ms: u64) -> Option<QnxTelnet> {
 
 /// 一次性停链（agent `--qnx-stop` 模式，host 侧 `qnx_stop_stats` 兜底路径的设备端
 /// 载体——替代旧 busybox telnet 方案，shell 身份可执行，非 root 可用）：
-/// 登录 QNX → 纯观察 ~4s（slog2info -W | grep frame，只读不写 kgsl-control）→
+/// 登录 QNX → `slay -f -Q slog2info` 清场孤儿 tailer（本模式在 daemon 异常死亡后
+/// 运行，其会话的后台管道会残留 QNX 侧；孤儿重印会污染下面的观察计数）→
+/// 纯观察 ~4s（slog2info -W | grep frame，只读不写 kgsl-control）→
 /// frame 流在跑（≥2 行）才发 echo>（死写入者）停止——对已停链写入会把链全部复活
-/// （toggle 语义真机实测），不可无条件执行。结果打印一行 stdout（host 记录诊断）。
+/// （toggle 语义真机实测），不可无条件执行。退出前 `kill $!` 收自己的观察 tailer。
+/// 结果打印一行 stdout（host 记录诊断）。
 /// best-effort：任何失败只打印不非零退出（host 在 daemon 异常死亡后才走这里）。
 /// `ip`：None 用默认/全局 QNX 地址；`period_ms`：停链写入的周期参数（语义同启动）。
 pub(super) fn stop_once(ip: Option<&str>, period_ms: u64) {
@@ -296,6 +312,12 @@ pub(super) fn stop_once(ip: Option<&str>, period_ms: u64) {
         println!("qnx-stop: telnet 登录失败");
         return;
     }
+    // 清场孤儿 tailer 后再观察（孤儿重印的 frame 行会造成假阳性，误停已停的链）
+    if t.write_str("slay -f -Q slog2info\n").is_err() {
+        println!("qnx-stop: 孤儿清场写入失败");
+        return;
+    }
+    std::thread::sleep(Duration::from_millis(300));
     if t.write_str("slog2info -W | grep frame &\n").is_err() {
         println!("qnx-stop: 观察命令写入失败");
         return;
@@ -313,8 +335,14 @@ pub(super) fn stop_once(ip: Option<&str>, period_ms: u64) {
             text.drain(..8192);
         }
     }
+    // 收本连接的观察 tailer（否则又残留一个孤儿）
+    let kill_tailer = |t: &mut QnxTelnet| {
+        let _ = t.write_str("kill $!\n");
+        std::thread::sleep(Duration::from_millis(200));
+    };
     let flowing = text.matches("frame ").count();
     if flowing < 2 {
+        kill_tailer(&mut t);
         println!("qnx-stop: frame 流未在跑（{} 行命中），不动链", flowing);
         return;
     }
@@ -322,6 +350,7 @@ pub(super) fn stop_once(ip: Option<&str>, period_ms: u64) {
     let stopped = t.write_str(&cmd).is_ok();
     // 给 QNX shell 执行命令的时间（进程退出后连接随之消亡，命令须先落）
     std::thread::sleep(Duration::from_millis(300));
+    kill_tailer(&mut t);
     println!("qnx-stop: frame 流在跑（{} 行命中），停链写入{}", flowing, if stopped { "成功" } else { "失败" });
 }
 
@@ -342,9 +371,10 @@ pub(super) fn start(
             let writer = telnet.writer();
             // Sys（frame）样本计数：看门狗据此检测 busy 窗口流停走
             let sys_count = Arc::new(AtomicU64::new(0));
-            // kgsl 统计链是驱动全局的，且每次写入会叠加/重相位一条链（会话死亡不清理，
-            // 直到整机重启）。多条链锁步时同一行会重复出现 N 份——按"与上一行完全相同"
-            // 去重（Sys 与 Proc 各记上一条；链锁步时重复行总是相邻）。
+            // 重复行兜底：历史上把「同一行重复 N 份」误判为多条锁步统计链，
+            // 2026-09-11 真机勘察确认真凶是孤儿 slog2info 重印（telnet 断开不杀
+            // 后台管道，ttyp 回收后孤儿把驱动行写进新会话）。启动 slay 清场后流
+            // 已唯一；保留行级全等去重作兜底（重印/重相位的重复行总是相邻）。
             let dedupe = Arc::new(Mutex::new((String::new(), String::new())));
             let (cnt, ded) = (sys_count.clone(), dedupe.clone());
             let parse = move |line: &str| {
@@ -386,16 +416,20 @@ pub(super) fn start(
             // 停链 teardown：经 telnet 下发 echo>（死写入者）式 gpubusystats 停止全部
             // 统计链（fd3 活连接存在时同样有效，真机实测）。不停链则链泄漏到整机重启，
             // 且下一会话 fd3 写入撞活链会停走、走 ~8s 看门狗自愈路径；停链后下一会话
-            // 锁步即起。由持有会话结束或进程退出时执行（crate::run_gpu_teardown）。
+            // 锁步即起。随后 `kill $!` 收本会话的 slog2info|grep 后台管道（管道末尾
+            // 是 grep；它死后 slog2info 下次写管道触发 SIGPIPE 随之退出）——不收则
+            // 残留为 QNX 侧孤儿（见模块头注释）。由持有会话结束或进程退出时执行
+            // （crate::run_gpu_teardown）。
             let teardown = writer.clone();
             crate::register_gpu_teardown(Box::new(move || {
                 if let Ok(mut w) = teardown.lock() {
                     let _ = w.write_all(
                         format!("echo gpubusystats {} > /dev/kgsl-control\n", period).as_bytes(),
                     );
+                    let _ = w.write_all(b"kill $!\n");
                 }
                 // 给 QNX shell 执行命令的时间（agent 退出后连接随之消亡，命令须先落）
-                std::thread::sleep(Duration::from_millis(200));
+                std::thread::sleep(Duration::from_millis(300));
             }));
             spawn_watchdog(period, writer, sys_count, io, stop);
         }

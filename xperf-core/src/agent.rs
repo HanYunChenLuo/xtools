@@ -249,7 +249,9 @@ pub enum AgentEvent {
 /// 显存补采，SS2MAX 等无显存源平台拆出后 GUI 可按平台禁用）。
 /// v8：mem 事件增加 `dmabuf` 字段（Full 模式 root 下从 Private Other 拆出的 DMA-BUF
 /// PSS；纯增字段，老 daemon/host 双向兼容）。
-pub const AGENT_PROTOCOL_VERSION: u32 = 8;
+/// v9：QNX 通道孤儿 tailer 治理（agent 启动 slay 清场 + teardown `kill $!` 收尸）。
+/// 无 wire 变化，bump 仅为强制重推替换设备端旧 daemon。
+pub const AGENT_PROTOCOL_VERSION: u32 = 9;
 
 /// daemon 的抽象 socket 名（设备端 `localabstract:xperf-agent`）
 const AGENT_ABSTRACT_SOCK: &str = "xperf-agent";

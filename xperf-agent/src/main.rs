@@ -92,7 +92,10 @@ use proc::PidState;
 /// 显存补采；SS2MAX 等无显存源平台拆出后 host 可按平台禁用）。
 /// v8：mem 事件增加 `dmabuf` 字段（Full 模式 root 下从 Private Other 拆出的
 /// DMA-BUF PSS；core 侧 serde(default) 兼容缺省——老 daemon v7 直发不带该字段亦可解析）。
-const PROTOCOL_VERSION: u32 = 8;
+/// v9：QNX 通道孤儿 tailer 治理（启动 slay 清场 + teardown/stop_once `kill $!` 收尸，
+/// 见 gpu/qnx.rs 模块头）。无 wire 变化，bump 仅为强制重推替换设备端旧 daemon
+/// （版本契约下 daemon ≥ host 即直连不重推，不升版本号旧 agent 会继续泄漏孤儿）。
+const PROTOCOL_VERSION: u32 = 9;
 
 /// daemon 模式的最大并发会话（host）数
 const MAX_SESSIONS: usize = 10;
@@ -244,8 +247,9 @@ fn set_session_io(io: SessionIo) {
 }
 
 /// GPU 流式通道（QNX/TopGpu/Ligfx）全局独占与 teardown 槽：
-/// daemon 多会话共享一个进程，而 QNX 统计链是驱动全局资源——多会话各开一条会
-/// 叠加锁步洪泛（实测 ~20 条链挤死 frame 链）。故流式通道同时只允许一个会话持有；
+/// daemon 多会话共享一个进程，而 QNX 统计链是驱动全局资源——多会话并发开链会
+/// 互相重相位干扰（历史「锁步洪泛」真凶为孤儿 tailer，见 gpu/qnx.rs 模块头注释）。
+/// 故流式通道同时只允许一个会话持有；
 /// teardown（如 QNX 停链）由持有会话结束或进程退出时执行一次。
 static GPU_STREAM_BUSY: AtomicBool = AtomicBool::new(false);
 static GPU_TEARDOWN: Mutex<Option<Box<dyn Fn() + Send>>> = Mutex::new(None);
