@@ -13,6 +13,33 @@ fn read_smaps_rollup(pid: u32) -> Option<(u64, u64)> {
     parse_smaps_rollup(&content)
 }
 
+/// 聚合 `/proc/<pid>/smaps` 中 dmabuf 映射（VMA 名 `/dmabuf…` 或 `[anon:dmabuf…`，
+/// gralloc/dma-heap 分配的图形/媒体缓冲 CPU mmap）的 Pss（KB）。
+/// App Summary 把这些落进 Private Other 兜底桶（名字不匹配 Graphics 桶的设备节点
+/// 模式——Graphics 只认 kgsl/drm 等节点映射），直渲染应用的大头因此"无指向"；
+/// root 下读 smaps 可按 VMA 名拆出单列。不可读（非 root，PTRACE 限制）返回 None。
+fn read_dmabuf_pss(pid: u32) -> Option<u64> {
+    let content = fs::read_to_string(format!("/proc/{}/smaps", pid)).ok()?;
+    Some(parse_dmabuf_pss(&content))
+}
+
+fn parse_dmabuf_pss(smaps: &str) -> u64 {
+    let mut total = 0u64;
+    let mut in_dmabuf = false;
+    for line in smaps.lines() {
+        // mapping 头行："<addr>-<addr> <perms> <offset> <dev> <inode> <name>"
+        if let Some(rest) = line.get(73..) {
+            let name = rest.trim_start();
+            in_dmabuf = name.starts_with("/dmabuf") || name.starts_with("[anon:dmabuf");
+        } else if let Some(v) = line.strip_prefix("Pss:") {
+            if in_dmabuf {
+                total += v.split_whitespace().next().and_then(|s| s.parse().ok()).unwrap_or(0);
+            }
+        }
+    }
+    total
+}
+
 fn parse_smaps_rollup(content: &str) -> Option<(u64, u64)> {
     let mut pss = None;
     let mut rss = None;
