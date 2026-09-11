@@ -2,7 +2,7 @@
 
 > 本文件记录跨会话的待办事项（backlog）。每次会话的历史总结见 `SESSION.md`。
 > 完成一项就把状态改为 ✅ 并注明完成的 commit；新增想法随时追加。
-> 最后更新：2026-09-11 晚：**QNX 孤儿 tailer 治理合 main**（`feat/qnx-orphan-reaper`，协议 v9）——E 节「proc 链泄漏」核销：黑盒勘察确认真凶是 telnet 断开后不死的 slog2info 孤儿（重印驱动行形似多链洪泛），修复 = 启动 slay 清场 + teardown `kill $!` 收尸，SS3 真机三连会话/注入自愈/qnx-stop 全零残留
+> 最后更新：2026-09-11 深夜：**scrcpy 屏幕镜像集成合 main**（`feature/scrcpy-mirror`）——I 节 scrcpy 项核销：core `mirror.rs`（外部窗口拉起 + 远程固定端口 hop#2；reverse 实测在远端 server 拓扑下不可用，须 `--tunnel-port` + 同号 hop#2）+ CLI `--mirror`（并行/镜像-only 两模式）+ GUI 每设备侧栏 toggle 按钮（stopped/closed/failed 三态事件）。真机回归全通（SS3/SS2MAX/SS4 远程 + 双设备并行 + 采样并行）
 
 ## 当前状态速览
 
@@ -66,6 +66,7 @@
 - ~~**多宿主协议版本战**~~（**已代码修复**，2026-09-11 v6 / 9685438）：曾实测 v4 GUI + v5 CLI 并存时互相 suicide+重推对方 daemon（无限循环/无人监听残留）。**v6 起版本契约**：host 接受 daemon ≥ 自身（wire 自 v3 稳定）；daemon bind 竞争高版本胜出、挂死（SIGSTOP 类持有 socket 不应答）被清场接管——任何启动交错收敛到「恰好一个健康 daemon 且为最高版本」，真机四场景验证（升级重推/升级接管/挂死接管/等版本让位）。**过渡期残留**：exact-match 时代旧宿主（≤v5 二进制）连 v6 daemon 仍会自杀重推降级——各宿主升级一次 v6 后绝迹
 - **bridge 边缘态（2026-09-10 review 记录）**：bootstrap 探测失败冷却期（60s）内 MindRT 以 `is_gateway=false` 漏进设备列表（pick_device 可选中/GUI 可建 tab）——仅中继坏掉时出现，选中后采样会按普通设备失败；不修（正常路径 bootstrap 秒成，冷却语义是防反复探测）
 - ~~GUI 基线/应用操作按钮与设备 tab 切换的点击渲染为人工目验项~~（**已闭环**，2026-09-11：macOS GUI + System Events AX 树/AXPress 自动化点击实测全通，见 SESSION 当日 (5)「GUI 目验闭环」——含 gpuMem 键名修复的真机确认、v8 DMA-BUF 面板行、SS2MAX 显存禁用勾选、基线/重启/获取 root 按钮端到端）
+- **GUI 关窗时镜像清理路径未经真机目验**（2026-09-11 scrcpy 集成遗留）：CloseRequested → stop 全部镜像 + 监护线程 cleanup（摘 hop#2/扫规则）→ shutdown_remote，代码路径与 stop 按钮共用（stop 按钮已真机验证），机制由 core `test_wait_exit_stopped` 锁定；验证方式：GUI 开镜像后直接关主窗口，确认 scrcpy 窗口随之关闭。AX 自动化本轮不稳定（设备 tab 切换后 AX 树整体剪枝，重启 GUI 才恢复——既有现象）
 
 ## F. SSH 远程调试（已完成）
 
@@ -110,7 +111,7 @@
 > 三条均要求 **SSH 远程后端（`--remote`）下可用**。形态细节（GUI 内嵌 vs 拉起外部、交互式 vs 单条）在实施会话中确认。
 
 - [ ] **logcat 支持**：设备 logcat 抓取/查看接入工具链（按包/时间窗过滤、与采样时间轴对齐等形态待定）。SSH 远程注意：adb 命令天然走 hop#1 隧道，落盘在本机，预期改动小。
-- [ ] **scrcpy 集成**：屏幕镜像（GUI 内嵌视频 or 并排拉起 scrcpy 窗口，形态待定）。SSH 远程注意：scrcpy 的视频流 socket 走 adb forward/reverse，需参照 agent hop#2 端口映射经隧道转发（transport.rs 的 SshTunnel::add_forward 模式可复用）。
+- [x] ~~**scrcpy 集成**~~（**已完成**，2026-09-11 深夜，`feature/scrcpy-mirror` 合 main）：形态=拉起外部 scrcpy 窗口（解码/触控归 scrcpy）。core `mirror.rs` + `SshTunnel::add_forward_pinned`（固定端口 hop#2——**实测 adb reverse 在远端 server 拓扑下流回不到 TCP 客户端，不可用**；远程走 `--tunnel-port=P` 隐含 force-adb-forward，端口池 27183..=27199 两侧同号空闲扫描）；CLI `--mirror`（与采样并行 / 单独镜像-only）；GUI 每设备侧栏「屏幕镜像」toggle + 监护线程事件复位按钮（stopped/closed/failed 三态——scrcpy 正常运行也有 stderr 日志，凭 exit status 分流而非 stderr 非空）。真机：SS3/SS2MAX/SS4 远程全通、双设备并行端口隔离、SIGINT 全清理零残留
 - [ ] **命令行输入**：GUI 提供设备 shell 命令输入能力（交互式 shell or 单条执行，形态待定）。SSH 远程注意：命令通道同 adb 走 hop#1；若做成交互式长连接 shell 则类似 agent 流需 hop#2 式映射。
 
 ---

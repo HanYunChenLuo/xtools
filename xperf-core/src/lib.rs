@@ -27,6 +27,8 @@ pub mod hostchan;
 pub mod marker;
 /// 内存采样协议类型。
 pub mod memory;
+/// scrcpy 屏幕镜像：外部窗口拉起 + SSH 远程隧道（hop#2 固定端口）生命周期。
+pub mod mirror;
 /// 平台抽象：adb product 字段自动检测 + 各平台差异特性。
 pub mod platform;
 /// simpleperf 调用栈采样：函数级 CPU 热点（录制 + 设备端两视图报告解析）。

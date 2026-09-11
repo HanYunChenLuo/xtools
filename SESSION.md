@@ -7,6 +7,36 @@
 
 ---
 
+## 2026-09-11(7) — scrcpy 屏幕镜像集成（`feature/scrcpy-mirror` 合 main）
+
+**任务**：WORKSPACE I 节新功能候补 ②——scrcpy 集成（屏幕镜像，要求 SSH 远程可用）。
+
+**commit**：589335d（core mirror 模块 + transport 固定端口 hop#2）→ 94974ed（CLI --mirror）→ 2b3ad69（GUI 按钮）→ 7c583f4（fix：MirrorExit 三态）→ 5afd332（三态单测 + trace.rs 测试死变量清理 + CLAUDE.md）。
+
+**形态决策**（用户确认）：拉起**外部 scrcpy 窗口**（解码/触控归 scrcpy 客户端），不做 GUI 内嵌视频（内嵌需自研 H.264 remux→MSE/WebCodecs + 触控注入，投入产出比低）。CLI `--mirror` 与 GUI 侧栏「屏幕镜像」按钮共用 core `mirror.rs`。
+
+**关键实测结论**（Mac→hppc→SS3 真实链路）：
+- scrcpy 的 adb 操作（push/设备发现/forward 注册）经 hop#1（`ADB_SERVER_SOCKET` 环境变量）全部正常——scrcpy 4.x 原生实现 adb 协议，读 `ADB_SERVER_SOCKET`。
+- **默认 `adb reverse` 模式在远端 server 拓扑下不可用**：reverse 规则注册成功但设备侧连接回不到经隧道的 TCP 客户端（nc 对照实验：规则在、连接零到达）。
+- **正解 = `--tunnel-port=P`**（隐含 `--force-adb-forward`）：scrcpy 把 forward 注册到远端 server，连本机 127.0.0.1:P，该端口由 hop#2 同号映射（新增 `SshTunnel::add_forward_pinned`）承载。端口池 27183..=27199 扫描**两侧同号空闲**（远端忙端口读 `forward --list` 全集——forward 端口是 server 全局资源跨 serial）。
+- scrcpy 建立连接后会自己撤掉 forward 规则（运行中 `forward --list` 看不到属正常）；被 SIGKILL 时规则残留 → `sweep_scrcpy_rules` 按 serial 清扫。
+- **scrcpy 正常运行也往 stderr 打启动日志**（tunnel 提示 + push 行）——退出归因不能凭 stderr 非空，须 exit status + 主动停止标志（`MirrorExit::{Stopped,Closed,Failed}`；GUI 事件三态分流，用户关窗不再误报「异常退出」）。
+- scrcpy-server push 经隧道偶发变慢（0.005s 基线，一次 16s+）——wait_exit 150ms 轮询 + 宽限期设计不受影响。
+
+**真机回归**（均 `--remote hppc`）：
+- CLI 镜像-only：SS3 流 ESTABLISHED + SIGINT 2s 内优雅退出 + 零残留（进程/规则/hop#2）
+- CLI 双设备并行：SS2MAX:27183 + SS3:27184 端口隔离，双流并行，退出全清理
+- CLI SS4（localhost:5559 桥接 GVM）：流 ESTABLISHED，清理正常
+- CLI 采样+镜像并行（gltf --cpu --mirror）：SIGINT 3s 退出，图表/CSV 正常，零残留
+- GUI（用户实机点击，新二进制 diag 日志佐证）：SS3/SS4 按钮启动（视频+控制双连接 ESTABLISHED）、停止按钮（`mirror stopped`）、关 scrcpy 窗口（`mirror closed`）三态全通
+- 本地模式：无本机设备（错误路径优雅报错「无 adb 设备在线」）；本地有设备的正向路径未真机（本机无设备可接）
+
+**测试**：core 102（+mirror 5：forward 行解析/端口池三态/MirrorExit 三态）+ GUI 9 + CLI 5 + xrm 2 全绿；clippy/doc/missing_docs 零警告。
+
+**遗留**：GUI 关窗时镜像清理路径未经目验（AX 自动化本轮不稳定——设备 tab 切换后 AX 树整体剪枝；路径与 stop 按钮共用，机制有单测兜底），见 WORKSPACE E 节。harness 注意：run_cmd 结束时其后台进程组会被收割（本次并行模式验证一度被此干扰）——后台验证须在同一命令内完成 SIGINT+等待闭环。
+
+---
+
 ## 2026-09-11(6) — QNX 「proc 链泄漏」核销：真凶是孤儿 tailer（协议 v9，`feat/qnx-orphan-reaper`）
 
 **任务**：WORKSPACE E 节唯一未修缺陷——QNX `gpu_per_process_busy` 进程链无停止手段、疑似 ~20 条锁步洪泛挤死 frame 链。

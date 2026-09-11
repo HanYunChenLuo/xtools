@@ -163,6 +163,25 @@ impl SshTunnel {
         Ok(())
     }
 
+    /// 建立**固定本机端口**的 hop#2（scrcpy `--tunnel-port` 等第三方工具要求其
+    /// adb forward 端口与本机连接端口一致时用——映射必须 local==remote 同号）。
+    /// 已映射同号则复用；映射冲突/本机端口占用（`ExitOnForwardFailure` 快速失败）
+    /// 返回 Err，由调用方换端口重试。
+    pub fn add_forward_pinned(&self, local_port: u16, remote_port: u16) -> Result<()> {
+        let mut map = self.lock_forwards();
+        if let Some(&local) = map.get(&remote_port) {
+            if local == local_port {
+                return Ok(()); // 同号映射已存在：复用（幂等）
+            }
+            anyhow::bail!("远端端口 {remote_port} 已映射到本机 {local}，无法固定到 {local_port}");
+        }
+        if self.ssh_control("forward", local_port, remote_port) {
+            map.insert(remote_port, local_port);
+            return Ok(());
+        }
+        anyhow::bail!("-O forward 失败（本机端口 {local_port} → 远端 {remote_port} 被占用或隧道异常）")
+    }
+
     /// `-O forward/cancel` 控制操作（返回是否成功；spec 与建立时逐字节一致才可 cancel）。
     /// `ExitOnForwardFailure=yes` 使 `-O forward` 端口占用时返回非零（R4 重试的前提）。
     fn ssh_control(&self, op: &str, local: u16, remote: u16) -> bool {
@@ -713,6 +732,17 @@ mod tests {
     #[test]
     fn test_fwd_spec() {
         assert_eq!(fwd_spec(51234, 5037), "51234:127.0.0.1:5037");
+    }
+
+    /// 固定端口 hop#2（scrcpy 用）：同号映射幂等复用；异号冲突报错；
+    /// 伪隧道的 `-O forward` 必败（control socket 不存在）→ 新映射报错
+    #[test]
+    fn test_add_forward_pinned_semantics() {
+        let t = SshTunnel::for_test(12345);
+        t.lock_forwards().insert(27183, 27183);
+        assert!(t.add_forward_pinned(27183, 27183).is_ok(), "同号已映射应幂等复用");
+        assert!(t.add_forward_pinned(27184, 27183).is_err(), "远端端口已映射异号应冲突");
+        assert!(t.add_forward_pinned(27184, 27184).is_err(), "伪隧道新映射必败（-O forward 无 master）");
     }
 
     // ---- 集成测试（需 hppc SSH 可达 + 远端 adb，标 #[ignore]，手动跑） ----
