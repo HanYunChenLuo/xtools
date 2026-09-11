@@ -7,6 +7,36 @@
 
 ---
 
+## 2026-09-11(6) — QNX 「proc 链泄漏」核销：真凶是孤儿 tailer（协议 v9，`feat/qnx-orphan-reaper`）
+
+**任务**：WORKSPACE E 节唯一未修缺陷——QNX `gpu_per_process_busy` 进程链无停止手段、疑似 ~20 条锁步洪泛挤死 frame 链。
+
+**commit**：d6e7d6e（协议 v9）+ docs 收尾。
+
+**黑盒勘察结论**（SS3 真机，busybox telnet 逐命令实验，事件级证据）：
+- **命令全表**：`echo help > /dev/kgsl-control` 让解析器把完整命令表打进 slog（CRITICAL INFO 级）——无停止命令；`gpu_per_process_busy 0` 报 `Invalid sampling time interval 0msec, setting to default value of 1000msec`（钳位并启动，非停止）。
+- **写入语义**（干净单 tailer 对照）：proc 写入 = 未跑则启动/在跑则重相位锁步，**不新增链**；开机 `/mnt/scripts/startup.sh` 写 `gpu_set_log_level 4` + `gpubusystats 5000` + `gpu_per_process_busy 5000`（frame/proc 各一条 @5000 是设计基态）。
+- **真凶**：此前观察到的「链数 3→5→6→7 漂移」「~20 条锁步洪泛」全是**孤儿 slog2info tailer 重复打印**——telnet 断开只杀登录 shell，后台 `slog2info|grep` 管道不死（slay 列表实锤 10+ 个孤儿，含各实验/历史会话的 job pid），ttyp0 回收重用后孤儿把驱动行重印进新会话（同一行多份同时间戳，形似多链锁步）。孤儿挤占 QNX CPU 疑似才是 09-07 frame 链停走的根因。
+- **KGSL 驱动形态**：QNX 用户态 resmgr 进程（pid 90154，slog 模块名 kgsl.90154），真身在 `GSLKernel.so`（pidin mem 确认映射）；`/ifs/bin/kgsl` 只是 17KB 启动 shim。kgsl-control 常驻持有者 = `ifs/bin/qcore`（系统核心守护，非统计写入源，strings 无相关命令）。
+- 勘察方法教训：**QNX 上 `slog2info -W | grep … &` 实验必须收尸**（`kill $!`，管道末尾 grep 死后 slog2info 下次写触发 SIGPIPE 随退）；`slay` 是交互式的，须 `-f -Q` 非交互；秒级分桶计链数会被孤儿重印污染，须先清场。
+
+**修复**（agent qnx.rs，三处）：
+1. `login_and_start_stats` 启动先 `slay -f -Q slog2info` 清场孤儿（grep 随管道 EOF 自尽；同时收编 daemon 被 SIGKILL 时的残留——自愈路径）；
+2. 会话 teardown 停链 echo> 后追加 `kill $!` 收本会话 tailer（真机验证 Broken pipe → pidin 计数归零）；
+3. `--qnx-stop`（stop_once）观察前先清场（防孤儿重印 frame 行造成假阳性误停链）+ 两条退出路径均 `kill $!` 收观察 tailer。
+协议 bump v9（无 wire 变化，仅为强制重推替换设备端旧 daemon）；行级全等去重保留作兜底。
+
+**真机验证**（SS3，`--remote hppc`）：
+- 改动前基线：v8 会话（20s --gpu @500ms）后 QNX slog2info 孤儿 **0→1**（泄漏实锤）；
+- v9 会话 #1：启动即清掉 v8 遗留孤儿，32 GPU 样本零自愈零错误，退出后孤儿 0；frame 链已停（观察窗零 frame 行）、proc 常驻 ×1@500ms（会话写入重相位 1000→500，设计基态）；
+- 注入孤儿（手工起 tailer 不收尸）→ `--qnx-stop`：清场孤儿 + 正确报「frame 未在跑，不动链」+ 自收观察 tailer → 孤儿 0；
+- v9 会话 #2（--gpu --gpu-mem @500ms）：27 gpu + 25 gpuproc 样本零自愈，退出后孤儿 0。
+- host 侧测试 96+9+5+2 全绿，clippy/cargo doc 零警告。
+
+**遗留**：gltf APK 去 RemoteServer 一项旧遗留不变。历史 E 节「QNX 双会话并发交互」条目中的密度 ×2 现象按旧模型归因（多链），新认知下应为互相重相位/重印 artifact——条目保留为历史观察记录，不阻塞。
+
+---
+
 ## 2026-09-11(5) — DMA-BUF 拆分实施落地（协议 v8，`feat/dmabuf-split` 合 main）
 
 **任务**：按 WORKSPACE D 节交接条目（①-⑧）完成 Private Other 拆分 DMA-BUF 的剩余实施。
