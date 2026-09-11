@@ -25,7 +25,7 @@ use xperf_core::simpleperf;
 #[command(version, about = "XPerformance Monitor - Android process CPU/memory monitor", long_about = None)]
 struct Args {
     /// Package name to monitor
-    #[arg(short, long, required_unless_present_any = ["clean_cache", "update_simpleperf_scripts", "mirror"])]
+    #[arg(short, long, required_unless_present_any = ["clean_cache", "update_simpleperf_scripts", "mirror", "screenshot", "record"])]
     package: Option<String>,
 
     /// 目标设备 serial（多台设备同连时必须指定，如 `adb devices` 列出的 6eb792dfb0f；
@@ -140,6 +140,17 @@ struct Args {
     /// Ctrl-C 或窗口关闭。SSH 远程模式经隧道转发视频流（自动固定端口 hop#2）
     #[arg(long)]
     mirror: bool,
+
+    /// 截屏：截取设备当前屏幕保存 PNG（exec-out screencap 直写本机，零设备端残留）。
+    /// 与采样并行时在采样启动时截取一张；可单独使用（无 --package）
+    #[arg(long)]
+    screenshot: bool,
+
+    /// 录屏：scrcpy 无窗口录制 N 秒设备屏幕（MP4，host 侧落盘无时长上限，
+    /// 需本机安装 scrcpy）。与采样并行时采样限时同窗口（Ctrl-C 提前停止并正常
+    /// 封盘）；可单独使用（无 --package）
+    #[arg(long, value_name = "SECONDS", value_parser = clap::value_parser!(u64).range(1..))]
+    record: Option<u64>,
 }
 
 /// 设备选择：`--device` 指定 > 单台自动；多台未指定报错并列出清单。
@@ -156,6 +167,77 @@ fn select_device(device: Option<&str>) -> Result<()> {
         devices.len()
     );
     Ok(())
+}
+
+/// 截屏/录屏落盘目录：有包名随采样会话时间戳目录（与 CSV/trace 同目录，
+/// 时间轴对照）；无包名（独立使用）落设备级目录 `device-<serial>/<ts>/capture/`
+fn capture_dir(package: &str) -> Result<PathBuf> {
+    if package.is_empty() {
+        let serial = xperf_core::target_serial().unwrap_or_else(|| "unknown".into());
+        let ts = Local::now().format("%Y%m%d_%H%M%S");
+        Ok(xperf_core::csvstream::data_root()
+            .join(format!("device-{serial}"))
+            .join(ts.to_string())
+            .join("capture"))
+    } else {
+        Ok(cli_utils::create_timestamp_subdir(package)?.join("capture"))
+    }
+}
+
+/// 截屏（--screenshot）：采样启动时截取一张保存 PNG
+fn take_screenshot(package: &str) -> Result<PathBuf> {
+    let dir = capture_dir(package)?;
+    xperf_core::capture::screenshot(None, &dir)
+}
+
+/// 录屏线程（--record N）：启动 scrcpy 无窗口录制，N 秒（或 Ctrl-C 中断提前）
+/// 后 SIGINT 优雅封盘，返回产物路径
+fn spawn_record_thread(secs: u64, package: &str) -> std::thread::JoinHandle<Result<PathBuf>> {
+    let pkg = package.to_string();
+    std::thread::spawn(move || -> Result<PathBuf> {
+        let dir = capture_dir(&pkg)?;
+        let h = xperf_core::mirror::start_recorder(None, &dir)?;
+        let deadline =
+            std::time::Instant::now() + std::time::Duration::from_secs(secs);
+        while std::time::Instant::now() < deadline {
+            if xperf_core::utils::is_interrupted() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(150));
+        }
+        h.stop(); // SIGINT 封盘；wait_exit 等进程退出（超时 SIGKILL 兜底）
+        h.wait_exit();
+        h.record_path()
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("录屏句柄无产物路径"))
+    })
+}
+
+/// 录屏线程收尾：join → 产物路径提示。`standalone` = 独立模式（录屏是唯一目的，
+/// 失败返回 false 供非零退出）；并行模式录制失败只告警（采样产出不受影响）
+fn print_record_result(
+    handle: Option<std::thread::JoinHandle<Result<PathBuf>>>,
+    standalone: bool,
+) -> bool {
+    let Some(h) = handle else { return true };
+    match h.join() {
+        Ok(Ok(p)) => {
+            println!("录屏已保存: {}", p.display());
+            true
+        }
+        Ok(Err(e)) if standalone => {
+            eprintln!("❌ 录屏失败: {:#}", e);
+            false
+        }
+        Ok(Err(e)) => {
+            println!("{}", format!("⚠️ 录屏失败: {:#}", e).yellow());
+            true
+        }
+        Err(_) => {
+            eprintln!("❌ 录屏线程异常（panic）");
+            false
+        }
+    }
 }
 
 async fn monitor_process(args: &Args, cold_start_ms: Option<u64>) -> Result<(), Box<dyn std::error::Error>> {
@@ -215,9 +297,9 @@ async fn monitor_process(args: &Args, cold_start_ms: Option<u64>) -> Result<(), 
         }
         return Ok(());
     }
-    // 统一走设备端 agent 采样（无 adb 轮询路径）；--trace/--stack 时采样限时与录制同窗口
-    // （两者同给取较长者，采样窗口覆盖两段录制）
-    let stop_after = [args.trace, args.stack]
+    // 统一走设备端 agent 采样（无 adb 轮询路径）；--trace/--stack/--record 时采样
+    // 限时与录制同窗口（多个同给取较长者，采样窗口覆盖所有录制）
+    let stop_after = [args.trace, args.stack, args.record]
         .into_iter()
         .flatten()
         .max()
@@ -1468,10 +1550,11 @@ async fn main() -> Result<()> {
         println!("{msg}");
         return Ok(());
     }
-    // 监控流程必带 --package（clap required_unless_present 已保证；--mirror 单独使用时除外）
+    // 监控流程必带 --package（clap required_unless_present 已保证；--mirror/--screenshot/
+    // --record 单独使用时除外）
     let package = args.package.clone().unwrap_or_default();
     if package.is_empty() {
-        // 镜像-only 模式：其余能力（采样/深挖/冷启动/基线等）仍须包名
+        // 镜像/截屏/录屏-only 模式：其余能力（采样/深挖/冷启动/基线等）仍须包名
         let needs_pkg = metric_flags(&args).any()
             || args.trace.is_some()
             || args.stack.is_some()
@@ -1481,7 +1564,7 @@ async fn main() -> Result<()> {
             || args.compare_baseline
             || !args.threshold.is_empty();
         if needs_pkg {
-            eprintln!("❌ 采样/深挖/冷启动等能力需要 --package 指定包名（--mirror 单独使用时除外）");
+            eprintln!("❌ 采样/深挖/冷启动等能力需要 --package 指定包名（--mirror/--screenshot/--record 单独使用时除外）");
             std::process::exit(1);
         }
     } else if let Err(e) = validate_package_name(&package) {
@@ -1554,32 +1637,68 @@ async fn main() -> Result<()> {
     } else {
         None
     };
-    // 镜像-only 模式（未选采样指标/深挖，有无 --package 均同）：等 Ctrl-C 或窗口关闭后退出
-    if args.mirror && samplingless {
-        if args.save_baseline || args.compare_baseline {
-            println!("{}", "基线对比需要采样会话（至少一个 --cpu/--memory/… 指标），本次跳过".yellow());
+    // 截屏（--screenshot）：启动时截取一张。失败不阻断采样（独立模式例外——
+    // 截屏是唯一目的，失败即非零退出）
+    let mut capture_failed = false;
+    if args.screenshot {
+        match take_screenshot(&package) {
+            Ok(p) => println!("截屏已保存: {}", p.display()),
+            Err(e) => {
+                if samplingless && !args.mirror && args.record.is_none() {
+                    xperf_core::shutdown_remote();
+                    eprintln!("❌ 截屏失败: {:#}", e);
+                    std::process::exit(1);
+                }
+                capture_failed = true;
+                println!("{}", format!("截屏失败: {:#}（继续）", e).yellow());
+            }
         }
-        println!("镜像持续到 Ctrl-C 或窗口关闭…");
+    }
+    // Ctrl-C handler：并行模式由采样路径（monitor_process_agent）注册（record 线程
+    // 轮询同一中断标志）；独立模式（镜像/录屏）须自行注册（进程级只能注册一次，
+    // 抢先注册会把采样路径的 set_handler 顶成 Err）
+    if samplingless && (args.mirror || args.record.is_some()) {
         ctrlc::set_handler(|| {
             xperf_core::utils::set_interrupt_flag();
             println!("\n程序正在退出...");
         })
         .ok();
-        if let Some(m) = &mirror {
-            match m.wait_exit() {
-                xperf_core::mirror::MirrorExit::Stopped => {}
-                xperf_core::mirror::MirrorExit::Closed => println!("镜像窗口已关闭"),
-                xperf_core::mirror::MirrorExit::Failed(tail) => {
-                    eprintln!("scrcpy 异常退出: {}", tail)
+    }
+    let record_handle = args.record.map(|n| {
+        println!("屏幕录制 {}s…", n);
+        spawn_record_thread(n, &package)
+    });
+    // 独立模式（无采样无深挖）：镜像等 Ctrl-C 或窗口关闭，录屏等到点封盘，截屏已完成
+    if samplingless {
+        if args.save_baseline || args.compare_baseline {
+            println!("{}", "基线对比需要采样会话（至少一个 --cpu/--memory/… 指标），本次跳过".yellow());
+        }
+        if args.mirror {
+            println!("镜像持续到 Ctrl-C 或窗口关闭…");
+            if let Some(m) = &mirror {
+                match m.wait_exit() {
+                    xperf_core::mirror::MirrorExit::Stopped => {}
+                    xperf_core::mirror::MirrorExit::Closed => println!("镜像窗口已关闭"),
+                    xperf_core::mirror::MirrorExit::Failed(tail) => {
+                        eprintln!("scrcpy 异常退出: {}", tail)
+                    }
                 }
             }
         }
-        drop(mirror); // 镜像清理（摘 hop#2 需经隧道）须在 shutdown_remote 之前
+        if !print_record_result(record_handle, true) {
+            capture_failed = true;
+        }
+        drop(mirror); // 镜像/录屏清理（摘 hop#2 需经隧道）须在 shutdown_remote 之前
         xperf_core::shutdown_remote();
+        if capture_failed {
+            std::process::exit(1);
+        }
         return Ok(());
     }
     let cold_start_ms = run_cold_start(&args);
     let result = monitor_process(&args, cold_start_ms).await;
+    // 录屏线程收尾（并行模式失败只告警，采样产出不受影响）
+    print_record_result(record_handle, false);
     // 先关镜像再收隧道（镜像清理的摘 hop#2/扫规则都需经隧道；process::exit 不跑析构）
     drop(mirror);
     // 退出前关远程隧道（process::exit 不跑析构，须显式清理：R9/R10）
