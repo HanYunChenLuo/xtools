@@ -113,6 +113,7 @@
 - [ ] **logcat 支持**：设备 logcat 抓取/查看接入工具链（按包/时间窗过滤、与采样时间轴对齐等形态待定）。SSH 远程注意：adb 命令天然走 hop#1 隧道，落盘在本机，预期改动小。
 - [x] ~~**scrcpy 集成**~~（**已完成**，2026-09-11 深夜，`feature/scrcpy-mirror` 合 main + 补丁 `a99dee7`）：形态=拉起外部 scrcpy 窗口（解码/触控归 scrcpy）。core `mirror.rs` + `SshTunnel::add_forward_pinned`（固定端口 hop#2——**实测 adb reverse 在远端 server 拓扑下流回不到 TCP 客户端，不可用**；远程走 `-p P --tunnel-port=P` 双钉同号——**scrcpy 4.x 的 --tunnel-port 只钉本地 connect 口，adb forward 注册口由 -p/port_range 在 server 侧扫描**（v4.1 源码），只传 tunnel-port 时多镜像并存错配必败，用户实撞 SS3+SS4 场景修复）；端口池 27183..=27199 两侧同号空闲扫描。CLI `--mirror`（与采样并行 / 单独镜像-only）；GUI 每设备侧栏「屏幕镜像」toggle + 监护线程事件复位按钮（stopped/closed/failed 三态——scrcpy 正常运行也有 stderr 日志，凭 exit status 分流而非 stderr 非空）。真机：SS3/SS2MAX/SS4 远程全通、双设备并行端口隔离、SIGINT 全清理零残留
 - [ ] **命令行输入**：GUI 提供设备 shell 命令输入能力（交互式 shell or 单条执行，形态待定）。SSH 远程注意：命令通道同 adb 走 hop#1；若做成交互式长连接 shell 则类似 agent 流需 hop#2 式映射。
+- [ ] **截屏与录屏**：设备截屏（screencap）与录屏（screenrecord，或复用 scrcpy 录制通道 `--record`？形态待定）接入工具链。SSH 远程注意：截屏/录屏产物 pull 回本机（hop#1 天然承载）；若走 scrcpy `--record` 录制则与镜像同链路（端口双钉 + hop#2）。
 
 ---
 
