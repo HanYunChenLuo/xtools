@@ -64,7 +64,7 @@ GUI:  start_sampling(serial) / 自动启动 → spawn_sampling()（std::thread �
         │
         └─ agent::spawn_agent(..., serial)
               ├─ ensure_daemon(serial)：adb forward（复用规则）→ probe hello 版本
-              │    ├─ daemon ≥ 宿主版本 → 直连（版本契约 v6：wire 自 v3 稳定，高版本 daemon 兼容服务）
+              │    ├─ daemon ≥ 宿主版本 → 直连（版本契约 v6：wire 自 v3 向后兼容（v8 起纯增字段），高版本 daemon 兼容服务）
               │    ├─ daemon < 宿主版本 → 发 suicide + pkill 强杀 → 强制重推 → 重启 daemon → 探活
               │    └─ 无 daemon → pkill 清残留 → 强制重推 → setsid nohup 启动 → 探活
               │    （daemon 侧 bind 竞争自愈：高版本替代低版本 / 挂死者清场接管 / 等版本让位）
@@ -99,7 +99,20 @@ process_cpu% = (proc_jiffies_delta / total_jiffies_delta) × 100 × num_cores
 
 **真机格式注意**：App Summary 分类行与 `TOTAL PSS:` 之间隔一个空行——空行结束区块，TOTAL 必须在区块外兜底解析。
 
-`MemoryDetails` 字段（单位 KB，agent 协议与基线 JSON 存储口径）：`java_heap`, `native_heap`, `code`, `stack`, `graphics`, `private_other`, `system`, `total_pss`。
+**DMA-BUF 拆分（协议 v8，e5071da）**：mem 事件增 `dmabuf` 字段。动机——App Summary 的
+Graphics 桶只按 GPU 设备节点名匹配 VMA（Qualcomm `/dev/kgsl-3d0` 等 = GPU 命令缓冲/memstore
+小块），gralloc/dma-heap 分配的图形/媒体缓冲（VMA 名 `/dmabuf:…` 或 `[anon:dmabuf…`，内核
+不知道其"图形用途"，语义在 userspace 分配器）落进 **Private Other** 无语义兜底桶——直渲染
+应用的大头因此无指向（SS4 gltf 实测 614MB/85% PSS；内核正路 `/proc/<pid>/dmabuf` 的
+CONFIG_DMABUF_SYSFS_STATS 该 GVM 未编译）。Full 模式（≥500ms）root 下 agent 扫全量 smaps
+按 VMA 名聚合 Pss 单列 `dmabuf`，`other = private_other.saturating_sub(dmabuf)`——稳态
+8 分类合计恒等 PSS；**分配剧变期 dumpsys 与 smaps 两次快照不同步，dmabuf 可暂超 other
+（other 归零兜底），合计可暂超 PSS**（如 gltf 场景加载尖峰），如实反映不钳制。smaps
+不可读（非 root）与 Smaps/DumpsysFallback 低间隔路径 dmabuf=0 不破坏原 7 类。smaps 全量
+~3MB/4452 mapping 解析 <50ms，勿接入低间隔路径。GPU 内存的权威口径仍是 `dumpsys gpu`
+Memory snapshot（`--gpu-mem`），与 dmabuf（CPU 侧 mmap 的 PSS 口径）本就分开读。
+
+`MemoryDetails` 字段（单位 KB，agent 协议与基线 JSON 存储口径）：`java_heap`, `native_heap`, `code`, `stack`, `graphics`, `private_other`（v8 起已扣 dmabuf）, `dmabuf`（v8 起，serde(default) 兼容旧基线 JSON）, `system`, `total_pss`。
 
 **展示单位统一（78f93a9）**：内存的终端打印/GUI 面板与图表/CSV 导出全 **MB**（协议与基线 JSON 存储仍 KB，展示层换算）——memory CSV 表头逐列标 `(MB)`；旧会话 CSV 为 KB 无标注，消费时看表头。其余指标核对无混用：GPU 显存全 MB、IO/网络全 KB/s、频率 MHz（hello 规格行 GHz）、温度 °C。
 
