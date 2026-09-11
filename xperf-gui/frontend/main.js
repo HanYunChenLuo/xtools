@@ -213,6 +213,8 @@ class DeviceSession {
     this.currentStackPath = null;
     this.restartTimer = null;
     this.mirrorRunning = false;
+    // 同型号多机并存时 tab 标签附 serial 尾 4 位消歧（App.refreshTabLabels 维护）
+    this.dupModel = false;
 
     // DOM：克隆设备页模板并挂载
     const tpl = document.getElementById('devicePageTpl');
@@ -291,7 +293,9 @@ class DeviceSession {
   package() { return this.el('package-input').value.trim(); }
 
   tabLabel() {
-    const name = this.info.model || this.serial;
+    let name = this.info.model || this.serial;
+    // 同型号多机并存（如两台 SS3）：附 serial 尾 4 位消歧，serial 本体在 title 悬浮
+    if (this.dupModel && this.info.model) name += '·' + this.serial.slice(-4);
     return this.offline ? name + '（已断开）' : name;
   }
   tabTitle() {
@@ -1161,14 +1165,14 @@ const app = {
       s.info = info;
       s.applyPlatformCaps();
       s.setOnline();
-      s.tabBtn.textContent = s.tabLabel();
-      s.tabBtn.title = s.tabTitle();
+      this.refreshTabLabels();
       return s;
     }
     const s = new DeviceSession(info.serial, info);
     this.sessions.set(info.serial, s);
     s.loadPackages();
     if (this.active === null) this.switchDevice(info.serial);
+    this.refreshTabLabels();
     return s;
   },
 
@@ -1216,6 +1220,20 @@ const app = {
     document.title = `XPerformance | ok | devices:${this.sessions.size} | events:${events} | pids:${pidCount.size} | cpu:${cpuPoints},mem:${memPoints},fps:${fpsPoints}`;
   },
 
+  // 同型号多机并存时 tab 附 serial 尾 4 位消歧（型号仅显示用途，serial 才是键）；
+  // 设备增删/型号信息变化后重算并刷新全部 tab 标签
+  refreshTabLabels() {
+    const models = new Map();
+    for (const s of this.sessions.values()) {
+      if (s.info.model) models.set(s.info.model, (models.get(s.info.model) || 0) + 1);
+    }
+    for (const s of this.sessions.values()) {
+      s.dupModel = s.info.model ? (models.get(s.info.model) || 0) > 1 : false;
+      s.tabBtn.textContent = s.tabLabel();
+      s.tabBtn.title = s.tabTitle();
+    }
+  },
+
   // 设备热插拔：新增建页；移除灰显（数据/采样线程保留，插回自动恢复重连）
   onDevicesChanged({ devices, added, removed }) {
     for (const d of devices) {
@@ -1224,8 +1242,6 @@ const app = {
         s.info = d;
         s.applyPlatformCaps();
         s.setOnline();
-        s.tabBtn.textContent = s.tabLabel();
-        s.tabBtn.title = s.tabTitle();
       }
     }
     for (const serial of added) {
@@ -1240,6 +1256,7 @@ const app = {
         _diag('devices removed: ' + serial);
       }
     }
+    this.refreshTabLabels();
     // 全部设备移除：回到无设备提示页
     const online = this.sessions.size > 0 && [...this.sessions.values()].some(s => !s.offline);
     document.getElementById('noDeviceHint').classList.toggle('hidden', online);
