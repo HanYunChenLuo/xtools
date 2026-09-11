@@ -14,7 +14,7 @@
 //! 因此传 `-p P --tunnel-port=P`（注册/连接双钉同号；`-p` 单口即 range {P,P}，
 //! 老版本 scrcpy 的 --tunnel-port 语义下同义，向后兼容）。
 //!
-//! **录屏**（[`start_recorder`]）：同链路加 `--no-window --record=<mp4>`——host 侧
+//! **录屏**（[`crate::mirror::start_recorder`]）：同链路加 `--no-window --record=<mp4>`——host 侧
 //! 落盘无时长上限（设备端 `screenrecord` 有 180s 硬上限，不可用）。停止语义特殊：
 //! MP4 容器须优雅退出才 finalize（SIGKILL 产坏文件），故录屏会话的停止路径是
 //! **SIGINT → ≤3s 宽限 → SIGKILL 兜底**（scrcpy 捕获 SIGINT 后停止采集并封盘）。
@@ -352,8 +352,8 @@ enum ScrcpyMode {
 }
 
 /// 启动一路屏幕镜像：拉起 scrcpy 外部窗口（视频+触控）。
-/// 等价于 [`spawn_scrcpy`] 无附加参数（`-s <serial> --no-audio
-/// --window-title xperf:<serial>`，远程追加 `-p P --tunnel-port=P` 双钉同号）。
+/// 参数形态：`-s <serial> --no-audio --window-title xperf:<serial>`，远程追加
+/// `-p P --tunnel-port=P` 双钉同号（公共启动路径见模块文档「录屏」段）。
 ///
 /// `serial`：目标设备（`None` 回退全局选择——CLI 经 `select_device` 已写入）。
 pub fn start_mirror(serial: Option<&str>) -> Result<MirrorHandle> {

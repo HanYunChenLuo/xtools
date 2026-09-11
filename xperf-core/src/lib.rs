@@ -29,7 +29,8 @@ pub mod hostchan;
 pub mod marker;
 /// 内存采样协议类型。
 pub mod memory;
-/// scrcpy 屏幕镜像：外部窗口拉起 + SSH 远程隧道（hop#2 固定端口）生命周期。
+/// scrcpy 屏幕镜像与录屏：外部窗口拉起 / 无窗口 MP4 录制（共享 SSH 远程隧道
+/// hop#2 固定端口生命周期；录屏停止走 SIGINT 优雅封盘）。
 pub mod mirror;
 /// 平台抽象：adb product 字段自动检测 + 各平台差异特性。
 pub mod platform;
