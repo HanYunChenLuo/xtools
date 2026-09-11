@@ -27,13 +27,20 @@
 - **非 root SS2MAX（shell，XPERF_NO_AUTO_ROOT=1，500ms）**：dmabuf=0 不破坏，7 类合计 622.9 ≈ PSS 622.8 ✓（该机 gltf 大头 512.9MB 落 Graphics 桶——kgsl 节点名命中，与 SS4 GVM 无 kgsl 节点的分布差异互为印证）。验证后已 `adb root` 恢复设备状态。
 - **低间隔（SS3 root，100ms Smaps 路径）**：48 样本分类全 0 含 DMA-BUF=0，PSS 正常流动，CSV 10 列表头正确。
 
-**遗留**：gltf APK 去 RemoteServer、QNX proc 链停链命令两项旧遗留不变；GUI 面板新增行的渲染为目验项（链路同既有 setLive 行）。
+**遗留**：gltf APK 去 RemoteServer、QNX proc 链停链命令两项旧遗留不变。
 
 **同日复核（用户要求 review + 测试覆盖评估）**：
 - **SS2MAX 双计风险实锤排除**（交接验证矩阵的缺口）：root 下 Graphics 512.9MB / DMA-BUF 0.0MB，8 类合计 623.4=PSS ✓——该机 gltf 大缓冲的 468 个 VMA 以 kgsl 设备节点命名进 Graphics 桶，仅存的 4 个 `/dmabuf:` VMA 的 Pss 均为 0（实测 smaps 原文），不存在"dumpsys Graphics 与 /dmabuf 前缀同时命中"的重叠；三平台（A11 kgsl / A12 QNX / A16 GVM）记账均不重叠。
 - 补测：GUI `test_map_event_mem_dmabuf`（v8 透传+缺省 0 两态）+ core `test_mem_row_dmabuf_column`（表头/数据行 10 列对齐 + DMA-BUF 列位置锁）。
 - 记录不修（低危/cosmetic）：①v7 host 连 v8 daemon 时 other 已扣减但无 dmabuf 显示行 → 分类合计观感 <PSS（纯增字段对老 host 的固有语义，daemon 60s 空闲自杀+版本收敛后绝迹）；②parse_dmabuf_pss 依赖 smaps 字段顺序（Pss 先于 "Anonymous:" 等 A-F 开头行——内核 ABI 稳定）；③JS↔Rust 命令参数 camelCase 契约无静态检查（gpuMem bug 类，Tauri 无校验基建，靠 review）。
 - 附带修复（review 前用户实撞）：`4d3a421` GUI start_sampling 前端 `gpumem`→`gpuMem`（v7 引入的键名错误，所有设备开始采样均报错）。
+
+**同日 GUI 目验闭环**（macOS 本机 GUI + `--remote hppc`，System Events AX 树读取 + AXPress 点击——screencapture 无屏幕录制权限改走 AX 树，顺带获得**可点击验证能力**）：
+- **gpuMem 修复真机闭环**：手动「停止」→「开始监控」（走前端 currentFlags）→ 状态栏「监控中」，无 missing key 错
+- **v8 面板渲染**：实时数值表 `└ DMA-BUF 619.2 MB` / `└ 其他 9.0 MB` 行渲染+数值正确（8 类合计 731.9 ≈ PSS 732.0）；SS2MAX tab 的 GPU 显存 checkbox `enabled=false` + tooltip「SS2MAX 平台无 GPU 显存数据源」
+- **按钮端到端全通**：保存基线→对比基线（报告面板渲染，PSS 732.0/732.5 持平）；重启应用→冷启动面板两行实测（TotalTime 259/257ms，重启后 PID 11473→12716 全链路自动重解析）；获取 root（SS2MAX unroot + `XPERF_NO_AUTO_ROOT=1` 起 GUI：徽章 shell（非 root）→ 点击 → 状态栏「已获取 root 权限（uid=0）」→ 徽章翻 root → 设备侧 id=0 确认）；root 设备上按钮按设计 disabled（SS4 页点击为 no-op）
+- 静态兜底：全部 36 个 `el()` class 引用在 index.html 模板均存在；全部命令的 invoke 参数 camelCase 核对无其他违例（`intervalMs`/`tracePath`/`dataPath` 正确）
+- 工具沉淀：`/tmp` 下 press/findText/status 等 .scpt 已清理；方法可复用——System Events 遍历 AX 树读 static text 值 + `perform action "AXPress"` 点击按钮（窗口须在前台；tab 切换后偶发 AX 树剪枝只剩顶栏，重启 GUI 恢复）
 
 ---
 

@@ -65,7 +65,7 @@
 - marker 每连接线程无界（有 10s 读超时兜底）
 - ~~**多宿主协议版本战**~~（**已代码修复**，2026-09-11 v6 / 9685438）：曾实测 v4 GUI + v5 CLI 并存时互相 suicide+重推对方 daemon（无限循环/无人监听残留）。**v6 起版本契约**：host 接受 daemon ≥ 自身（wire 自 v3 稳定）；daemon bind 竞争高版本胜出、挂死（SIGSTOP 类持有 socket 不应答）被清场接管——任何启动交错收敛到「恰好一个健康 daemon 且为最高版本」，真机四场景验证（升级重推/升级接管/挂死接管/等版本让位）。**过渡期残留**：exact-match 时代旧宿主（≤v5 二进制）连 v6 daemon 仍会自杀重推降级——各宿主升级一次 v6 后绝迹
 - **bridge 边缘态（2026-09-10 review 记录）**：bootstrap 探测失败冷却期（60s）内 MindRT 以 `is_gateway=false` 漏进设备列表（pick_device 可选中/GUI 可建 tab）——仅中继坏掉时出现，选中后采样会按普通设备失败；不修（正常路径 bootstrap 秒成，冷却语义是防反复探测）
-- GUI 基线/应用操作按钮与设备 tab 切换的点击渲染为人工目验项（后端链路由命令级测试锁定：save/compare 端到端 + build_summary 口径 + 多会话隔离；真机日志已验手动开始/勾选重启/trace 录制全链路）
+- ~~GUI 基线/应用操作按钮与设备 tab 切换的点击渲染为人工目验项~~（**已闭环**，2026-09-11：macOS GUI + System Events AX 树/AXPress 自动化点击实测全通，见 SESSION 当日 (5)「GUI 目验闭环」——含 gpuMem 键名修复的真机确认、v8 DMA-BUF 面板行、SS2MAX 显存禁用勾选、基线/重启/获取 root 按钮端到端）
 
 ## F. SSH 远程调试（已完成）
 
@@ -75,7 +75,7 @@
 ## G. 非 root 设备支持（已完成）
 
 - [x] **权限矩阵探索 + 无 root 机器支持**（2026-09-09 完成，`feature/non-root-support` 合 main）：commit 链 19ecef9（auto-root 收敛仅车机 + XPERF_NO_AUTO_ROOT 旁路）→ ea3986f（协议 v3 hello.root + 内存降级 + RSS 兜底 + CLI 提示）→ 9c34b23（QNX 内嵌 telnet 去 busybox + --qnx-stop 模式 + host 换道）→ ec2de2b（GUI 权限徽章 + 获取 root 按钮 + 降级提示透传）。矩阵实测（两机 shell 逐项验证）见下表；**真机回归全通**：非 root SS3 @500ms 九项指标（QNX 内嵌 telnet shell 起流 20.3% busy + 每进程归因）、非 root SS2MAX @50ms（内存 dumpsys 降级 500ms 周期 + RSS TOTAL RSS 兜底 + kgsl 74.7%）、root 回归 SS3 @50ms（auto-root 恢复全指标）、--qnx-stop 守卫语义（不动已停链）真机验证。
-  - **残留目验项**：仅 GUI「获取 root」按钮的 DOM 点击绑定（一行 addEventListener，invoke 注册编译期锁定）；后端 `acquire_root` 已真机闭合（bf50bbc `test_acquire_root_hppc`：SS2MAX reboot 掉 root 后 3.46s shell→root 全迁移）。
+  - ~~**残留目验项**~~（已闭环，2026-09-11）：GUI「获取 root」按钮 DOM 点击经 AXPress 真机验证（SS2MAX unroot + XPERF_NO_AUTO_ROOT=1：点击 → 状态栏确认 → 徽章翻 root → 设备 id=0）；root 设备上按钮按设计 disabled。
   - **泛型 Android 跳过 auto-root**：策略由纯函数 `should_auto_root` 单测 + detect 测试锁定（手头无非车机设备真机）。
 
   | 指标 | 数据源 | 非 root 可用性 |
