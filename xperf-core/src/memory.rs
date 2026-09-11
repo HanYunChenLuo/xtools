@@ -18,8 +18,13 @@ pub struct MemoryDetails {
     pub stack: u64,
     /// 图形缓冲（KB）
     pub graphics: u64,
-    /// 其他私有内存（KB）
+    /// 其他私有内存（KB）；协议 v8 起已扣减 dmabuf（DMA-BUF 单列后剩余的无语义兜底桶）
     pub private_other: u64,
+    /// DMA-BUF 显存 PSS（KB；协议 v8 起）：agent root 下扫 smaps 按 VMA 名聚合
+    /// （gralloc/dma-heap 缓冲的 CPU mmap，App Summary 本落 Private Other）；
+    /// 低间隔/非 root（smaps 不可读）路径为 0
+    #[serde(default)]
+    pub dmabuf: u64,
     /// 系统分摊（KB）
     pub system: u64,
     /// 总 PSS（KB）

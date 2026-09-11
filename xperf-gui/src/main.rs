@@ -61,7 +61,7 @@ fn map_event(
                     .collect(),
             });
         }
-        AgentEvent::Mem { ts, pid, pss, java, native, code, stack, gfx, other, sys, .. } => {
+        AgentEvent::Mem { ts, pid, pss, java, native, code, stack, gfx, other, sys, dmabuf, .. } => {
             out.push(SampleEvent::MemoryUpdate {
                 pid: pid.to_string(),
                 timestamp: ts_of(ts),
@@ -73,6 +73,7 @@ fn map_event(
                     stack,
                     graphics: gfx,
                     private_other: other,
+                    dmabuf,
                     system: sys,
                     total_pss: pss,
                 },

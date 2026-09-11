@@ -577,14 +577,16 @@ class DeviceSession {
       this.trackPeak(pid, 'mem', total_pss / 1024, t);
       this.setLive('mem', '内存 PSS (pid ' + pid + ')', (total_pss / 1024).toFixed(1), ' MB', 'ok');
       if (details) {
-        // App Summary 全 7 分类（合计恒等于 PSS；漏列会让"PSS 远大于分类之和"——
-        // 如 gltf 的场景缓冲大头在 Private Other）
+        // App Summary 7 分类 + 协议 v8 拆出的 DMA-BUF（合计恒等于 PSS；DMA-BUF 是
+        // gralloc/dma-heap 显存的 CPU mmap，常是直渲染应用大头——已从 Other 扣减单列；
+        // 低间隔/非 root 路径 dmabuf 为 0，Other 退化为原 Private Other 口径）
         this.setLive('mem_native', '  └ Native', (details.native_heap / 1024).toFixed(1), ' MB', 'dim');
         this.setLive('mem_java', '  └ Java', (details.java_heap / 1024).toFixed(1), ' MB', 'dim');
         this.setLive('mem_gfx', '  └ Graphics', (details.graphics / 1024).toFixed(1), ' MB', 'dim');
         this.setLive('mem_code', '  └ Code', (details.code / 1024).toFixed(1), ' MB', 'dim');
         this.setLive('mem_stack', '  └ Stack', (details.stack / 1024).toFixed(1), ' MB', 'dim');
-        this.setLive('mem_other', '  └ Private Other', (details.private_other / 1024).toFixed(1), ' MB', 'dim');
+        this.setLive('mem_dmabuf', '  └ DMA-BUF', ((details.dmabuf || 0) / 1024).toFixed(1), ' MB', 'dim');
+        this.setLive('mem_other', '  └ 其他', (details.private_other / 1024).toFixed(1), ' MB', 'dim');
         this.setLive('mem_sys', '  └ System', (details.system / 1024).toFixed(1), ' MB', 'dim');
       }
       this.charts.mem.requestDraw();

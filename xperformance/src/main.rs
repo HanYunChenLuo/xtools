@@ -578,17 +578,18 @@ async fn monitor_process_agent(
                     a.max = cpu;
                 }
             }
-            AgentEvent::Mem { ts, pid, pss, rss, java, native, code, stack, gfx, other, sys } => {
+            AgentEvent::Mem { ts, pid, pss, rss, java, native, code, stack, gfx, other, sys, dmabuf } => {
                 let Some(t) = DateTime::from_timestamp_millis(ts as i64)
                     .map(|t| t.with_timezone(&Local))
                 else {
                     continue;
                 };
                 if verbose {
-                    // App Summary 全 7 分类（合计恒等于 PSS；Private Other 常是直渲染
-                    // 应用的大头——如 gltf 场景缓冲，漏列会显得"PSS 远大于分类之和"）
+                    // App Summary 全 7 分类 + v8 拆出的 DMA-BUF（合计恒等于 PSS；
+                    // DMA-BUF 为 gralloc/dma-heap 显存的 CPU mmap，常是直渲染应用的
+                    // 大头——已从 Private Other 扣减单列；低间隔/非 root 路径为 0）
                     println!(
-                        "[{}] Memory Usage: {:.1} MB (Java: {:.1}, Native: {:.1}, Graphics: {:.1}, Code: {:.1}, Stack: {:.1}, Private Other: {:.1}, System: {:.1}, RSS: {:.1}) [pid {}]",
+                        "[{}] Memory Usage: {:.1} MB (Java: {:.1}, Native: {:.1}, Graphics: {:.1}, Code: {:.1}, Stack: {:.1}, DMA-BUF: {:.1}, Other: {:.1}, System: {:.1}, RSS: {:.1}) [pid {}]",
                         t.format("%H:%M:%S"),
                         pss as f64 / 1024.0,
                         java as f64 / 1024.0,
@@ -596,6 +597,7 @@ async fn monitor_process_agent(
                         gfx as f64 / 1024.0,
                         code as f64 / 1024.0,
                         stack as f64 / 1024.0,
+                        dmabuf as f64 / 1024.0,
                         other as f64 / 1024.0,
                         sys as f64 / 1024.0,
                         rss as f64 / 1024.0,
@@ -611,6 +613,7 @@ async fn monitor_process_agent(
                     stack,
                     graphics: gfx,
                     private_other: other,
+                    dmabuf,
                     system: sys,
                     total_pss: pss,
                 };
@@ -1289,6 +1292,7 @@ fn generate_memory_charts(
         max_memory = max_memory.max(to_mb(detail.stack));
         max_memory = max_memory.max(to_mb(detail.graphics));
         max_memory = max_memory.max(to_mb(detail.private_other));
+        max_memory = max_memory.max(to_mb(detail.dmabuf));
         max_memory = max_memory.max(to_mb(detail.system));
     }
     max_memory *= 1.1;
@@ -1296,8 +1300,8 @@ fn generate_memory_charts(
     let min_time = *memory_data.timestamps.front().unwrap();
     let max_time = *memory_data.timestamps.back().unwrap();
 
-    let memory_types = ["Total PSS", "Java Heap", "Native Heap", "Code", "Stack", "Graphics", "Private Other", "System"];
-    let colors = [&RED, &BLUE, &GREEN, &YELLOW, &MAGENTA, &CYAN, &RGBColor(128, 0, 0), &RGBColor(0, 128, 0)];
+    let memory_types = ["Total PSS", "Java Heap", "Native Heap", "Code", "Stack", "Graphics", "DMA-BUF", "Other", "System"];
+    let colors = [&RED, &BLUE, &GREEN, &YELLOW, &MAGENTA, &CYAN, &RGBColor(255, 165, 0), &RGBColor(128, 0, 0), &RGBColor(0, 128, 0)];
 
     let mut chart = ChartBuilder::on(&rest_area)
         .margin(10)
@@ -1327,8 +1331,9 @@ fn generate_memory_charts(
                     3 => to_mb(d.code),
                     4 => to_mb(d.stack),
                     5 => to_mb(d.graphics),
-                    6 => to_mb(d.private_other),
-                    7 => to_mb(d.system),
+                    6 => to_mb(d.dmabuf),
+                    7 => to_mb(d.private_other),
+                    8 => to_mb(d.system),
                     _ => 0.0,
                 };
                 (*t, value)

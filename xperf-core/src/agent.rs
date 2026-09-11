@@ -114,12 +114,17 @@ pub enum AgentEvent {
         /// 图形缓冲（KB）
         #[serde(default)]
         gfx: u64,
-        /// 其他私有（KB）
+        /// 其他私有（KB）；agent v8 起已从其中扣减 dmabuf 单列
         #[serde(default)]
         other: u64,
         /// 系统分摊（KB）
         #[serde(default)]
         sys: u64,
+        /// DMA-BUF 显存 PSS（KB；协议 v8 起）：agent root 下扫 smaps 按 VMA 名
+        /// （`/dmabuf`/`[anon:dmabuf` 前缀）聚合，已从 other 扣减单列；
+        /// 低间隔/非 root（smaps 不可读）路径与老 daemon（<v8）缺省为 0
+        #[serde(default)]
+        dmabuf: u64,
     },
     /// 每个活跃图层一条；全静止时一条零帧样本
     Fps {
@@ -230,8 +235,9 @@ pub enum AgentEvent {
 /// 与 agent 的协议版本：与 xperf-agent 的 PROTOCOL_VERSION 同步 bump（改 wire 协议/命令时）。
 /// host 连接时校验 hello 的 version。
 ///
-/// **版本契约（v6 起）**：host 接受 daemon version **≥ 自身**——wire 协议自 v3 起稳定
-/// （此后 bump 均为行为差异，不改命令/事件格式），更高版本的 daemon 可正常服务低版本
+/// **版本契约（v6 起）**：host 接受 daemon version **≥ 自身**——wire 协议自 v3 起向后
+/// 兼容（此后 bump 均为行为差异或纯增字段：新字段带 `#[serde(default)]`，老 daemon 缺省
+/// 可解析、老 host 忽略未知字段），更高版本的 daemon 可正常服务低版本
 /// host，避免多宿主混跑时的降级战（低版本宿主反复重推旧 daemon）。仅当 daemon 版本
 /// **低于** host 时走升级路径（suicide + 重推）；daemon 侧 bind 竞争同规则高版本胜出。
 /// v3：hello 增加 `root` 字段。
@@ -241,7 +247,9 @@ pub enum AgentEvent {
 /// v6：daemon bind 失败自愈 + 高版本替代低版本（多宿主竞态确定性收敛）。
 /// v7：GPU busy 与 GPU 显存拆分为独立开关（`--gpu` / `--gpu-mem`；此前 --gpu 隐含
 /// 显存补采，SS2MAX 等无显存源平台拆出后 GUI 可按平台禁用）。
-pub const AGENT_PROTOCOL_VERSION: u32 = 7;
+/// v8：mem 事件增加 `dmabuf` 字段（Full 模式 root 下从 Private Other 拆出的 DMA-BUF
+/// PSS；纯增字段，老 daemon/host 双向兼容）。
+pub const AGENT_PROTOCOL_VERSION: u32 = 8;
 
 /// daemon 的抽象 socket 名（设备端 `localabstract:xperf-agent`）
 const AGENT_ABSTRACT_SOCK: &str = "xperf-agent";
@@ -1090,15 +1098,24 @@ mod tests {
 
     #[test]
     fn test_parse_mem_full_breakdown() {
-        // interval≥500ms 的 dumpsys meminfo 路径：分类字段齐全
+        // interval≥500ms 的 dumpsys meminfo 路径：分类字段齐全（v8 起带 dmabuf）
+        let ev: AgentEvent = serde_json::from_str(
+            r#"{"t":"mem","ts":1,"pid":2,"pss":484880,"rss":638728,"java":9684,"native":117624,"code":36112,"stack":100,"gfx":0,"other":20000,"sys":30000,"dmabuf":614000}"#,
+        )
+        .unwrap();
+        match ev {
+            AgentEvent::Mem { pss, java, native, code, dmabuf, .. } => {
+                assert_eq!((pss, java, native, code, dmabuf), (484880, 9684, 117624, 36112, 614000));
+            }
+            _ => panic!("应为 Mem 事件"),
+        }
+        // 老 daemon（<v8）/低间隔路径缺省 dmabuf：serde(default) 归零
         let ev: AgentEvent = serde_json::from_str(
             r#"{"t":"mem","ts":1,"pid":2,"pss":484880,"rss":638728,"java":9684,"native":117624,"code":36112,"stack":100,"gfx":0,"other":20000,"sys":30000}"#,
         )
         .unwrap();
         match ev {
-            AgentEvent::Mem { pss, java, native, code, .. } => {
-                assert_eq!((pss, java, native, code), (484880, 9684, 117624, 36112));
-            }
+            AgentEvent::Mem { dmabuf, .. } => assert_eq!(dmabuf, 0),
             _ => panic!("应为 Mem 事件"),
         }
     }
