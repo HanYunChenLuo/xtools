@@ -991,11 +991,18 @@ async fn start_recording(
     *session.recorder.lock().map_err(|e| e.to_string())? = Some(handle.clone());
     let s = serial.clone();
     std::thread::spawn(move || {
-        let (stage, message) = match handle.wait_exit() {
+        let (mut stage, mut message) = match handle.wait_exit() {
             xperf_core::mirror::MirrorExit::Stopped => ("stopped", String::new()),
             xperf_core::mirror::MirrorExit::Closed => ("closed", String::new()),
             xperf_core::mirror::MirrorExit::Failed(tail) => ("failed", tail),
         };
+        // 产物核验：进程正常退出但 MP4 从未产出（视频流未建立）= 失败，
+        // 不能让前端报「录屏已保存」假阳性（CLI 侧 spawn_record_thread 同口径）
+        let produced = path.as_ref().map(|p| std::path::Path::new(p).is_file()).unwrap_or(false);
+        if !produced && stage != "failed" {
+            stage = "failed";
+            message = format!("录屏未产出文件（视频流未建立）: {}", handle.stderr_tail_text());
+        }
         if let Some(st) = app.try_state::<AppState>() {
             if let Ok(mut r) = st.session(&s).recorder.lock() {
                 *r = None;

@@ -190,16 +190,37 @@ fn take_screenshot(package: &str) -> Result<PathBuf> {
     xperf_core::capture::screenshot(None, &dir)
 }
 
+/// 等待录制真正开始（产物文件出现且非空 = scrcpy 已连接并写首帧）。
+/// MP4 muxer 在首个包到达时才建文件，故文件出现 ≈ 视频流起点。
+/// 超时（10s）后放弃等待按墙钟计时（连接异常时不无限阻塞）。
+fn wait_record_started(path: &Path, timeout: std::time::Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if let Ok(m) = std::fs::metadata(path) {
+            if m.len() > 0 {
+                return true;
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    false
+}
+
 /// 录屏线程（--record N）：启动 scrcpy 无窗口录制，N 秒（或 Ctrl-C 中断提前）
-/// 后 SIGINT 优雅封盘，返回产物路径
+/// 后 SIGINT 优雅封盘，返回产物路径。倒计时从产物文件出现（首帧落盘）起算，
+/// 保证成片时长 ≈ N（spawn/推 server ~1.5s 不吃进录制窗口）
 fn spawn_record_thread(secs: u64, package: &str) -> std::thread::JoinHandle<Result<PathBuf>> {
     let pkg = package.to_string();
     std::thread::spawn(move || -> Result<PathBuf> {
         let dir = capture_dir(&pkg)?;
         let h = xperf_core::mirror::start_recorder(None, &dir)?;
-        let deadline =
-            std::time::Instant::now() + std::time::Duration::from_secs(secs);
-        while std::time::Instant::now() < deadline {
+        let path = h
+            .record_path()
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("录屏句柄无产物路径"))?;
+        wait_record_started(&path, std::time::Duration::from_secs(10));
+        let deadline = Instant::now() + std::time::Duration::from_secs(secs);
+        while Instant::now() < deadline {
             if xperf_core::utils::is_interrupted() {
                 break;
             }
@@ -207,9 +228,13 @@ fn spawn_record_thread(secs: u64, package: &str) -> std::thread::JoinHandle<Resu
         }
         h.stop(); // SIGINT 封盘；wait_exit 等进程退出（超时 SIGKILL 兜底）
         h.wait_exit();
-        h.record_path()
-            .cloned()
-            .ok_or_else(|| anyhow::anyhow!("录屏句柄无产物路径"))
+        // 产物核验：流未建立/编码器冲突等场景下 scrcpy 可优雅退出但未产出文件，
+        // 绝不能报「已保存」假阳性（2026-09-12 镜像+录屏并存实测踩坑）
+        if !path.is_file() {
+            let tail = h.stderr_tail_text();
+            anyhow::bail!("录屏未产出文件（scrcpy 视频流未建立）{}", if tail.is_empty() { String::new() } else { format!("：\n{tail}") });
+        }
+        Ok(path)
     })
 }
 
