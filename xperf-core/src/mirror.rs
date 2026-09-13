@@ -145,20 +145,35 @@ fn send_sigint(child: &Child) {
 /// 清扫指定设备残留的 scrcpy forward 规则（scrcpy 被 SIGKILL 时无自清机会，
 /// 规则由 adb server 持有残留；按 serial 限定作用域，不影响其他设备/其他工具）。
 /// 启动前与退出清理各执行一次；adb 失败 best-effort 忽略。
+///
+/// **并发保护**：远程模式下跳过本进程 hop#2 映射表中的端口——同设备并发会话
+/// （镜像+录屏）里，先起会话在建连前其规则仍在列表，误扫会把它打断
+/// （"Device disconnected"，2026-09-11 真机实撞）；本会话自身端口在 cleanup 里
+/// 先 `remove_forward` 再扫，不构成漏扫。
 pub fn sweep_scrcpy_rules(serial: &str) {
+    // 活会话保护集（本地模式无隧道 = 全扫，本地 scrcpy 走 reverse 无 forward 规则）
+    let protected: HashSet<u16> = crate::transport::tunnel()
+        .map(|t| t.mapped_remote_ports().into_iter().collect())
+        .unwrap_or_default();
     let Ok(out) = crate::utils::adb_for(None).args(["forward", "--list"]).output() else {
         return;
     };
     let list = String::from_utf8_lossy(&out.stdout).to_string();
     for line in list.lines() {
-        if let Some((s, port, target)) = parse_forward_line(line) {
-            if s == serial && target.starts_with("localabstract:scrcpy") {
-                let _ = crate::utils::adb_for(Some(serial))
-                    .args(["forward", "--remove", &format!("tcp:{port}")])
-                    .output();
-            }
+        if let Some(port) = rule_sweep_port(line, serial, &protected) {
+            let _ = crate::utils::adb_for(Some(serial))
+                .args(["forward", "--remove", &format!("tcp:{port}")])
+                .output();
         }
     }
+}
+
+/// 单条 forward 规则的清扫判定（纯函数）：属于目标设备 + scrcpy 规则 + 端口未被
+/// 活会话保护 → 返回待移除端口；否则 None
+fn rule_sweep_port(line: &str, serial: &str, protected: &HashSet<u16>) -> Option<u16> {
+    let (s, port, target) = parse_forward_line(line)?;
+    (s == serial && target.starts_with("localabstract:scrcpy") && !protected.contains(&port))
+        .then_some(port)
 }
 
 /// 一路 scrcpy 会话（镜像窗口或录屏，scrcpy 子进程 + 远程模式的 hop#2 端口映射）。
@@ -238,7 +253,7 @@ impl MirrorHandle {
         }
         match status {
             Some(s) if s.success() => MirrorExit::Closed,
-            _ => MirrorExit::Failed(self.stderr_tail()),
+            _ => MirrorExit::Failed(self.stderr_tail_text()),
         }
     }
 
@@ -276,7 +291,7 @@ impl MirrorHandle {
     }
 
     /// stderr 尾行拼接（诊断展示用）
-    fn stderr_tail(&self) -> String {
+    pub fn stderr_tail_text(&self) -> String {
         self.stderr_tail
             .lock()
             .map(|g| g.iter().cloned().collect::<Vec<_>>().join("\n"))
@@ -457,7 +472,7 @@ fn spawn_scrcpy(serial: Option<&str>, mode: ScrcpyMode) -> Result<MirrorHandle> 
     // 宽限期：scrcpy 的参数错误/隧道连接立败在此暴露（正常启动后窗口期间进程存活）
     std::thread::sleep(Duration::from_millis(600));
     if !handle.is_alive() {
-        let tail = handle.stderr_tail();
+        let tail = handle.stderr_tail_text();
         handle.cleanup();
         bail!("scrcpy 启动即退出{}{}", if tail.is_empty() { "" } else { "：" }, tail);
     }
@@ -607,6 +622,29 @@ mod tests {
         h.stop();
         assert!(matches!(h.wait_exit(), MirrorExit::Stopped));
         assert!(!h.is_alive(), "屏蔽 SIGINT 的进程仍应被 SIGKILL 回收");
+    }
+
+    #[test]
+    fn test_rule_sweep_port_concurrency_protection() {
+        // 同设备 scrcpy 残留规则：未被保护 → 待清扫
+        let line = "6eb792dfb0f tcp:27183 localabstract:scrcpy-abc123";
+        assert_eq!(rule_sweep_port(line, "6eb792dfb0f", &HashSet::new()), Some(27183));
+        // 端口被活会话保护（镜像+录屏并发：先起会话建连中的规则）→ 跳过
+        let protected: HashSet<u16> = [27183].into_iter().collect();
+        assert_eq!(rule_sweep_port(line, "6eb792dfb0f", &protected), None);
+        // 其他设备的规则 / 非 scrcpy 规则（xperf-agent 等）→ 不动
+        assert_eq!(
+            rule_sweep_port("other-dev tcp:27183 localabstract:scrcpy-x", "6eb792dfb0f", &HashSet::new()),
+            None
+        );
+        assert_eq!(
+            rule_sweep_port(
+                "6eb792dfb0f tcp:40759 localabstract:xperf-agent",
+                "6eb792dfb0f",
+                &HashSet::new()
+            ),
+            None
+        );
     }
 
     #[test]

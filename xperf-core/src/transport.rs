@@ -203,6 +203,15 @@ impl SshTunnel {
     fn lock_forwards(&self) -> MutexGuard<'_, HashMap<u16, u16>> {
         self.forwards.lock().unwrap_or_else(|e| e.into_inner())
     }
+
+    /// 当前 hop#2 映射的全部**远端**端口（= 本进程各活会话持有的 forward 端口）。
+    /// scrcpy 规则清扫（`mirror::sweep_scrcpy_rules`）须跳过这些端口——同设备并发
+    /// 会话（镜像+录屏）中，先起会话建连前其 forward 规则仍在列表里，误扫会让它
+    /// "Device disconnected" 暴死（2026-09-11 真机实撞）。本会话清理时先
+    /// `remove_forward` 再扫，自己的端口已不在表中，不受影响。
+    pub fn mapped_remote_ports(&self) -> Vec<u16> {
+        self.lock_forwards().keys().copied().collect()
+    }
 }
 
 #[cfg(test)]
@@ -741,6 +750,20 @@ mod tests {
         assert!(!t.add_forward_pinned(27183, 27183).unwrap(), "已有映射应报占用");
         assert!(!t.add_forward_pinned(27184, 27183).unwrap(), "异号同样报占用");
         assert!(t.add_forward_pinned(27184, 27184).is_err(), "伪隧道新映射必败（-O forward 无 master）");
+    }
+
+    #[test]
+    fn test_mapped_remote_ports() {
+        // 映射表端口集 = 活会话保护集（mirror::sweep_scrcpy_rules 并发保护的数据源）
+        let t = SshTunnel::for_test(12345);
+        assert!(t.mapped_remote_ports().is_empty(), "空映射应返回空集");
+        t.lock_forwards().insert(27183, 27183);
+        t.lock_forwards().insert(27184, 27184);
+        let mut ports = t.mapped_remote_ports();
+        ports.sort_unstable(); // HashMap 无序，排序后比较
+        assert_eq!(ports, vec![27183, 27184]);
+        t.lock_forwards().remove(&27183); // 会话 cleanup 的 remove_forward 语义
+        assert_eq!(t.mapped_remote_ports(), vec![27184]);
     }
 
     // ---- 集成测试（需 hppc SSH 可达 + 远端 adb，标 #[ignore]，手动跑） ----
