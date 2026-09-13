@@ -6,6 +6,31 @@
 > 新会话开始时可先读本文件了解近期上下文。
 
 ---
+## 2026-09-12 — 截屏与录屏（`feature/screen-capture`，基本完成未合并：遗留镜像+录屏并存问题移交）
+
+**任务**：WORKSPACE I 节新功能候补 ③——截屏（screencap）与录屏接入工具链，SSH 远程可用。
+
+**形态决策**（用户确认方案 A）：录屏走 scrcpy `--no-window --record`（复用镜像隧道链路，无 180s 上限），弃设备端 screenrecord（180s 硬上限）；截屏走 `adb exec-out screencap -p` 直写本机。
+
+**commit**（feature/screen-capture 分支，未合 main）：d8471f7（core：capture.rs + mirror.rs 录屏模式）→ e448b10（CLI --screenshot/--record N）→ 2947807（GUI 截屏按钮+录屏 toggle）→ 8939872（doc 链接）→ a2136b3（sweep 并发保护+mapped_remote_ports）→ e0c931e（录制倒计时起点修正+产物核验）。
+
+**实现要点**：
+- `mirror.rs` 抽 `spawn_scrcpy(serial, ScrcpyMode::{Mirror, Record(path)})` 公共件；录屏停止须 **SIGINT 优雅封盘**（MP4 finalize，SIGKILL 产坏文件）——`stop()` SIGINT + `sigint_at` 单次去重 + wait_exit 3s 超时 SIGKILL 兜底 + cleanup Drop 路径原地宽限
+- 截屏 PNG 魔数**偏移定位**（非 starts_with）——SS4/A16 screencap 把 `[Warning] Multiple displays…` 打到 stdout 前缀，真机踩坑修复
+- CLI `--record N` 倒计时从产物文件出现起算（wait_record_started）——spawn+推 server ~8s 延迟不吃进窗口；采样并行时 stop_after 取 max(trace, stack, record)
+- 产物核验（CLI record 线程 + GUI 监护线程同口径）：进程优雅退出但 MP4 不存在 = 失败如实报，杜绝「已保存」假阳性
+- sweep_scrcpy_rules 并发保护：跳过本进程 hop#2 映射表端口（`SshTunnel::mapped_remote_ports`）——录屏启动的清扫曾摘掉镜像建连中的规则致其 Device disconnected
+- Ctrl-C handler 独立模式才自行注册（抢先注册会顶掉 monitor_process_agent 的 set_handler 报错）
+
+**真机回归矩阵**（--remote hppc）：SS3 截屏 2880×1620 ✓ / SS3 录屏 5s→成片 5.35s ✓ / SS3 采样+截屏+录屏并行同会话目录 ✓ / Ctrl-C 提前封盘 exit 0 ✓ / SS4 截屏（前缀剥离后 PNG 有效）+ 录屏 6296×1740 ✓ / 同机双镜像两进程共存 12s ✓。
+
+**遗留（移交下会话，详见 WORKSPACE A 节）**：**镜像+录屏同机并存失败**——录屏客户端卡在连接重试（forward 规则始终缺席），并发近同时启动时镜像 server 被 SIGKILL。已排除 sweep/端口/平台限制；勘察证据与下一步（ADB wrapper 挂日志抓注册返回值等）见 WORKSPACE A 节。
+
+**测试**：core 109 + GUI 10 + CLI 5 + xrm 2 全绿；clippy/doc 零警告。教训：HashMap 无序断言 flaky（test_mapped_remote_ports 排序修复）；run_cmd 管道 exit code 是末命令的（`cmd | tail; echo $?` 测的是 tail）。
+
+---
+
+
 
 ## 2026-09-11(7) — scrcpy 屏幕镜像集成（`feature/scrcpy-mirror` 合 main）
 

@@ -2,7 +2,7 @@
 
 > 本文件记录跨会话的待办事项（backlog）。每次会话的历史总结见 `SESSION.md`。
 > 完成一项就把状态改为 ✅ 并注明完成的 commit；新增想法随时追加。
-> 最后更新：2026-09-11 深夜：**scrcpy 屏幕镜像集成合 main**（`feature/scrcpy-mirror`）——I 节 scrcpy 项核销：core `mirror.rs`（外部窗口拉起 + 远程固定端口 hop#2；reverse 实测在远端 server 拓扑下不可用，须 `--tunnel-port` + 同号 hop#2）+ CLI `--mirror`（并行/镜像-only 两模式）+ GUI 每设备侧栏 toggle 按钮（stopped/closed/failed 三态事件）。真机回归全通（SS3/SS2MAX/SS4 远程 + 双设备并行 + 采样并行）
+> 最后更新：2026-09-12：**截屏与录屏基本完成（`feature/screen-capture` 分支，未合 main）**——截屏（exec-out screencap 直写 PNG）+ 录屏（scrcpy --no-window --record，SIGINT 封盘）CLI/GUI 全链路真机回归通过（SS3/SS4，含 Ctrl-C 封盘、并行采样同目录）；**遗留 1 项缺陷移交下会话：镜像+录屏同机并存失败**（详见 A 节，勘察证据与下一步已备齐）
 
 ## 当前状态速览
 
@@ -26,7 +26,12 @@
 
 ## A. 已知缺陷
 
-（无——两轮 code review 的严重/一般问题已全部修复）
+- [ ] **镜像+录屏同机并存失败**（`feature/screen-capture` 遗留，2026-09-12 勘察半衰）。现象：同设备起两路 scrcpy（镜像 `--mirror` + 录屏 `--record`，同进程或两进程均复现）——录屏客户端卡在连接重试（stderr 反复打印设备列表 INFO 块），永不产出 MP4（产物核验如实报错）；两路**近同时**启动时（~1s 内）镜像设备端 server 被 SIGKILL（stderr "Killed"，错开 10s 启动则镜像不死）。
+  - **已排除**：sweep 误扫（已修+验证）、端口池错配（双钉同号各自就位）、push 争抢（镜像流活跃时手动经同一隧道 push jar 0.5s 正常，推默认路径也正常）、平台/编码器限制（同机双镜像两进程共存 12s 正常）。
+  - **定位到的矛盾点**：卡死窗口内实测——录屏 scrcpy 的设备端 server **已启动**（两个 scid 的 `app_process` shell 并存 = 客户端在重试循环），但 hppc 上 `adb forward --list` **无对应规则、27184 无监听器** → 客户端 connect 永远 refused。而同参数手动 `adb forward tcp:27184 localabstract:scrcpy-manual` 经同一 hop#1 **立即成功**（规则+监听器都出现）。
+  - **下一步（按序）**：①scrcpy 支持 `ADB=<wrapper>` 自定义 adb 路径——挂日志 wrapper 记录 scrcpy 各 adb 子调用的 argv/stdout/exit，坐实 forward 注册环节返回什么（疑似注册失败被静默容忍继续）；②对照 scrcpy 4.1 源码 `adb_tunnel.c` 重试路径确认 bind 失败处理；③若注册竞态确认：录屏 spawn 前等待镜像完全建连（其 forward 规则从 --list 消失）+ 失败重试一次；④兜底：同机镜像/录屏互斥守卫 + 文档化。
+  - **勘察注意**：`nc -z` 探测 hop#2 端口是侵入性的（消费 server 首个连接）；hop#1 端口识别 = `printf '000chost:version' | nc -w 2 127.0.0.1 <port>` 回 OKAY。
+- [ ] GUI 截屏/录屏按钮未经 AX 自动化目验（代码路径与镜像按钮同构，单测覆盖目录逻辑；下会话随并存问题一起真机闭环）
 
 ## B. 指标覆盖
 
@@ -113,7 +118,7 @@
 - [ ] **logcat 支持**：设备 logcat 抓取/查看接入工具链（按包/时间窗过滤、与采样时间轴对齐等形态待定）。SSH 远程注意：adb 命令天然走 hop#1 隧道，落盘在本机，预期改动小。
 - [x] ~~**scrcpy 集成**~~（**已完成**，2026-09-11 深夜，`feature/scrcpy-mirror` 合 main + 补丁 `a99dee7`）：形态=拉起外部 scrcpy 窗口（解码/触控归 scrcpy）。core `mirror.rs` + `SshTunnel::add_forward_pinned`（固定端口 hop#2——**实测 adb reverse 在远端 server 拓扑下流回不到 TCP 客户端，不可用**；远程走 `-p P --tunnel-port=P` 双钉同号——**scrcpy 4.x 的 --tunnel-port 只钉本地 connect 口，adb forward 注册口由 -p/port_range 在 server 侧扫描**（v4.1 源码），只传 tunnel-port 时多镜像并存错配必败，用户实撞 SS3+SS4 场景修复）；端口池 27183..=27199 两侧同号空闲扫描。CLI `--mirror`（与采样并行 / 单独镜像-only）；GUI 每设备侧栏「屏幕镜像」toggle + 监护线程事件复位按钮（stopped/closed/failed 三态——scrcpy 正常运行也有 stderr 日志，凭 exit status 分流而非 stderr 非空）。真机：SS3/SS2MAX/SS4 远程全通、双设备并行端口隔离、SIGINT 全清理零残留
 - [ ] **命令行输入**：GUI 提供设备 shell 命令输入能力（交互式 shell or 单条执行，形态待定）。SSH 远程注意：命令通道同 adb 走 hop#1；若做成交互式长连接 shell 则类似 agent 流需 hop#2 式映射。
-- [ ] **截屏与录屏**：设备截屏（screencap）与录屏（screenrecord，或复用 scrcpy 录制通道 `--record`？形态待定）接入工具链。SSH 远程注意：截屏/录屏产物 pull 回本机（hop#1 天然承载）；若走 scrcpy `--record` 录制则与镜像同链路（端口双钉 + hop#2）。
+- [~] **截屏与录屏**（**基本完成，`feature/screen-capture` 分支未合 main**，2026-09-12）：截屏=`adb exec-out screencap -p` 直写本机 PNG（PNG 魔数偏移定位剥 stdout 前缀警告——SS4 实踩）；录屏=scrcpy `--no-window --record`（复用镜像隧道双钉同号全链路；停止 SIGINT 优雅封盘 ≤3s 宽限 SIGKILL 兜底；CLI 倒计时从首帧落盘起算；产物核验防假阳性）。CLI `--screenshot`/`--record N`（独立+采样并行同窗口）；GUI 侧栏「屏幕捕获」区截屏按钮+录屏 toggle（record 三态事件，关窗收尾含录屏封盘）。真机回归 SS3/SS4 全通。**遗留**：镜像+录屏同机并存失败（A 节，移交下会话）→ 修复后合 main
 
 ---
 
