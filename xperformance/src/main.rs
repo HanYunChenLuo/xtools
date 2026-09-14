@@ -25,7 +25,7 @@ use xperf_core::simpleperf;
 #[command(version, about = "XPerformance Monitor - Android process CPU/memory monitor", long_about = None)]
 struct Args {
     /// Package name to monitor
-    #[arg(short, long, required_unless_present_any = ["clean_cache", "update_simpleperf_scripts", "mirror", "screenshot", "record"])]
+    #[arg(short, long, required_unless_present_any = ["clean_cache", "update_simpleperf_scripts", "mirror", "screenshot", "record", "logcat"])]
     package: Option<String>,
 
     /// 目标设备 serial（多台设备同连时必须指定，如 `adb devices` 列出的 6eb792dfb0f；
@@ -151,6 +151,13 @@ struct Args {
     /// 封盘）；可单独使用（无 --package）
     #[arg(long, value_name = "SECONDS", value_parser = clap::value_parser!(u64).range(1..))]
     record: Option<u64>,
+
+    /// 抓取设备 logcat 流式落盘（-v threadtime -v year，与采样 CSV 同设备时钟）。
+    /// 有 --package 时按包过滤（Android 12+ 按 UID 进程重启耐受；11 及以下按 pid，
+    /// 需应用已运行且重启后新进程日志缺失）；无包名全机抓取。与采样并行（同窗口
+    /// 同停）或单独使用（Ctrl-C 停止）；设备断连自动重连
+    #[arg(long)]
+    logcat: bool,
 }
 
 /// 设备选择：`--device` 指定 > 单台自动；多台未指定报错并列出清单。
@@ -188,6 +195,44 @@ fn capture_dir(package: &str) -> Result<PathBuf> {
 fn take_screenshot(package: &str) -> Result<PathBuf> {
     let dir = capture_dir(package)?;
     xperf_core::capture::screenshot(None, &dir)
+}
+
+/// logcat 落盘目录：有包名随采样会话时间戳目录的 `logcat/`（与 CSV 同目录，
+/// 时间轴对照）；无包名落设备级目录 `device-<serial>/<ts>/logcat/`
+fn logcat_dir(package: &str) -> Result<PathBuf> {
+    if package.is_empty() {
+        let serial = xperf_core::target_serial().unwrap_or_else(|| "unknown".into());
+        let ts = Local::now().format("%Y%m%d_%H%M%S");
+        Ok(xperf_core::csvstream::data_root()
+            .join(format!("device-{serial}"))
+            .join(ts.to_string())
+            .join("logcat"))
+    } else {
+        Ok(cli_utils::create_timestamp_subdir(package)?.join("logcat"))
+    }
+}
+
+/// 启动 logcat 抓取（--logcat）：有包名按包过滤（A12+ UID 进程重启耐受 /
+/// A11 降级 pid 并提示限制），无包名全机。返回句柄（停止走 `stop()`）
+fn start_logcat_capture(package: &str) -> Result<xperf_core::logcat::LogcatHandle> {
+    use xperf_core::logcat::{resolve_package_filter, LogcatFilter};
+    let filter = if package.is_empty() {
+        LogcatFilter::All
+    } else {
+        let f = resolve_package_filter(None, package)?;
+        match &f {
+            LogcatFilter::Uid(u) => println!("logcat 按包过滤: uid={}", u),
+            LogcatFilter::Pid(p) => println!(
+                "{}",
+                format!("logcat 按 pid={} 过滤（Android ≤11 平台限制：进程重启后新进程日志缺失）", p).yellow()
+            ),
+            LogcatFilter::All => {}
+        }
+        f
+    };
+    let dir = logcat_dir(package)?;
+    let h = xperf_core::logcat::start_logcat(None, &dir, filter, None, None)?;
+    Ok(h)
 }
 
 /// 等待录制真正开始（产物文件出现且非空 = scrcpy 已连接并写首帧）。
@@ -1691,7 +1736,7 @@ async fn main() -> Result<()> {
         match take_screenshot(&package) {
             Ok(p) => println!("截屏已保存: {}", p.display()),
             Err(e) => {
-                if samplingless && !args.mirror && args.record.is_none() {
+                if samplingless && !args.mirror && args.record.is_none() && !args.logcat {
                     xperf_core::shutdown_remote();
                     eprintln!("❌ 截屏失败: {:#}", e);
                     std::process::exit(1);
@@ -1702,9 +1747,9 @@ async fn main() -> Result<()> {
         }
     }
     // Ctrl-C handler：并行模式由采样路径（monitor_process_agent）注册（record 线程
-    // 轮询同一中断标志）；独立模式（镜像/录屏）须自行注册（进程级只能注册一次，
+    // 轮询同一中断标志）；独立模式（镜像/录屏/logcat）须自行注册（进程级只能注册一次，
     // 抢先注册会把采样路径的 set_handler 顶成 Err）
-    if samplingless && (args.mirror || args.record.is_some()) {
+    if samplingless && (args.mirror || args.record.is_some() || args.logcat) {
         ctrlc::set_handler(|| {
             xperf_core::utils::set_interrupt_flag();
             println!("\n程序正在退出...");
@@ -1715,6 +1760,28 @@ async fn main() -> Result<()> {
         println!("屏幕录制 {}s…", n);
         spawn_record_thread(n, &package)
     });
+    // logcat 抓取（--logcat）：流式落盘，窗口覆盖采样全程。独立模式
+    // （logcat 是唯一目的）启动失败即退出；并行模式失败只告警
+    let logcat = if args.logcat {
+        match start_logcat_capture(&package) {
+            Ok(h) => {
+                println!("logcat 抓取中: {}", h.path().display());
+                Some(h)
+            }
+            Err(e) => {
+                let sole = samplingless && !args.mirror && args.record.is_none() && !args.screenshot;
+                if sole {
+                    xperf_core::shutdown_remote();
+                    eprintln!("❌ logcat 启动失败: {:#}", e);
+                    std::process::exit(1);
+                }
+                println!("{}", format!("logcat 启动失败: {:#}（继续）", e).yellow());
+                None
+            }
+        }
+    } else {
+        None
+    };
     // 独立模式（无采样无深挖）：镜像等 Ctrl-C 或窗口关闭，录屏等到点封盘，截屏已完成
     if samplingless {
         if args.save_baseline || args.compare_baseline {
@@ -1735,6 +1802,15 @@ async fn main() -> Result<()> {
         if !print_record_result(record_handle, true) {
             capture_failed = true;
         }
+        // logcat 独立等待：开放抓取，Ctrl-C 停止（镜像等待/录屏限时已先返回）
+        if let Some(h) = logcat {
+            let path = h.path().to_path_buf();
+            while !xperf_core::utils::is_interrupted() {
+                std::thread::sleep(std::time::Duration::from_millis(150));
+            }
+            h.stop();
+            println!("logcat 已保存: {}", path.display());
+        }
         drop(mirror); // 镜像/录屏清理（摘 hop#2 需经隧道）须在 shutdown_remote 之前
         xperf_core::shutdown_remote();
         if capture_failed {
@@ -1746,6 +1822,12 @@ async fn main() -> Result<()> {
     let result = monitor_process(&args, cold_start_ms).await;
     // 录屏线程收尾（并行模式失败只告警，采样产出不受影响）
     print_record_result(record_handle, false);
+    // logcat 收尾：停止抓取（杀子进程收线程）
+    if let Some(h) = logcat {
+        let path = h.path().to_path_buf();
+        h.stop();
+        println!("logcat 已保存: {}", path.display());
+    }
     // 先关镜像再收隧道（镜像清理的摘 hop#2/扫规则都需经隧道；process::exit 不跑析构）
     drop(mirror);
     // 退出前关远程隧道（process::exit 不跑析构，须显式清理：R9/R10）

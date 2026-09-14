@@ -795,7 +795,7 @@ fn ensure_forward(serial: Option<&str>) -> Result<u16> {
 /// （`adb -s <serial> get-state` = "device"）——多台设备同连时其他设备在
 /// 不算"回来了"；未指定设备时任意一台在线即可。
 /// `serial`：目标设备（多设备并行会话用，`None` 回退全局选择）。
-fn device_online(serial: Option<&str>) -> bool {
+pub(crate) fn device_online(serial: Option<&str>) -> bool {
     let adb = || crate::utils::adb_for(serial);
     let any_online = adb()
         .arg("devices")

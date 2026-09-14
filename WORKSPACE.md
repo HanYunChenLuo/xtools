@@ -2,7 +2,7 @@
 
 > 本文件记录跨会话的待办事项（backlog）。每次会话的历史总结见 `SESSION.md`。
 > 完成一项就把状态改为 ✅ 并注明完成的 commit；新增想法随时追加。
-> 最后更新：2026-09-14：**截屏与录屏完成（`feature/screen-capture` 合 main）**——截屏（exec-out screencap 直写 PNG）+ 录屏（scrcpy --no-window --record，SIGINT 封盘）CLI/GUI 全链路真机回归通过（SS3/SS4，含 Ctrl-C 封盘、并行采样同目录、GUI 按钮 AX 目验）；A 节并存缺陷已核销：两个根因分别修复（sweep 跨进程竞态 + 设备端 server 启动偶发中止的自愈重试）
+> 最后更新：2026-09-14 晚：**logcat 支持完成（`feature/logcat` 合 main）**——CLI `--logcat` + GUI 第 4 子 tab「日志」（按包 UID/pid 过滤、断连自动重连、live 视图 ring buffer 级别着色）；真机回归三平台全通（详见 I 节条目）。I 节仅剩「命令行输入」
 
 ## 当前状态速览
 
@@ -110,7 +110,7 @@
 
 > 三条均要求 **SSH 远程后端（`--remote`）下可用**。形态细节（GUI 内嵌 vs 拉起外部、交互式 vs 单条）在实施会话中确认。
 
-- [ ] **logcat 支持**：设备 logcat 抓取/查看接入工具链（按包/时间窗过滤、与采样时间轴对齐等形态待定）。SSH 远程注意：adb 命令天然走 hop#1 隧道，落盘在本机，预期改动小。
+- [x] ~~**logcat 支持**~~（**已完成**，2026-09-14，`feature/logcat` 合 main）：core `logcat.rs`（spawn adb logcat 流式落盘 + 读线程→mpsc→写线程；200ms/64 行合帧事件回调）。按包过滤：A12+ `--uid`（uid 重启耐受，SS4 多用户逗号列表透传）；**A11 无 `--uid`**（实测）降级 `--pid`（限制如实提示）；无包名全机。`-v threadtime -v year -T 0`（设备时钟与采样 CSV 同源对齐）；断连 1s 退避自动重 spawn（文件内 `# respawn` 标记行），设备在线秒死 ×3 判永久失败上报。CLI `--logcat`（并行/独立，退出码同截屏语义）；GUI 第 4 子 tab「日志」（toggle + 级别下拉 + 按包勾选 + live 视图 ring buffer 2000 行级别着色）。**过滤口径热切换**（a4d4b0e）：级别/按包过滤/包名抓取中变更即时生效（同文件续写，restarting 标记防计划内 kill 误计秒死）。真机回归（--remote hppc）：SS3 uid/SS2MAX pid/SS4 多用户 uid/并行采样同目录/无包名全机/adb reconnect 断连重连/两类错误路径 exit 1 全通；GUI AX 实测 tab→填包名→开始→停止 + **热切换全链**（uid→All（3749 行）→Uid 往返，respawn 标记行佐证同文件续写）。**残留目验项**：live 视图行渲染未能 AX 读出（流式期间 webkit AX `entire contents` 整体剪枝，递归遍历可达但逐行读值过慢）——代码走查 + 与 sample/trace 同事件模式，留给用户一眼确认。AX 教训记入 CLAUDE.md
 - [x] ~~**scrcpy 集成**~~（**已完成**，2026-09-11 深夜，`feature/scrcpy-mirror` 合 main + 补丁 `a99dee7`）：形态=拉起外部 scrcpy 窗口（解码/触控归 scrcpy）。core `mirror.rs` + `SshTunnel::add_forward_pinned`（固定端口 hop#2——**实测 adb reverse 在远端 server 拓扑下流回不到 TCP 客户端，不可用**；远程走 `-p P --tunnel-port=P` 双钉同号——**scrcpy 4.x 的 --tunnel-port 只钉本地 connect 口，adb forward 注册口由 -p/port_range 在 server 侧扫描**（v4.1 源码），只传 tunnel-port 时多镜像并存错配必败，用户实撞 SS3+SS4 场景修复）；端口池 27183..=27199 两侧同号空闲扫描。CLI `--mirror`（与采样并行 / 单独镜像-only）；GUI 每设备侧栏「屏幕镜像」toggle + 监护线程事件复位按钮（stopped/closed/failed 三态——scrcpy 正常运行也有 stderr 日志，凭 exit status 分流而非 stderr 非空）。真机：SS3/SS2MAX/SS4 远程全通、双设备并行端口隔离、SIGINT 全清理零残留
 - [ ] **命令行输入**：GUI 提供设备 shell 命令输入能力（交互式 shell or 单条执行，形态待定）。SSH 远程注意：命令通道同 adb 走 hop#1；若做成交互式长连接 shell 则类似 agent 流需 hop#2 式映射。
 - [x] ~~**截屏与录屏**~~（**已完成**，2026-09-12 主体 + 2026-09-14 并存缺陷核销，`feature/screen-capture` 合 main）：截屏=`adb exec-out screencap -p` 直写本机 PNG（PNG 魔数偏移定位剥 stdout 前缀警告——SS4 实踩）；录屏=scrcpy `--no-window --record`（复用镜像隧道双钉同号全链路；停止 SIGINT 优雅封盘 ≤3s 宽限 SIGKILL 兜底；CLI 倒计时从首帧落盘起算；产物核验防假阳性；**启动未建流自动重试一次**——设备端 server 启动偶发中止的自愈，CLI/GUI 同策略，GUI 前端 `retrying` 状态）。CLI `--screenshot`/`--record N`（独立+采样并行同窗口）；GUI 侧栏「屏幕捕获」区截屏按钮+录屏 toggle（AX 目验通过）。真机回归 SS3/SS4 全通，镜像+录屏并存 13 连过

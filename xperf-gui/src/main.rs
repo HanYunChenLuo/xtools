@@ -350,6 +350,9 @@ struct DeviceSession {
     mirror: Arc<Mutex<Option<Arc<xperf_core::mirror::MirrorHandle>>>>,
     /// 录屏会话（scrcpy 无窗口录制；None = 未在录；监护线程负责退出事件与槽位清空）
     recorder: Arc<Mutex<Option<Arc<xperf_core::mirror::MirrorHandle>>>>,
+    /// logcat 抓取会话（None = 未在抓；停止同步完成，无监护线程；
+    /// Error 事件由 core 抓取线程在连续秒死时直接 emit）
+    logcat: Arc<Mutex<Option<xperf_core::logcat::LogcatHandle>>>,
 }
 
 impl DeviceSession {
@@ -363,6 +366,7 @@ impl DeviceSession {
             csv_dir: Arc::new(Mutex::new(None)),
             mirror: Arc::new(Mutex::new(None)),
             recorder: Arc::new(Mutex::new(None)),
+            logcat: Arc::new(Mutex::new(None)),
         }
     }
 }
@@ -1064,6 +1068,133 @@ async fn stop_recording(serial: String, state: State<'_, AppState>) -> Result<St
     }
 }
 
+// ---------- logcat 抓取（core logcat 模块；落盘 /tmp/xperf 会话目录 logcat/） ----------
+
+/// logcat 落盘目录：采样中随会话 CSV 目录的 `logcat/` 子目录（时间轴对照）；
+/// 否则按前端当前包名（或设备级 `device-<serial>` 兜底）新建 `<ts>-<serial>/logcat/`
+fn logcat_dir_for(
+    session: &DeviceSession,
+    serial: &str,
+    package: &str,
+) -> Result<std::path::PathBuf, String> {
+    if let Some((_, dir)) = session.csv_dir.lock().unwrap().clone() {
+        return Ok(dir.join("logcat"));
+    }
+    let base = if package.is_empty() {
+        format!("device-{serial}")
+    } else {
+        validate_package(package)?;
+        package.to_string()
+    };
+    Ok(gui_data_root()
+        .join(base)
+        .join(format!("{}-{}", Local::now().format("%Y%m%d_%H%M%S"), serial))
+        .join("logcat"))
+}
+
+/// 开始 logcat 抓取（「日志」tab toggle）：流式落盘 `logcat/logcat.log`；行内容经
+/// `logcat` 事件批量推前端（`{serial, stage: "lines", lines[]}`；连续秒死放弃时
+/// 推 `{stage: "error", message}`）。filter_package 且包名非空 → 按包过滤
+/// （Android 12+ UID / 11 及以下 pid，限制由 core 报错文案透传）；否则全机抓取。
+/// `level` 为最低级别（V/D/I/W/E/F），空或非法值按 V（全部）
+#[tauri::command]
+async fn start_logcat(
+    serial: String,
+    package: String,
+    filter_package: bool,
+    level: String,
+    state: State<'_, AppState>,
+    app: tauri::AppHandle,
+) -> Result<String, String> {
+    ensure_device_online(&serial)?;
+    let session = state.session(&serial);
+    if session.logcat.lock().map(|l| l.is_some()).unwrap_or(false) {
+        return Err("logcat 已在抓取".into());
+    }
+    let filter = if filter_package && !package.is_empty() {
+        validate_package(&package)?;
+        xperf_core::logcat::resolve_package_filter(Some(&serial), &package)
+            .map_err(|e| e.to_string())?
+    } else {
+        xperf_core::logcat::LogcatFilter::All
+    };
+    let dir = logcat_dir_for(&session, &serial, &package)?;
+    let level_char = level.chars().next();
+    // 事件回调：行批量/错误经 `logcat` 事件推前端（core 已做 200ms/64 行合帧）
+    let s = serial.clone();
+    let app_cb = app.clone();
+    let on_event = Box::new(move |ev: xperf_core::logcat::LogcatEvent| {
+        match ev {
+            xperf_core::logcat::LogcatEvent::Lines(lines) => {
+                let _ = app_cb.emit(
+                    "logcat",
+                    serde_json::json!({ "serial": s, "stage": "lines", "lines": lines }),
+                );
+            }
+            xperf_core::logcat::LogcatEvent::Error(message) => {
+                let _ = app_cb.emit(
+                    "logcat",
+                    serde_json::json!({ "serial": s, "stage": "error", "message": message }),
+                );
+            }
+        }
+    }) as Box<dyn Fn(xperf_core::logcat::LogcatEvent) + Send>;
+    let handle = xperf_core::logcat::start_logcat(
+        Some(&serial),
+        &dir,
+        filter,
+        level_char,
+        Some(on_event),
+    )
+    .map_err(|e| e.to_string())?;
+    let path = handle.path().to_string_lossy().into_owned();
+    *session.logcat.lock().map_err(|e| e.to_string())? = Some(handle);
+    Ok(format!("logcat 抓取中: {}", path))
+}
+
+/// 停止 logcat 抓取（按钮 toggle / 关窗收尾）：杀子进程收线程（同步完成，
+/// 停止后文件即完整可读）
+#[tauri::command]
+async fn stop_logcat(serial: String, state: State<'_, AppState>) -> Result<String, String> {
+    let session = state.session(&serial);
+    let h = session.logcat.lock().map_err(|e| e.to_string())?.take();
+    match h {
+        Some(h) => {
+            let path = h.path().to_string_lossy().into_owned();
+            h.stop();
+            Ok(format!("logcat 已保存: {}", path))
+        }
+        None => Err("logcat 未在抓取".into()),
+    }
+}
+
+/// 热切换 logcat 过滤口径（「日志」tab 的级别下拉 / 按包过滤勾选 / 包名变更时
+/// 前端联动调用）：不打断抓取会话——core `restart` 复用断连重连路径按新参数
+/// 重 spawn，同一文件续写（标记行带新口径）。解析失败（如 A11 未运行）报错，
+/// 旧口径继续抓取不受影响
+#[tauri::command]
+async fn restart_logcat(
+    serial: String,
+    package: String,
+    filter_package: bool,
+    level: String,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    let session = state.session(&serial);
+    let guard = session.logcat.lock().map_err(|e| e.to_string())?;
+    let h = guard.as_ref().ok_or("logcat 未在抓取")?;
+    let filter = if filter_package && !package.is_empty() {
+        validate_package(&package)?;
+        xperf_core::logcat::resolve_package_filter(Some(&serial), &package)
+            .map_err(|e| e.to_string())?
+    } else {
+        xperf_core::logcat::LogcatFilter::All
+    };
+    let desc = format!("{:?}", filter);
+    h.restart(filter, level.chars().next());
+    Ok(format!("logcat 已切换: filter={} level={}（同文件续写）", desc, level))
+}
+
 /// 在线设备清单（顶栏设备 tab 用）：`{devices: [{serial, model, version}]}`
 #[tauri::command]
 fn list_devices() -> Result<serde_json::Value, String> {
@@ -1691,6 +1822,9 @@ fn main() {
             take_screenshot,
             start_recording,
             stop_recording,
+            start_logcat,
+            stop_logcat,
+            restart_logcat,
             export_csv,
             save_baseline,
             compare_baseline,
@@ -1733,6 +1867,12 @@ fn main() {
                             if let Some(h) = r.take() {
                                 h.stop();
                                 any_recorder = true;
+                            }
+                        }
+                        // logcat：杀 adb 子进程收线程（同步快速完成，无额外等待）
+                        if let Ok(mut l) = s.logcat.lock() {
+                            if let Some(h) = l.take() {
+                                h.stop();
                             }
                         }
                     }

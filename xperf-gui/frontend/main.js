@@ -39,6 +39,8 @@ function uiColors() {
 // 超过 2×CAP 时每 2 取 1 原地抽稀：保完整时间范围，分辨率随会话时长降级；
 // 内存封顶 ~30k 点/series（全分辨率全量数据在流式 CSV 落盘里，不受影响）。
 const SERIES_CAP = 30000;
+// logcat 视图行数上限（超出从头部修剪；全量数据在落盘 logcat.log，视图仅供实时查看）
+const LOGCAT_VIEW_CAP = 2000;
 function pushCapped(arr, item) {
   if (arr.length >= 2 * SERIES_CAP) {
     let w = 0;
@@ -214,6 +216,10 @@ class DeviceSession {
     this.restartTimer = null;
     this.mirrorRunning = false;
     this.recording = false;
+    // logcat 抓取（「日志」tab）：running=抓取中；paused=视图暂停滚动（不落盘）；
+    // 视图为 ring buffer（超 LOGCAT_VIEW_CAP 行从头部修剪，防长会话 DOM 膨胀卡顿）
+    this.logcatRunning = false;
+    this.logcatPaused = false;
     // 同型号多机并存时 tab 标签附 serial 尾 4 位消歧（App.refreshTabLabels 维护）
     this.dupModel = false;
 
@@ -468,6 +474,96 @@ class DeviceSession {
     _diag('[' + this.serial + '] record ' + stage + (path ? ': ' + path : ''));
   }
 
+  // ---- logcat 抓取（「日志」tab；core logcat 模块流式落盘 + 批量行事件） ----
+  async toggleLogcat() {
+    const btn = this.el('logcat-btn');
+    btn.disabled = true;
+    try {
+      if (!this.logcatRunning) {
+        const pkg = this.el('package-input').value.trim();
+        const msg = await invoke('start_logcat', {
+          serial: this.serial,
+          package: pkg,
+          filterPackage: this.el('logcat-bypkg').checked,
+          level: this.el('logcat-level').value,
+        });
+        this.logcatRunning = true;
+        btn.textContent = '停止抓取';
+        this.el('logcat-path').textContent = msg.replace(/^logcat 抓取中: /, '');
+        this.setStatus(msg);
+        _diag('[' + this.serial + '] logcat: started');
+      } else {
+        const msg = await invoke('stop_logcat', { serial: this.serial });
+        this.logcatRunning = false;
+        btn.textContent = '开始抓取';
+        this.setStatus(msg);
+        _diag('[' + this.serial + '] logcat: stopped');
+      }
+    } catch (e) {
+      this.setStatus('logcat 失败: ' + (e && e.message ? e.message : e));
+      _diag('[' + this.serial + '] logcat ERROR: ' + (e && e.message ? e.message : JSON.stringify(e)));
+      this.logcatRunning = false;
+      btn.textContent = '开始抓取';
+    }
+    btn.disabled = false;
+  }
+
+  // logcat 过滤口径热切换（级别下拉 / 按包过滤勾选 / 包名变更）：抓取中变更即
+  // 调 restart_logcat（同文件续写、不打断会话）；未在抓取时不动作（下次开始
+  // 按当前值读取）。包名变更仅在按包过滤勾选时有意义（全机抓取与包名无关）
+  async restartLogcatIfRunning() {
+    if (!this.logcatRunning) return;
+    const byPkg = this.el('logcat-bypkg').checked;
+    const pkg = this.el('package-input').value.trim();
+    try {
+      const msg = await invoke('restart_logcat', {
+        serial: this.serial,
+        package: pkg,
+        filterPackage: byPkg,
+        level: this.el('logcat-level').value,
+      });
+      this.setStatus(msg);
+      _diag('[' + this.serial + '] logcat: restarted (' + (byPkg ? 'pkg=' + pkg : 'all') + ', level=' + this.el('logcat-level').value + ')');
+    } catch (e) {
+      // 解析失败（如 A11 按包过滤但应用未运行）：旧口径继续抓，如实提示
+      this.setStatus('logcat 切换失败（旧口径继续）: ' + (e && e.message ? e.message : e));
+      _diag('[' + this.serial + '] logcat restart ERROR: ' + (e && e.message ? e.message : JSON.stringify(e)));
+    }
+  }
+
+  // logcat 事件（lines=批量日志行 / error=连续秒死放弃）：lines 追加到视图
+  // （ring buffer 修剪 + 级别着色 + 自动滚动）；error 复位按钮并提示
+  handleLogcatEvent(stage, lines, message) {
+    if (stage === 'lines') {
+      this.appendLogcatLines(lines || []);
+    } else if (stage === 'error') {
+      this.logcatRunning = false;
+      const btn = this.el('logcat-btn');
+      btn.textContent = '开始抓取';
+      btn.disabled = false;
+      this.setStatus('logcat 抓取中止: ' + (message || '未知原因'));
+      _diag('[' + this.serial + '] logcat error: ' + message);
+    }
+  }
+
+  // 追加日志行到视图：threadtime 行解析级别字符着色（A11 行首带时区前缀故
+  // 正则允许 `+0800 ` 前导）；超 LOGCAT_VIEW_CAP 从头部修剪；未暂停时滚到底部
+  appendLogcatLines(lines) {
+    if (!lines.length) return;
+    const view = this.el('logcat-view');
+    const frag = document.createDocumentFragment();
+    for (const line of lines) {
+      const div = document.createElement('div');
+      const m = line.match(/^(?:\+\d{4}\s+)?\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\.\d{3}\s+\d+\s+\d+\s+([VDIWEF])\s/);
+      div.className = 'log-line' + (m ? ' lv-' + m[1] : '');
+      div.textContent = line;
+      frag.appendChild(div);
+    }
+    view.appendChild(frag);
+    while (view.childElementCount > LOGCAT_VIEW_CAP) view.removeChild(view.firstChild);
+    if (!this.logcatPaused) view.scrollTop = view.scrollHeight;
+  }
+
   // ---- 状态栏（顶栏显示当前激活设备的状态；非激活设备暂存自己的状态） ----
   setStatus(text) {
     this.statusText = text;
@@ -534,12 +630,13 @@ class DeviceSession {
       '<span class="rate-label">实际周期</span> ' + parts.join(' · ');
   }
 
-  // ---- 子 tab 切换（性能指标 / Perfetto / Simpleperf；侧栏公共模块三页常驻） ----
+  // ---- 子 tab 切换（性能指标 / Perfetto / Simpleperf / 日志；侧栏公共模块常驻） ----
   switchTab(which) {
     const perf = which === 'perf';
     this.el('perf-content').classList.toggle('hidden', !perf);
     this.el('trace-content').classList.toggle('hidden', which !== 'trace');
     this.el('stack-content').classList.toggle('hidden', which !== 'stack');
+    this.el('logcat-content').classList.toggle('hidden', which !== 'logcat');
     for (const t of this.els('subtab')) t.classList.toggle('active', t.dataset.tab === which);
     // 图表容器显隐变化后尺寸需刷新
     if (perf) this.refreshChartSizes();
@@ -1105,6 +1202,22 @@ class DeviceSession {
     this.el('mirror-btn').addEventListener('click', () => this.toggleMirror());
     this.el('shot-btn').addEventListener('click', () => this.takeScreenshot());
     this.el('record-btn').addEventListener('click', () => this.toggleRecord());
+    this.el('logcat-btn').addEventListener('click', () => this.toggleLogcat());
+    this.el('logcat-clear-btn').addEventListener('click', () => { this.el('logcat-view').innerHTML = ''; });
+    // 级别/按包过滤变更热切换（抓取中即时生效，同文件续写）；包名变更仅在勾选时有意义
+    this.el('logcat-level').addEventListener('change', () => this.restartLogcatIfRunning());
+    this.el('logcat-bypkg').addEventListener('change', () => this.restartLogcatIfRunning());
+    this.el('package-input').addEventListener('change', () => {
+      if (this.el('logcat-bypkg').checked) this.restartLogcatIfRunning();
+    });
+    this.el('logcat-pause-btn').addEventListener('click', (e) => {
+      this.logcatPaused = !this.logcatPaused;
+      e.target.textContent = this.logcatPaused ? '恢复滚动' : '暂停滚动';
+      if (!this.logcatPaused) {
+        const v = this.el('logcat-view');
+        v.scrollTop = v.scrollHeight;
+      }
+    });
     this.el('launch-btn').addEventListener('click', () => this.launchOrRestart('打开'));
     this.el('restart-btn').addEventListener('click', () => this.launchOrRestart('重启'));
     this.el('stop-app-btn').addEventListener('click', () => this.stopApp());
@@ -1365,6 +1478,11 @@ listen('mirror', (e) => {
 listen('record', (e) => {
   const s = app.sessions.get(e.payload.serial);
   if (s) s.handleRecordEvent(e.payload.stage, e.payload.message, e.payload.path);
+});
+// logcat 行批量/错误事件（每设备；payload {serial, stage, lines|message}）
+listen('logcat', (e) => {
+  const s = app.sessions.get(e.payload.serial);
+  if (s) s.handleLogcatEvent(e.payload.stage, e.payload.lines, e.payload.message);
 });
 listen('devices-changed', (e) => app.onDevicesChanged(e.payload));
 // 火焰图脚本更新进度（全局操作，路由到激活设备的状态栏；进度条按完成文件数铺开）

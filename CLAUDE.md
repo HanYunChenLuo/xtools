@@ -311,6 +311,19 @@ hop#2: 本机 P_loc → 远端 adb forward 分配端口（agent 事件流，每�
 
 **生命周期**：`MirrorHandle`（child Arc + stderr 有界尾行 drain 线程 + hop#2 端口 + 幂等 cleanup）；`wait_exit` 阻塞等退出并返回 `MirrorExit::{Stopped,Closed,Failed}`——**scrcpy 正常运行也往 stderr 打启动日志，不能凭 stderr 非空判异常**（真机踩坑），靠 exit status + 主动停止标志分流。清理 = 杀子进程 → 摘 hop#2 → `sweep_scrcpy_rules`（按 serial 清扫残留 `localabstract:scrcpy-*` 规则；scrcpy 被 SIGKILL 无自清机会；注意 scrcpy 正常建立连接后会自己撤掉 forward 规则，`forward --list` 看不到属正常）。CLI：`--mirror` 与采样/深挖并行（启动失败不阻断采样），或单独使用（无 --package，持续到 Ctrl-C/关窗）；清理顺序 drop(mirror) 先于 shutdown_remote（摘 hop#2 需经隧道）。GUI：每设备 toggle 按钮 + 监护线程（wait_exit → 清槽位 + emit `mirror {serial, stage: stopped|closed|failed}` 复位按钮）；关窗收尾停全部镜像再收远程隧道。
 
+### logcat 抓取（`xperf-core/src/logcat.rs`，CLI `--logcat` / GUI 每设备第 4 子 tab「日志」）
+
+设备日志抓取/查看，回答"性能异常时刻设备上发生了什么"（崩溃/ANR/系统事件与采样时间轴对照）。形态：host 侧 spawn `adb logcat` 流式子进程（标准 adb 流，SSH 远程走 hop#1 零改动），读线程 → mpsc → 写线程流式落盘（逐行 flush，崩溃只丢尾部）；GUI 另经事件回调 200ms/64 行合帧 emit `logcat {serial, stage: lines|error, …}` 推 live 视图。
+
+- **按包过滤**：Android 12+ `logcat --uid=`（uid 经 `pm list package -U` 解析，SS4 多用户返回逗号列表如 `10220,99910220` 原样透传；uid 不随进程重启变化，崩溃/重启日志不丢）；**Android 11 无 `--uid`**（SS2MAX 实测 `Unknown option`）降级 `--pid=<pidof 首 pid>`——限制：重启后新进程日志缺失、只覆盖首进程，调用方如实提示；包未安装 / A11 应用未运行均报错。无包名（或 GUI 不勾「按包过滤」）= 全机抓取
+- **行格式** `-v threadtime -v year -T 0`（不回放历史；A11 上 `-T 0` 降级为 1 行 backlog + stderr 告警，stdout 不受影响）；threadtime 是设备时钟，与采样 CSV 的 Timestamp（agent 设备端 epoch）同源天然对齐
+- **断连恢复**：adb logcat EOF → 1s 退避自动重 spawn（与 `reconnect_agent` 语义一致），文件内追加 `# xperf logcat respawn` 标记行（携带当前口径）；设备在线但子进程秒死（<3s）连续 3 次判永久性失败（参数错误类），经 `LogcatEvent::Error` 上报后退出（防静默死循环）
+- **过滤口径热切换**（`LogcatHandle::restart`，2026-09-14）：抓取中变更级别/按包过滤不打断会话——共享 config 槽更新 + kill 子进程复用断连重连路径按新参数重 spawn（同一文件续写，标记行带新口径；解析失败旧口径继续如实提示）。**restarting 标记防计划内 kill 误计秒死**（否则快速连切 3 次会触发永久失败误杀抓取线程）；GUI 前端级别下拉/按包勾选/包名变更 change 联动触发
+- **CLI `--logcat`**：与采样并行（窗口覆盖采样全程，随采样收尾停止）或独立使用（Ctrl-C 停止）；落盘 `<pkg>/<ts>/logcat/logcat.log`（无包名 `device-<serial>/<ts>/logcat/`）；退出码语义同截屏/录屏（独立失败 exit 1，并行失败只告警）
+- **GUI**：tab toolbar = 开始/停止 toggle + 级别下拉（V~E，`*:W` 过滤符）+ 按包过滤勾选（取侧栏包名）+ 暂停滚动 + 清空（仅视图）；live 视图 ring buffer 2000 行（防 DOM 膨胀）+ 级别着色（正则兼容 A11 行首 `+0800 ` 时区前缀）；落盘采样中随会话 CSV 目录 `logcat/`，否则 `<pkg|device-serial>/<ts>-<serial>/logcat/`；停止同步完成（kill+join，无监护线程），关窗 CloseRequested 统一 stop
+- **AX 目验教训（2026-09-14）**：① 流式渲染（尤其全机洪泛 ~190 行/s）期间 webkit AX 树会整体剪枝且**粘性不恢复**——此时 `entire contents` 枚举返回空/死引用，**须改递归 `UI elements of` 逐层遍历**（同一实例上 entire contents 全空但递归遍历完整可达）；② AX `set value` 写文本框须先 `set focused of el to true`，否则值不落 DOM input（曾致按包过滤静默退化为全机抓取——落盘目录是 device-* 而非 pkg 名即为判据）
+
+
 ### perfetto 深挖模式（`--trace N`，xperf-core/src/trace.rs，CLI 与 GUI 共用）
 
 「录制-分析」模式，与实时采样互补：采样回答"什么时候高"，trace 回答"为什么高"。CLI 侧可与采样指标并行（`--cpu --trace 10`：后台线程录制 + 采样限时同窗口，到点自动结束）或单独使用（无指标 flag 时只录 trace）；GUI 侧深挖按钮与采样会话并行（采样不限时，窗口对照靠时间戳）。core 模块不打印不建目录：输出目录由调用方传入，报告以文本返回（CLI println / GUI 走 Tauri `trace` 事件 `{stage: recording|progress|recorded|done|error, message}`——progress 为每秒录制进度（elapsed/Ns，core `record` 的 `progress` 回调），done 的 message 即完整报告）。
@@ -383,6 +396,7 @@ hop#2: 本机 P_loc → 远端 adb forward 分配端口（agent 事件流，每�
 | simpleperf 函数热点（--stack N） | 录制完成即在设备端生成三视图并拉回 | `/tmp/xperf/<pkg>/<ts>/stack/{*.data, simpleperf_report.txt}` |
 | simpleperf 浏览器火焰图（GUI 按钮） | 首次点击时渲染生成（复用不重渲染） | `/tmp/xperf/<pkg>/<ts>/stack/*.html`（同目录同名） |
 | 截屏/录屏（CLI `--screenshot`/`--record N`、GUI 按钮） | 截屏即时落盘；录屏停止封盘后落盘 | `<pkg>/<ts>/capture/{shot,record}_*.png/mp4`（无包名 `device-<serial>/<ts>/capture/`；GUI 采样中随会话目录 `capture/`） |
+| logcat（CLI `--logcat`、GUI「日志」tab） | 抓取期间流式落盘（逐行 flush） | `<pkg>/<ts>/logcat/logcat.log`（无包名 `device-<serial>/<ts>/logcat/`；GUI 采样中随会话目录 `logcat/`，否则 `<ts>-<serial>` 目录） |
 
 - 内存中的时序序列只服务退出图表：超过 2×30k 点时每 2 取 1 原地抽稀（`CHART_SERIES_CAP`，保完整时间范围、分辨率随运行时长自适应降级）；CSV 始终全量。
 - `CpuTimeSeriesData.top_threads` 已无读者，CLI agent 路径不再写入（线程明细走 thread_time_series + 流式 CSV）。
