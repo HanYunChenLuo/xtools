@@ -114,6 +114,12 @@ impl LogcatHandle {
         self.events_paused.store(false, Ordering::SeqCst);
     }
 
+    /// 抓取是否已终止（写线程退出：连续秒死放弃 / 已 stop）。GUI 重启会话前探测，
+    /// 避免死句柄占槽位导致「已在抓取」误拒（error 事件可能晚到/丢失，不能只靠前端复位）
+    pub fn is_done(&self) -> bool {
+        self.join.as_ref().map(|j| j.is_finished()).unwrap_or(true)
+    }
+
     /// 停止抓取：置停止标志 + 杀子进程（读线程随 EOF 退出）+ join 写线程。
     /// 幂等；与 Drop 共用同一路径
     pub fn stop(mut self) {

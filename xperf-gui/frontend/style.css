@@ -177,8 +177,10 @@ body { font-family: -apple-system, "Segoe UI", "Noto Sans CJK SC", "PingFang SC"
 .trace-report-box pre { white-space: pre-wrap; font-size: 12px; line-height: 1.5; margin: 0; color: var(--text); }
 
 /* ---------- 日志（logcat）tab ---------- */
-.logcat-view-box { padding: 6px 10px; }
-.logcat-view { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: 11.5px; line-height: 1.45; white-space: pre-wrap; word-break: break-all; }
+/* 滚动容器必须是 .logcat-view 本身（renderLogcatLines 的 scrollTop 设在它上）；
+   外层 box 只做圆角背景，overflow hidden 防双层滚动条 */
+.logcat-view-box { padding: 6px 10px; overflow: hidden; }
+.logcat-view { overflow-y: auto; height: 100%; font-family: "SF Mono", Menlo, Consolas, monospace; font-size: 11.5px; line-height: 1.45; white-space: pre-wrap; word-break: break-all; }
 .logcat-view .log-line { color: var(--text-mute); }
 .logcat-view .lv-V { color: var(--text-dim); }
 .logcat-view .lv-D { color: var(--sky); }

@@ -494,6 +494,10 @@ class DeviceSession {
         });
         this.logcatRunning = true;
         btn.textContent = '停止抓取';
+        // 新会话隔离：清上一会话的视图/缓冲（落盘文件按会话分目录，旧日志在那）
+        this.logcatBuf = [];
+        this.logcatDirty = false;
+        this.el('logcat-view').innerHTML = '';
         this.el('logcat-path').textContent = msg.replace(/^logcat 抓取中: /, '');
         this.setStatus(msg);
         this.syncLogcatEvents(); // 可见性同步（启动必在日志页，正常 resume/no-op）
@@ -549,6 +553,9 @@ class DeviceSession {
       btn.disabled = false;
       this.setStatus('logcat 抓取中止: ' + (message || '未知原因'));
       _diag('[' + this.serial + '] logcat error: ' + message);
+      // 兜底清后端槽位（stop 幂等：写线程已退出，kill/join 立即返回）——
+      // 治本在后端 start 的 is_done 探测（本事件可能晚到/丢失）
+      invoke('stop_logcat', { serial: this.serial }).catch(() => {});
     }
   }
 
@@ -591,9 +598,11 @@ class DeviceSession {
     if (!this.logcatPaused) view.scrollTop = view.scrollHeight;
   }
 
-  // 切回日志页/设备页时重放非可见期间积累的行（一次性 DocumentFragment 重建）
+  // 切回日志页/设备页时重放非可见期间积累的行（一次性 DocumentFragment 重建）。
+  // 不可见时跳过（设备页激活但日志 tab 隐藏的中间态不重建 DOM，切到日志页再放）
   renderLogcatIfDirty() {
     if (!this.logcatDirty) return;
+    if (!(app.active === this.serial && this.activeTab === 'logcat')) return;
     this.logcatDirty = false;
     const view = this.el('logcat-view');
     view.innerHTML = '';

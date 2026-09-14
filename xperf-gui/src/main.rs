@@ -1108,8 +1108,16 @@ async fn start_logcat(
 ) -> Result<String, String> {
     ensure_device_online(&serial)?;
     let session = state.session(&serial);
-    if session.logcat.lock().map(|l| l.is_some()).unwrap_or(false) {
-        return Err("logcat 已在抓取".into());
+    {
+        let mut slot = session.logcat.lock().map_err(|e| e.to_string())?;
+        match slot.as_ref() {
+            Some(h) if !h.is_done() => return Err("logcat 已在抓取".into()),
+            // 死句柄（连续秒死放弃后写线程已退出）：清槽接管，防止永久「已在抓取」
+            Some(_) => {
+                slot.take();
+            }
+            None => {}
+        }
     }
     let filter = if filter_package && !package.is_empty() {
         validate_package(&package)?;
