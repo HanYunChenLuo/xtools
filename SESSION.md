@@ -6,6 +6,12 @@
 > 新会话开始时可先读本文件了解近期上下文。
 
 ---
+## 2026-09-14 深夜(3) — logcat review 第二轮（0771155）
+
+**任务**：继续 review（core 线程逻辑 / GUI 后端 / CLI / 文档）。修复 2 项：CLI 混合独立模式（`--screenshot --logcat`）logcat 失败补 `capture_failed` → exit 1（对齐 record/screenshot 语义；并行采样模式保持「失败只告警」不置码）；前端 `syncLogcatEvents` catch 静默吞错改 diag（IPC 掉线时后端暂停态失同步会致视图静默停滞，幂等重发自愈）。**记录不修**：① restart 与断连重连的极窄竞态（`restarting` 标记可能被紧随的自然断连消费，仅少计一次秒死，无功能错误——修复需序列化两路径，复杂度不值）；② `logcat_dir_for` 与 `capture_dir_for` 结构相似（遵循既有模式不过早抽象）；③ spawn 失败的无限重试循环（adb 恢复即自愈，每秒一次空尝试开销可忽略）。**核对无误**：Eof 分支锁时序（slot 锁内 adb 调用与 stop_inner 无死锁）、`emit_lines` 闭包借用、`is_done` 与 stop/start 竞态、`--trace/--stack` 并行窗口语义（logcat 跟随采样不限时）、关窗清理顺序。core 119 / CLI 5 / clippy / doc 零警告。
+
+---
+
 ## 2026-09-14 深夜(2) — logcat UI review 修复（0ce8b45）
 
 **任务**：用户要求 review 代码与文档（重点 UI）。发现并修复 4 项：**A 滚动失效**（`.logcat-view` 无 overflow，`view.scrollTop` 是 no-op，滚动实际发生在外层 trace-report-box——「暂停滚动/自动滚底」从未生效；改为 view 自滚动 overflow-y:auto+height:100%）；**B error 槽位死锁**（core 秒死放弃后 handle 滞留 GUI 槽位，再点开始永远「已在抓取」；core 加 `is_done()`，start 探测死句柄清槽接管 + 前端 error 兜底调 stop_logcat）；**C 会话隔离**（停止后再开始视图/buf 残留旧会话行；start 成功后清）；**D 重放判定**（设备页激活但日志 tab 隐藏时也重建 DOM；renderLogcatIfDirty 加可见性前置）。核对无误项：restart 持锁 adb 数百 ms（无死锁，可接受）、start 竞态（旧 handle drop 即 kill 无泄漏 + 前端 disabled 防抖）、stop/pending/Error 交互、CSS 色板主题跟随。core 119+GUI 10 全绿，AX 冒烟无回归。
