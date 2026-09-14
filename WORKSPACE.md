@@ -2,7 +2,7 @@
 
 > 本文件记录跨会话的待办事项（backlog）。每次会话的历史总结见 `SESSION.md`。
 > 完成一项就把状态改为 ✅ 并注明完成的 commit；新增想法随时追加。
-> 最后更新：2026-09-11 深夜：**scrcpy 屏幕镜像集成合 main**（`feature/scrcpy-mirror`）——I 节 scrcpy 项核销：core `mirror.rs`（外部窗口拉起 + 远程固定端口 hop#2；reverse 实测在远端 server 拓扑下不可用，须 `--tunnel-port` + 同号 hop#2）+ CLI `--mirror`（并行/镜像-only 两模式）+ GUI 每设备侧栏 toggle 按钮（stopped/closed/failed 三态事件）。真机回归全通（SS3/SS2MAX/SS4 远程 + 双设备并行 + 采样并行）
+> 最后更新：2026-09-14：**截屏与录屏完成（`feature/screen-capture` 合 main）**——截屏（exec-out screencap 直写 PNG）+ 录屏（scrcpy --no-window --record，SIGINT 封盘）CLI/GUI 全链路真机回归通过（SS3/SS4，含 Ctrl-C 封盘、并行采样同目录、GUI 按钮 AX 目验）；A 节并存缺陷已核销：两个根因分别修复（sweep 跨进程竞态 + 设备端 server 启动偶发中止的自愈重试）
 
 ## 当前状态速览
 
@@ -26,7 +26,7 @@
 
 ## A. 已知缺陷
 
-（无——两轮 code review 的严重/一般问题已全部修复）
+（空——镜像+录屏并存缺陷 2026-09-14 核销，见 SESSION 当日条目）
 
 ## B. 指标覆盖
 
@@ -113,7 +113,7 @@
 - [ ] **logcat 支持**：设备 logcat 抓取/查看接入工具链（按包/时间窗过滤、与采样时间轴对齐等形态待定）。SSH 远程注意：adb 命令天然走 hop#1 隧道，落盘在本机，预期改动小。
 - [x] ~~**scrcpy 集成**~~（**已完成**，2026-09-11 深夜，`feature/scrcpy-mirror` 合 main + 补丁 `a99dee7`）：形态=拉起外部 scrcpy 窗口（解码/触控归 scrcpy）。core `mirror.rs` + `SshTunnel::add_forward_pinned`（固定端口 hop#2——**实测 adb reverse 在远端 server 拓扑下流回不到 TCP 客户端，不可用**；远程走 `-p P --tunnel-port=P` 双钉同号——**scrcpy 4.x 的 --tunnel-port 只钉本地 connect 口，adb forward 注册口由 -p/port_range 在 server 侧扫描**（v4.1 源码），只传 tunnel-port 时多镜像并存错配必败，用户实撞 SS3+SS4 场景修复）；端口池 27183..=27199 两侧同号空闲扫描。CLI `--mirror`（与采样并行 / 单独镜像-only）；GUI 每设备侧栏「屏幕镜像」toggle + 监护线程事件复位按钮（stopped/closed/failed 三态——scrcpy 正常运行也有 stderr 日志，凭 exit status 分流而非 stderr 非空）。真机：SS3/SS2MAX/SS4 远程全通、双设备并行端口隔离、SIGINT 全清理零残留
 - [ ] **命令行输入**：GUI 提供设备 shell 命令输入能力（交互式 shell or 单条执行，形态待定）。SSH 远程注意：命令通道同 adb 走 hop#1；若做成交互式长连接 shell 则类似 agent 流需 hop#2 式映射。
-- [ ] **截屏与录屏**：设备截屏（screencap）与录屏（screenrecord，或复用 scrcpy 录制通道 `--record`？形态待定）接入工具链。SSH 远程注意：截屏/录屏产物 pull 回本机（hop#1 天然承载）；若走 scrcpy `--record` 录制则与镜像同链路（端口双钉 + hop#2）。
+- [x] ~~**截屏与录屏**~~（**已完成**，2026-09-12 主体 + 2026-09-14 并存缺陷核销，`feature/screen-capture` 合 main）：截屏=`adb exec-out screencap -p` 直写本机 PNG（PNG 魔数偏移定位剥 stdout 前缀警告——SS4 实踩）；录屏=scrcpy `--no-window --record`（复用镜像隧道双钉同号全链路；停止 SIGINT 优雅封盘 ≤3s 宽限 SIGKILL 兜底；CLI 倒计时从首帧落盘起算；产物核验防假阳性；**启动未建流自动重试一次**——设备端 server 启动偶发中止的自愈，CLI/GUI 同策略，GUI 前端 `retrying` 状态）。CLI `--screenshot`/`--record N`（独立+采样并行同窗口）；GUI 侧栏「屏幕捕获」区截屏按钮+录屏 toggle（AX 目验通过）。真机回归 SS3/SS4 全通，镜像+录屏并存 13 连过
 
 ---
 

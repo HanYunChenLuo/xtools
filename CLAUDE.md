@@ -295,9 +295,17 @@ hop#2: 本机 P_loc → 远端 adb forward 分配端口（agent 事件流，每�
 
 ---
 
-### scrcpy 屏幕镜像（`xperf-core/src/mirror.rs`，CLI `--mirror` / GUI 侧栏「屏幕镜像」按钮）
+### scrcpy 屏幕镜像与录屏（`xperf-core/src/mirror.rs`，CLI `--mirror`/`--record N` / GUI 侧栏「屏幕捕获」区）
 
-形态：**拉起外部 scrcpy 窗口**（视频解码/触控注入由 scrcpy 客户端承担，本工具只管进程与隧道生命周期），不做 GUI 内嵌视频。CLI 与 GUI 共用 core `mirror` 模块；依赖本机安装 scrcpy（`find_scrcpy`：PATH → `/opt/homebrew/bin` 等常见位置兜底——GUI 从 Finder 启动时 PATH 不含 homebrew；scrcpy-server 由客户端内嵌随版本走，不需额外 vendor）。
+形态：**拉起外部 scrcpy 进程**（镜像=窗口视频+触控；录屏=`--no-window --record=<mp4>` 无窗口纯录制，解码/mux 归 scrcpy 客户端，本工具只管进程与隧道生命周期）。两模式共享 `spawn_scrcpy` 启动路径（`ScrcpyMode::{Mirror, Record}`）；依赖本机安装 scrcpy（`find_scrcpy`：PATH → `/opt/homebrew/bin` 等常见位置兜底——GUI 从 Finder 启动时 PATH 不含 homebrew；scrcpy-server 由客户端内嵌随版本走，不需额外 vendor）。
+
+**录屏与镜像的差异点**：①停止须 **SIGINT 优雅封盘**（MP4 须 finalize，SIGKILL 产坏文件——`stop()` 发 SIGINT + `sigint_at` 去重 + `wait_exit` 3s 超时 SIGKILL 兜底 + Drop 路径原地宽限）；②CLI `--record N` 倒计时从**产物文件出现**起算（spawn/推 server 启动延迟可达 ~8s，不吃进录制窗口）；③收尾**产物核验**——scrcpy 可优雅退出但未产出文件（视频流未建立），CLI/GUI 都校验 `path.is_file()` 防「已保存」假阳性；④`sweep_scrcpy_rules` 两层并发保护：跳过本进程 hop#2 映射表端口（`SshTunnel::mapped_remote_ports`）+ 远程模式下跳过**本机端口被占用**的规则（占用 = 另一进程活会话持有 hop#2 监听——**跨进程**保护；本地模式判据不适用，规则监听器在本机 adb server 上恒占用）；⑤**录屏启动失败自愈重试一次**（CLI 录屏线程 / GUI 监护线程同策略，GUI 前端有 `retrying` 状态事件）：设备端 scrcpy-server 启动期存在平台级偶发中止（2026-09-14 SS3 实测 ~15%——server 进程在绑定 abstract socket 前死亡、stderr 零输出，客户端报 "Server connection failed"；与隧道/端口/注册无关，wrapper 证据链见 SESSION 当日条目）；**勘察纪律**：探测 hop#2/forward 端口的任何 connect（含 `nc -z`）都会被设备端 server accept 占槽（顺序 accept 无对端认证，首个连接=视频流），属于投毒操作。
+
+### 截屏（`xperf-core/src/capture.rs`，CLI `--screenshot` / GUI「截屏」按钮）
+
+`adb exec-out screencap -p` 二进制直写本机 PNG：零设备端残留、非 root 可用、SSH 远程经 hop#1 天然承载零改动。落盘前做 **PNG 魔数偏移定位**（不是 starts_with——SS4/A16 screencap 会把 `[Warning] Multiple displays…` 打到 stdout 前缀，剥前缀后写纯 PNG）。产物命名 `shot_<ts>.png`。
+
+**截屏/录屏落盘目录**：CLI 有包名随采样会话目录 `<pkg>/<ts>/capture/`（时间轴对照），无包名落 `device-<serial>/<ts>/capture/`；GUI 采样中随会话 CSV 目录的 `capture/`，否则 `<pkg>/<ts>-<serial>/capture/`（无包名落 `device-<serial>`）。
 
 **SSH 远程链路（2026-09-11 实测锁定）**：scrcpy 默认的 `adb reverse` 在远端 server 拓扑下**不可用**——reverse 规则注册成功但设备侧连接回不到经隧道的 TCP 客户端（nc 对照实验：规则在、连接零到达）。因此远程必须 forward 模式，且**注册口与连接口同号钉死**为 P（hop#2 `SshTunnel::add_forward_pinned`，local==remote 同号映射）：**scrcpy 4.x 的 `--tunnel-port` 只钉本地 connect 口**，`adb forward` 注册口由 `-p/--port`（port_range，默认 27183:27199）在 **adb server 侧**扫描决定（v4.1 源码：`adb_tunnel.c` 扫 port_range、`server.c` connect 用 tunnel_port）——只传 `--tunnel-port` 时两端口在多镜像并存下错配必败（"Server connection failed"，用户实撞：SS3 在跑时 SS4 起不来；此前单镜像/并行测试通过纯属两侧扫描恰好对齐的运气）。故传 `-p P --tunnel-port=P`（`-p` 单口即 range {P,P}，注册/连接双钉同号，老版本 scrcpy 语义兼容）。P 须在**本机与远端两侧同时空闲**（端口池 27183..=27199 扫描；远端忙端口从 `forward --list` 读全集——forward 端口是 server 全局资源跨 serial）。本地模式零隧道参数（reverse 默认路径直接用）。
 
@@ -374,6 +382,7 @@ hop#2: 本机 P_loc → 远端 adb forward 分配端口（agent 事件流，每�
 | perfetto 深挖（--trace N） | 录制完成即拉回；分析随即落盘 | `/tmp/xperf/<pkg>/<ts>/trace/{*.pftrace, trace_analysis.txt, trace_queries.sql}` |
 | simpleperf 函数热点（--stack N） | 录制完成即在设备端生成三视图并拉回 | `/tmp/xperf/<pkg>/<ts>/stack/{*.data, simpleperf_report.txt}` |
 | simpleperf 浏览器火焰图（GUI 按钮） | 首次点击时渲染生成（复用不重渲染） | `/tmp/xperf/<pkg>/<ts>/stack/*.html`（同目录同名） |
+| 截屏/录屏（CLI `--screenshot`/`--record N`、GUI 按钮） | 截屏即时落盘；录屏停止封盘后落盘 | `<pkg>/<ts>/capture/{shot,record}_*.png/mp4`（无包名 `device-<serial>/<ts>/capture/`；GUI 采样中随会话目录 `capture/`） |
 
 - 内存中的时序序列只服务退出图表：超过 2×30k 点时每 2 取 1 原地抽稀（`CHART_SERIES_CAP`，保完整时间范围、分辨率随运行时长自适应降级）；CSV 始终全量。
 - `CpuTimeSeriesData.top_threads` 已无读者，CLI agent 路径不再写入（线程明细走 thread_time_series + 流式 CSV）。

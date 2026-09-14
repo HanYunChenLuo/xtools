@@ -213,6 +213,7 @@ class DeviceSession {
     this.currentStackPath = null;
     this.restartTimer = null;
     this.mirrorRunning = false;
+    this.recording = false;
     // 同型号多机并存时 tab 标签附 serial 尾 4 位消歧（App.refreshTabLabels 维护）
     this.dupModel = false;
 
@@ -398,6 +399,73 @@ class DeviceSession {
       return;
     }
     _diag('[' + this.serial + '] mirror ' + stage + (message ? ': ' + message : ''));
+  }
+
+  // ---- 截屏与录屏（core capture/mirror；产物落 /tmp/xperf 会话目录 capture/） ----
+  async takeScreenshot() {
+    const btn = this.el('shot-btn');
+    btn.disabled = true;
+    try {
+      const pkg = this.el('package-input').value.trim();
+      const path = await invoke('take_screenshot', { serial: this.serial, package: pkg });
+      this.setStatus('截屏已保存: ' + path);
+      _diag('[' + this.serial + '] shot: ' + path);
+    } catch (e) {
+      this.setStatus('截屏失败: ' + (e && e.message ? e.message : e));
+      _diag('[' + this.serial + '] shot ERROR: ' + (e && e.message ? e.message : JSON.stringify(e)));
+    }
+    btn.disabled = false;
+  }
+
+  async toggleRecord() {
+    const btn = this.el('record-btn');
+    btn.disabled = true;
+    try {
+      if (!this.recording) {
+        const pkg = this.el('package-input').value.trim();
+        const msg = await invoke('start_recording', { serial: this.serial, package: pkg });
+        this.recording = true;
+        btn.textContent = '停止录屏';
+        this.setStatus(msg + '（停止时封盘）');
+        _diag('[' + this.serial + '] record: started');
+      } else {
+        const msg = await invoke('stop_recording', { serial: this.serial });
+        this.setStatus(msg);
+        _diag('[' + this.serial + '] record: stopping');
+        // 按钮复位由监护线程的 record 事件完成（进程封盘退出后）
+      }
+    } catch (e) {
+      this.setStatus('录屏失败: ' + (e && e.message ? e.message : e));
+      _diag('[' + this.serial + '] record ERROR: ' + (e && e.message ? e.message : JSON.stringify(e)));
+      this.recording = false;
+      btn.textContent = '录屏';
+    }
+    btn.disabled = false;
+  }
+
+  // 录屏进程退出事件（stopped=用户停止封盘 / closed=进程正常退出 / failed=异常 /
+  // retrying=设备端 server 启动失败自动重试中）：retrying 只更新状态栏不复位按钮；
+  // 其余统一复位按钮；stopped 附产物路径
+  handleRecordEvent(stage, message, path) {
+    if (stage === 'retrying') {
+      this.setStatus('录屏视频流未建立，自动重试一次…');
+      _diag('[' + this.serial + '] record retrying');
+      return;
+    }
+    if (stage !== 'stopped' && stage !== 'closed' && stage !== 'failed') return;
+    const btn = this.el('record-btn');
+    this.recording = false;
+    btn.textContent = '录屏';
+    btn.disabled = false;
+    if (stage === 'stopped') {
+      this.setStatus('录屏已保存: ' + (path || '未知路径'));
+    } else if (stage === 'closed') {
+      this.setStatus('录屏进程已退出' + (path ? '（产物: ' + path + '）' : ''));
+    } else {
+      const last = (message || '').split('\n').filter(Boolean).pop() || '未知原因';
+      this.setStatus('录屏异常退出: ' + last);
+    }
+    _diag('[' + this.serial + '] record ' + stage + (path ? ': ' + path : ''));
   }
 
   // ---- 状态栏（顶栏显示当前激活设备的状态；非激活设备暂存自己的状态） ----
@@ -1035,6 +1103,8 @@ class DeviceSession {
     this.el('refresh-pkgs').addEventListener('click', () => this.loadPackages());
     this.el('root-btn').addEventListener('click', () => this.acquireRoot());
     this.el('mirror-btn').addEventListener('click', () => this.toggleMirror());
+    this.el('shot-btn').addEventListener('click', () => this.takeScreenshot());
+    this.el('record-btn').addEventListener('click', () => this.toggleRecord());
     this.el('launch-btn').addEventListener('click', () => this.launchOrRestart('打开'));
     this.el('restart-btn').addEventListener('click', () => this.launchOrRestart('重启'));
     this.el('stop-app-btn').addEventListener('click', () => this.stopApp());
@@ -1290,6 +1360,11 @@ listen('sampling-error', (e) => {
 listen('mirror', (e) => {
   const s = app.sessions.get(e.payload.serial);
   if (s) s.handleMirrorEvent(e.payload.stage, e.payload.message);
+});
+// 录屏进程退出事件（每设备；payload {serial, stage, message, path}）
+listen('record', (e) => {
+  const s = app.sessions.get(e.payload.serial);
+  if (s) s.handleRecordEvent(e.payload.stage, e.payload.message, e.payload.path);
 });
 listen('devices-changed', (e) => app.onDevicesChanged(e.payload));
 // 火焰图脚本更新进度（全局操作，路由到激活设备的状态栏；进度条按完成文件数铺开）

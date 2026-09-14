@@ -13,14 +13,20 @@
 //! （"Server connection failed"，2026-09-11 用户实撞：SS3 镜像在跑时 SS4 起不来）。
 //! 因此传 `-p P --tunnel-port=P`（注册/连接双钉同号；`-p` 单口即 range {P,P}，
 //! 老版本 scrcpy 的 --tunnel-port 语义下同义，向后兼容）。
+//!
+//! **录屏**（[`crate::mirror::start_recorder`]）：同链路加 `--no-window --record=<mp4>`——host 侧
+//! 落盘无时长上限（设备端 `screenrecord` 有 180s 硬上限，不可用）。停止语义特殊：
+//! MP4 容器须优雅退出才 finalize（SIGKILL 产坏文件），故录屏会话的停止路径是
+//! **SIGINT → ≤3s 宽限 → SIGKILL 兜底**（scrcpy 捕获 SIGINT 后停止采集并封盘）。
 
 use std::collections::{HashSet, VecDeque};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
+use chrono::Local;
 
 /// scrcpy 隧道端口池下限（与 scrcpy 默认候选端口范围一致）
 const TUNNEL_PORT_MIN: u16 = 27183;
@@ -29,6 +35,10 @@ const TUNNEL_PORT_MAX: u16 = 27199;
 
 /// stderr 尾行缓冲容量（诊断 scrcpy 启动失败用；scrcpy 日志量小，12 行足够）
 const STDERR_TAIL_CAP: usize = 12;
+
+/// 录屏会话 SIGINT 优雅停止的宽限期（超时 SIGKILL 兜底；scrcpy finalize MP4
+/// 实测 <1s，3s 已留足余量）
+const GRACEFUL_STOP_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// 镜像退出的语义（供调用方区分「用户关窗」与「真异常」——scrcpy 正常运行也会
 /// 往 stderr 打启动日志，不能凭 stderr 非空判异常）
@@ -110,32 +120,84 @@ fn build_scrcpy_args(serial: &str, tunnel_port: Option<u16>) -> Vec<String> {
     args
 }
 
+/// 录屏附加参数（纯函数；`--no-window` 隐含 `--no-video-playback`，
+/// 纯录制无窗口无触控注入）
+fn recorder_extra_args(dest: &Path) -> Vec<String> {
+    vec!["--no-window".into(), format!("--record={}", dest.display())]
+}
+
+/// 录屏完整参数 = 基础参数 + 录屏附加参数（纯函数，单测锚定完整命令行形态）
+#[cfg(test)]
+fn build_recorder_args(serial: &str, tunnel_port: Option<u16>, dest: &Path) -> Vec<String> {
+    let mut args = build_scrcpy_args(serial, tunnel_port);
+    args.extend(recorder_extra_args(dest));
+    args
+}
+
+/// 向子进程发送 SIGINT（宿主工具链仅 macOS/Linux，直接 libc；ESRCH 等错误忽略——
+/// 进程可能已死，后续 kill/wait 兜底）
+fn send_sigint(child: &Child) {
+    unsafe {
+        libc::kill(child.id() as libc::pid_t, libc::SIGINT);
+    }
+}
+
 /// 清扫指定设备残留的 scrcpy forward 规则（scrcpy 被 SIGKILL 时无自清机会，
 /// 规则由 adb server 持有残留；按 serial 限定作用域，不影响其他设备/其他工具）。
 /// 启动前与退出清理各执行一次；adb 失败 best-effort 忽略。
+///
+/// **并发保护（两层）**：
+/// 1. 远程模式下跳过本进程 hop#2 映射表中的端口——同进程并发会话（镜像+录屏）
+///    里，先起会话在建连前其规则仍在列表，误扫会把它打断（"Device disconnected"，
+///    2026-09-11 真机实撞）；本会话自身端口在 cleanup 里先 `remove_forward`
+///    再扫，不构成漏扫。
+/// 2. 远程模式下跳过本机端口被占用的规则——**跨进程**活会话（另一 CLI/GUI 进程）
+///    全程持有其 hop#2 本机监听，其规则即使在建连窗口内也受保护：规则若在
+///    scrcpy 注册后、建连完成前被删，对端 connect 永远 refused，10s 重试耗尽后
+///    客户端死亡（2026-09-14 killer 实验实锤）；残留规则（宿主被 SIGKILL，隧道
+///    随进程消亡）本机无监听，正常清扫不受影响。本地模式不适用此判据（规则的
+///    监听器在本机 adb server 上恒占用），仅靠第 1 层。
 pub fn sweep_scrcpy_rules(serial: &str) {
+    // 活会话保护集（本地模式无隧道 = 全扫，本地 scrcpy 走 reverse 无 forward 规则）
+    let protected: HashSet<u16> = crate::transport::tunnel()
+        .map(|t| t.mapped_remote_ports().into_iter().collect())
+        .unwrap_or_default();
+    let remote = matches!(
+        crate::transport::transport(),
+        crate::transport::Transport::Ssh(_)
+    );
     let Ok(out) = crate::utils::adb_for(None).args(["forward", "--list"]).output() else {
         return;
     };
     let list = String::from_utf8_lossy(&out.stdout).to_string();
     for line in list.lines() {
-        if let Some((s, port, target)) = parse_forward_line(line) {
-            if s == serial && target.starts_with("localabstract:scrcpy") {
-                let _ = crate::utils::adb_for(Some(serial))
-                    .args(["forward", "--remove", &format!("tcp:{port}")])
-                    .output();
-            }
+        if let Some(port) = rule_sweep_port(line, serial, &protected, remote) {
+            let _ = crate::utils::adb_for(Some(serial))
+                .args(["forward", "--remove", &format!("tcp:{port}")])
+                .output();
         }
     }
 }
 
-/// 一路屏幕镜像会话（scrcpy 子进程 + 远程模式的 hop#2 端口映射）。
+/// 单条 forward 规则的清扫判定（纯函数）：属于目标设备 + scrcpy 规则 + 端口未被
+/// 本进程映射表保护 + （远程模式）本机无活会话监听 → 返回待移除端口；否则 None。
+/// `remote` 为 true 时以本机端口占用作为跨进程活会话判据（见函数级文档第 2 层）
+fn rule_sweep_port(line: &str, serial: &str, protected: &HashSet<u16>, remote: bool) -> Option<u16> {
+    let (s, port, target) = parse_forward_line(line)?;
+    (s == serial
+        && target.starts_with("localabstract:scrcpy")
+        && !protected.contains(&port)
+        && (!remote || local_port_free(port)))
+    .then_some(port)
+}
+
+/// 一路 scrcpy 会话（镜像窗口或录屏，scrcpy 子进程 + 远程模式的 hop#2 端口映射）。
 ///
-/// 生命周期：GUI 监护线程/CLI 镜像-only 模式经 [`MirrorHandle::wait_exit`] 阻塞等待
-/// （用户关窗/进程退出/全局中断标志置位都会返回，返回前已做完整清理）；
-/// 显式停止用 [`MirrorHandle::stop`]（杀子进程，清理由 wait_exit/Drop 兜底）；
-/// Drop 保证清理只执行一次：杀子进程（若还活着）→ 摘除 hop#2 → 清扫该设备
-/// 残留的 scrcpy forward 规则。
+/// 生命周期：GUI 监护线程/CLI 经 [`MirrorHandle::wait_exit`] 阻塞等待
+/// （窗口关闭/进程退出/全局中断标志置位都会返回，返回前已做完整清理）；
+/// 显式停止用 [`MirrorHandle::stop`]（镜像 SIGKILL，录屏 SIGINT 优雅封盘，
+/// 清理由 wait_exit/Drop 兜底）；Drop 保证清理只执行一次：终止子进程
+/// （录屏先 SIGINT 宽限）→ 摘除 hop#2 → 清扫该设备残留的 scrcpy forward 规则。
 pub struct MirrorHandle {
     /// 目标设备 serial（清理时按它清扫规则）
     serial: String,
@@ -149,6 +211,11 @@ pub struct MirrorHandle {
     cleaned: Arc<Mutex<bool>>,
     /// 用户主动停止标志（stop 置位；wait_exit 据此归因为 Stopped 而非异常）
     stopped: Arc<std::sync::atomic::AtomicBool>,
+    /// 录屏产物路径（Some = 录屏会话：停止走 SIGINT 优雅封盘；None = 镜像）
+    record_path: Option<PathBuf>,
+    /// SIGINT 已发出的时刻（录屏停止路径：wait_exit 据此超时 SIGKILL 兜底；
+    /// 防 stop/cleanup 重复发信号）
+    sigint_at: Arc<Mutex<Option<Instant>>>,
 }
 
 impl MirrorHandle {
@@ -158,6 +225,11 @@ impl MirrorHandle {
             .lock()
             .map(|mut g| matches!(g.try_wait(), Ok(None)))
             .unwrap_or(false)
+    }
+
+    /// 录屏产物路径（仅录屏会话；镜像返回 None）
+    pub fn record_path(&self) -> Option<&PathBuf> {
+        self.record_path.as_ref()
     }
 
     /// 阻塞等待 scrcpy 退出（用户关窗/连接失败自杀）或全局中断标志置位
@@ -172,6 +244,9 @@ impl MirrorHandle {
                     if let Ok(Some(s)) = g.try_wait() {
                         status = Some(s);
                         done = true;
+                    } else if self.sigint_timed_out() {
+                        // 录屏 SIGINT 宽限超时：scrcpy 未自行退出，SIGKILL 兜底
+                        let _ = g.kill();
                     }
                 } else {
                     done = true; // 锁损坏：按已退出处理，保证清理执行
@@ -193,30 +268,54 @@ impl MirrorHandle {
         }
         match status {
             Some(s) if s.success() => MirrorExit::Closed,
-            _ => MirrorExit::Failed(self.stderr_tail()),
+            _ => MirrorExit::Failed(self.stderr_tail_text()),
         }
     }
 
-    /// 停止镜像（置主动停止标志 + 杀子进程；隧道/规则清理由 wait_exit/Drop 路径
-    /// 的 cleanup 完成）
+    /// 停止会话（置主动停止标志 + 终止子进程；隧道/规则清理由 wait_exit/Drop 路径
+    /// 的 cleanup 完成）。镜像直接 SIGKILL；录屏发 SIGINT 让 scrcpy finalize MP4
+    /// （进程随后自行退出，wait_exit 轮询感知，超时 SIGKILL 兜底）
     pub fn stop(&self) {
         self.stopped.store(true, std::sync::atomic::Ordering::Relaxed);
         if let Ok(mut g) = self.child.lock() {
+            if self.record_path.is_some() && matches!(g.try_wait(), Ok(None)) {
+                self.send_sigint_once(&g);
+                return;
+            }
             let _ = g.kill();
         }
     }
 
+    /// SIGINT 只发一次（stop/cleanup 双入口共享），返回是否本次新发
+    fn send_sigint_once(&self, child: &Child) -> bool {
+        let mut at = self.sigint_at.lock().unwrap_or_else(|e| e.into_inner());
+        if at.is_some() {
+            return false;
+        }
+        send_sigint(child);
+        *at = Some(Instant::now());
+        true
+    }
+
+    /// 录屏 SIGINT 宽限是否已超时（未发过信号返回 false）
+    fn sigint_timed_out(&self) -> bool {
+        self.sigint_at
+            .lock()
+            .map(|at| at.map(|t| t.elapsed() > GRACEFUL_STOP_TIMEOUT).unwrap_or(false))
+            .unwrap_or(false)
+    }
+
     /// stderr 尾行拼接（诊断展示用）
-    fn stderr_tail(&self) -> String {
+    pub fn stderr_tail_text(&self) -> String {
         self.stderr_tail
             .lock()
             .map(|g| g.iter().cloned().collect::<Vec<_>>().join("\n"))
             .unwrap_or_default()
     }
 
-    /// 幂等清理：杀子进程（若活着）→ 摘 hop#2 → 清扫残留 forward 规则。
-    /// 须在隧道关闭（`shutdown_remote`）之前调用，否则 hop#2 摘除必然失败
-    /// （残留规则由下次启动的 sweep 消化）。
+    /// 幂等清理：终止子进程（录屏先 SIGINT 宽限封盘）→ 摘 hop#2 → 清扫残留
+    /// forward 规则。须在隧道关闭（`shutdown_remote`）之前调用，否则 hop#2 摘除
+    /// 必然失败（残留规则由下次启动的 sweep 消化）。
     fn cleanup(&self) {
         {
             let mut done = self.cleaned.lock().unwrap_or_else(|e| e.into_inner());
@@ -226,6 +325,20 @@ impl MirrorHandle {
             *done = true;
         }
         if let Ok(mut g) = self.child.lock() {
+            if self.record_path.is_some() && matches!(g.try_wait(), Ok(None)) {
+                // Drop 路径无 wait_exit 轮询：SIGINT 后原地宽限等待封盘
+                self.send_sigint_once(&g);
+                let deadline = Instant::now() + GRACEFUL_STOP_TIMEOUT;
+                loop {
+                    match g.try_wait() {
+                        Ok(Some(_)) | Err(_) => break,
+                        Ok(None) if Instant::now() < deadline => {
+                            std::thread::sleep(Duration::from_millis(100));
+                        }
+                        Ok(None) => break, // 超时，走 SIGKILL 兜底
+                    }
+                }
+            }
             let _ = g.kill();
             let _ = g.wait();
         }
@@ -260,27 +373,60 @@ fn spawn_stderr_drain(child: &mut Child, tail: Arc<Mutex<VecDeque<String>>>) {
     });
 }
 
-/// 启动一路屏幕镜像：探测 scrcpy → 清扫残留规则 →（远程模式）建固定端口 hop#2
-/// → spawn scrcpy（`-s <serial> --no-audio --window-title xperf:<serial>`，
-/// 远程追加 `-p P --tunnel-port=P` 双钉同号 + `ADB_SERVER_SOCKET` 指向 hop#1）。
+/// scrcpy 会话模式：镜像窗口 / 无窗口录屏（决定命令行参数与停止语义）
+enum ScrcpyMode {
+    /// 镜像：外部窗口视频+触控
+    Mirror,
+    /// 录屏：`--no-window --record=<path>`，停止走 SIGINT 优雅封盘
+    Record(PathBuf),
+}
+
+/// 启动一路屏幕镜像：拉起 scrcpy 外部窗口（视频+触控）。
+/// 参数形态：`-s <serial> --no-audio --window-title xperf:<serial>`，远程追加
+/// `-p P --tunnel-port=P` 双钉同号（公共启动路径见模块文档「录屏」段）。
+///
+/// `serial`：目标设备（`None` 回退全局选择——CLI 经 `select_device` 已写入）。
+pub fn start_mirror(serial: Option<&str>) -> Result<MirrorHandle> {
+    spawn_scrcpy(serial, ScrcpyMode::Mirror)
+}
+
+/// 启动一路无窗口录屏：scrcpy `--no-window --record=<dest_dir>/record_<ts>.mp4`，
+/// host 侧落盘无时长上限（设备端 screenrecord 有 180s 硬上限故不用）。隧道/端口
+/// 生命周期与镜像完全相同；停止须走 [`MirrorHandle::stop`]（SIGINT 优雅封盘，
+/// SIGKILL 会产出未 finalize 的坏 MP4）。
+///
+/// 返回 handle（`record_path()` 取产物路径）；产物文件在进程优雅退出后才完整。
+pub fn start_recorder(serial: Option<&str>, dest_dir: &Path) -> Result<MirrorHandle> {
+    std::fs::create_dir_all(dest_dir)
+        .with_context(|| format!("创建录屏目录失败: {}", dest_dir.display()))?;
+    let name = format!("record_{}.mp4", Local::now().format("%Y%m%d_%H%M%S_%3f"));
+    spawn_scrcpy(serial, ScrcpyMode::Record(dest_dir.join(name)))
+}
+
+/// 启动 scrcpy 子进程（镜像/录屏公共路径）：探测 scrcpy → 清扫残留规则 →
+/// （远程模式）建固定端口 hop#2 → spawn（参数按 `mode` 组装 +
+/// 远程 `ADB_SERVER_SOCKET` 指向 hop#1）。
 ///
 /// 启动后有 600ms 宽限期：参数错误/连接立败（如端口被抢）在此窗口内暴露为 Err
 /// （附带 stderr 尾行）；此后存活即视为成功，后续退出由调用方经
 /// [`MirrorHandle::wait_exit`] 感知。
-///
-/// `serial`：目标设备（`None` 回退全局选择——CLI 经 `select_device` 已写入）。
-pub fn start_mirror(serial: Option<&str>) -> Result<MirrorHandle> {
+fn spawn_scrcpy(serial: Option<&str>, mode: ScrcpyMode) -> Result<MirrorHandle> {
     let bin = find_scrcpy()
         .context("未找到 scrcpy 可执行文件（安装：brew install scrcpy / 发行版包管理器）")?;
     let eff = crate::utils::resolve_serial(serial).context("未选择目标设备（先连接设备）")?;
     sweep_scrcpy_rules(&eff);
+
+    let (record_path, extra_args): (Option<PathBuf>, Vec<String>) = match mode {
+        ScrcpyMode::Mirror => (None, Vec::new()),
+        ScrcpyMode::Record(p) => (Some(p.clone()), recorder_extra_args(&p)),
+    };
 
     let mut hop2_port = None;
     let mut cmd = Command::new(&bin);
     if matches!(crate::transport::transport(), crate::transport::Transport::Ssh(_)) {
         let tun = crate::transport::tunnel().context("远程模式但隧道不存在（未连接远程后端？）")?;
         // 端口获取循环：远端规则占用（busy）/本机占用（bind 探测）/映射表已占
-        // （并发的另一路镜像）/-O forward 失败（TOCTOU 被抢）——均换下一候选端口
+        // （并发的另一路镜像/录屏）/-O forward 失败（TOCTOU 被抢）——均换下一候选端口
         let busy = remote_busy_ports();
         let mut pinned = None;
         for port in TUNNEL_PORT_MIN..=TUNNEL_PORT_MAX {
@@ -296,7 +442,7 @@ pub fn start_mirror(serial: Option<&str>) -> Result<MirrorHandle> {
             }
         }
         let port = pinned.context(format!(
-            "无可用隧道端口（{TUNNEL_PORT_MIN}..={TUNNEL_PORT_MAX} 全被本机/远端/并发镜像占用）"
+            "无可用隧道端口（{TUNNEL_PORT_MIN}..={TUNNEL_PORT_MAX} 全被本机/远端/并发会话占用）"
         ))?;
         cmd.args(build_scrcpy_args(&eff, Some(port)));
         cmd.env(
@@ -307,6 +453,7 @@ pub fn start_mirror(serial: Option<&str>) -> Result<MirrorHandle> {
     } else {
         cmd.args(build_scrcpy_args(&eff, None));
     }
+    cmd.args(&extra_args);
 
     let mut child = match cmd
         .stdin(Stdio::null())
@@ -333,12 +480,14 @@ pub fn start_mirror(serial: Option<&str>) -> Result<MirrorHandle> {
         hop2_port,
         cleaned: Arc::new(Mutex::new(false)),
         stopped: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        record_path,
+        sigint_at: Arc::new(Mutex::new(None)),
     };
 
     // 宽限期：scrcpy 的参数错误/隧道连接立败在此暴露（正常启动后窗口期间进程存活）
     std::thread::sleep(Duration::from_millis(600));
     if !handle.is_alive() {
-        let tail = handle.stderr_tail();
+        let tail = handle.stderr_tail_text();
         handle.cleanup();
         bail!("scrcpy 启动即退出{}{}", if tail.is_empty() { "" } else { "：" }, tail);
     }
@@ -359,6 +508,8 @@ mod tests {
             hop2_port: None,
             cleaned: Arc::new(Mutex::new(false)),
             stopped: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            record_path: None,
+            sigint_at: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -399,6 +550,8 @@ mod tests {
             hop2_port: None,
             cleaned: Arc::new(Mutex::new(false)),
             stopped: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            record_path: None,
+            sigint_at: Arc::new(Mutex::new(None)),
         };
         match h.wait_exit() {
             MirrorExit::Failed(t) => assert!(t.contains("some-error"), "尾行应含 stderr: {t}"),
@@ -423,6 +576,113 @@ mod tests {
                 "--tunnel-port=27184", "-p", "27184",
             ]
         );
+    }
+
+    #[test]
+    fn test_build_recorder_args() {
+        // 本地模式：基础参数 + --no-window --record=<mp4>
+        let a = build_recorder_args("6eb792dfb0f", None, Path::new("/tmp/xperf/r.mp4"));
+        assert_eq!(
+            a,
+            vec![
+                "-s", "6eb792dfb0f", "--no-audio", "--window-title", "xperf: 6eb792dfb0f",
+                "--no-window", "--record=/tmp/xperf/r.mp4",
+            ]
+        );
+        // 远程模式：双钉同号与镜像一致，录屏参数殿后
+        let a = build_recorder_args("localhost:5559", Some(27185), Path::new("/tmp/r.mp4"));
+        assert_eq!(
+            a,
+            vec![
+                "-s", "localhost:5559", "--no-audio", "--window-title",
+                "xperf: localhost:5559", "--tunnel-port=27185", "-p", "27185",
+                "--no-window", "--record=/tmp/r.mp4",
+            ]
+        );
+    }
+
+    #[test]
+    fn test_record_stop_sends_sigint() {
+        // 录屏会话的 stop() 须发 SIGINT 而非 SIGKILL（scrcpy finalize MP4 依赖
+        // 优雅退出）。用 trap INT 的 sh 验证信号语义：收到 SIGINT 写标记文件后退出；
+        // 若被 SIGKILL 则标记文件不存在
+        let marker = std::env::temp_dir().join(format!("xperf-test-sigint-{}", std::process::id()));
+        std::fs::remove_file(&marker).ok();
+        let child = Command::new("sh")
+            .args([
+                "-c",
+                &format!("trap 'touch {}' INT; while :; do sleep 0.2; done", marker.display()),
+            ])
+            .spawn()
+            .unwrap();
+        let mut h = handle_for(child);
+        h.record_path = Some(PathBuf::from("/tmp/xperf-test-rec.mp4"));
+        std::thread::sleep(Duration::from_millis(300)); // 等 sh 装好 trap
+        h.stop();
+        assert!(matches!(h.wait_exit(), MirrorExit::Stopped));
+        assert!(marker.exists(), "录屏停止应投递 SIGINT（trap 标记文件）");
+        assert!(!h.is_alive());
+        std::fs::remove_file(&marker).ok();
+    }
+
+    #[test]
+    fn test_mirror_stop_kills_directly() {
+        // 镜像会话的 stop() 保持 SIGKILL（无需封盘，立即回收）
+        let child = Command::new("sh")
+            .args(["-c", "trap '' INT; while :; do sleep 0.2; done"]) // 屏蔽 SIGINT
+            .spawn()
+            .unwrap();
+        let h = handle_for(child); // record_path=None → 镜像语义
+        std::thread::sleep(Duration::from_millis(300));
+        h.stop();
+        assert!(matches!(h.wait_exit(), MirrorExit::Stopped));
+        assert!(!h.is_alive(), "屏蔽 SIGINT 的进程仍应被 SIGKILL 回收");
+    }
+
+    #[test]
+    fn test_rule_sweep_port_concurrency_protection() {
+        // 同设备 scrcpy 残留规则：未被保护 → 待清扫
+        let line = "6eb792dfb0f tcp:27183 localabstract:scrcpy-abc123";
+        assert_eq!(rule_sweep_port(line, "6eb792dfb0f", &HashSet::new(), false), Some(27183));
+        // 端口被本进程映射表保护（同进程并发：先起会话建连中的规则）→ 跳过
+        let protected: HashSet<u16> = [27183].into_iter().collect();
+        assert_eq!(rule_sweep_port(line, "6eb792dfb0f", &protected, false), None);
+        // 其他设备的规则 / 非 scrcpy 规则（xperf-agent 等）→ 不动
+        assert_eq!(
+            rule_sweep_port("other-dev tcp:27183 localabstract:scrcpy-x", "6eb792dfb0f", &HashSet::new(), false),
+            None
+        );
+        assert_eq!(
+            rule_sweep_port(
+                "6eb792dfb0f tcp:40759 localabstract:xperf-agent",
+                "6eb792dfb0f",
+                &HashSet::new(),
+                false,
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn test_rule_sweep_port_cross_process_guard() {
+        // 跨进程活会话保护（远程模式）：本机端口被监听 = 另一进程活会话持有 hop#2
+        // → 跳过；同一规则在本地模式（判据不适用）或无监听（残留）时正常清扫
+        let l = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = l.local_addr().unwrap().port();
+        let line = format!("6eb792dfb0f tcp:{port} localabstract:scrcpy-live00");
+        assert_eq!(
+            rule_sweep_port(&line, "6eb792dfb0f", &HashSet::new(), true),
+            None,
+            "远程模式+本机监听 = 跨进程活会话，须跳过"
+        );
+        assert_eq!(
+            rule_sweep_port(&line, "6eb792dfb0f", &HashSet::new(), false),
+            Some(port),
+            "本地模式不按本机占用跳过（规则监听器在本机 adb server 上恒占用）"
+        );
+        drop(l); // 释放监听 → 模拟残留规则（宿主已死）
+        // 只测忙→闲方向中「无监听则清扫」：刚释放的端口可能 TIME_WAIT，bind 失败
+        // 属可接受误跳过（仅多留一条残留），故此处不断言 Some
     }
 
     #[test]

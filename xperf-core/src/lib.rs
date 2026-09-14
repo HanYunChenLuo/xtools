@@ -13,6 +13,8 @@ pub mod baseline;
 /// SS4 双系统（MindRT + Android GVM）adb 自动桥接：网关识别/forward+connect
 /// 引导/断线自愈（设计 `docs/DESIGN-ss4-adb.md`）。
 pub mod bridge;
+/// 设备屏幕截取：exec-out screencap 直写本机 PNG（零设备端残留）。
+pub mod capture;
 /// 冷启动时间测量与应用操作（am start -W / resolve-activity / force-stop）。
 pub mod coldstart;
 /// CPU 采样协议类型（线程级 CPU 信息）。
@@ -27,7 +29,8 @@ pub mod hostchan;
 pub mod marker;
 /// 内存采样协议类型。
 pub mod memory;
-/// scrcpy 屏幕镜像：外部窗口拉起 + SSH 远程隧道（hop#2 固定端口）生命周期。
+/// scrcpy 屏幕镜像与录屏：外部窗口拉起 / 无窗口 MP4 录制（共享 SSH 远程隧道
+/// hop#2 固定端口生命周期；录屏停止走 SIGINT 优雅封盘）。
 pub mod mirror;
 /// 平台抽象：adb product 字段自动检测 + 各平台差异特性。
 pub mod platform;

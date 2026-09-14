@@ -348,6 +348,8 @@ struct DeviceSession {
     csv_dir: Arc<Mutex<Option<(String, std::path::PathBuf)>>>,
     /// 屏幕镜像会话（scrcpy 外部窗口；None = 未开启；监护线程负责退出事件与槽位清空）
     mirror: Arc<Mutex<Option<Arc<xperf_core::mirror::MirrorHandle>>>>,
+    /// 录屏会话（scrcpy 无窗口录制；None = 未在录；监护线程负责退出事件与槽位清空）
+    recorder: Arc<Mutex<Option<Arc<xperf_core::mirror::MirrorHandle>>>>,
 }
 
 impl DeviceSession {
@@ -360,6 +362,7 @@ impl DeviceSession {
             startup_extra: None,
             csv_dir: Arc::new(Mutex::new(None)),
             mirror: Arc::new(Mutex::new(None)),
+            recorder: Arc::new(Mutex::new(None)),
         }
     }
 }
@@ -925,6 +928,139 @@ async fn stop_mirror(serial: String, state: State<'_, AppState>) -> Result<Strin
             Ok(format!("屏幕镜像已停止: {}", serial))
         }
         None => Err("屏幕镜像未在运行".into()),
+    }
+}
+
+// ---------- 截屏与录屏（core capture/mirror 模块；产物落 /tmp/xperf 会话目录） ----------
+
+/// 截屏/录屏落盘目录：采样中随会话 CSV 目录的 `capture/` 子目录（时间轴对照）；
+/// 否则按前端当前包名（或设备级 `device-<serial>` 兜底）新建 `<ts>-<serial>/capture/`
+fn capture_dir_for(
+    session: &DeviceSession,
+    serial: &str,
+    package: &str,
+) -> Result<std::path::PathBuf, String> {
+    if let Some((_, dir)) = session.csv_dir.lock().unwrap().clone() {
+        return Ok(dir.join("capture"));
+    }
+    let base = if package.is_empty() {
+        format!("device-{serial}")
+    } else {
+        validate_package(package)?;
+        package.to_string()
+    };
+    Ok(gui_data_root()
+        .join(base)
+        .join(format!("{}-{}", Local::now().format("%Y%m%d_%H%M%S"), serial))
+        .join("capture"))
+}
+
+/// 截屏（侧栏「截屏」按钮）：exec-out screencap 直写本机 PNG，返回产物路径
+#[tauri::command]
+async fn take_screenshot(
+    serial: String,
+    package: String,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    ensure_device_online(&serial)?;
+    let session = state.session(&serial);
+    let dir = capture_dir_for(&session, &serial, &package)?;
+    let path = xperf_core::capture::screenshot(Some(&serial), &dir).map_err(|e| e.to_string())?;
+    Ok(path.to_string_lossy().into_owned())
+}
+
+/// 开始录屏（侧栏「录屏」按钮 toggle）：scrcpy 无窗口录制 MP4（host 侧落盘无时长
+/// 上限）。监护线程等进程退出后清槽位并 emit `record {serial, stage, message, path}`
+/// 复位前端按钮（stage: stopped=用户停止 / closed=进程正常退出 / failed=异常）。
+///
+/// **失败自愈（重试一次）**：设备端 server 启动期偶发中止（并发镜像流下实测
+/// ~15%，CLI `spawn_record_thread` 同策略）——监护线程发现异常退出且未产出时，
+/// 自动重启一次录制（新端口 + 新 server 实例，前端按钮保持录制态）；用户主动
+/// 停止（Stopped）不触发重试。
+#[tauri::command]
+async fn start_recording(
+    serial: String,
+    package: String,
+    state: State<'_, AppState>,
+    app: tauri::AppHandle,
+) -> Result<String, String> {
+    ensure_device_online(&serial)?;
+    let session = state.session(&serial);
+    if session.recorder.lock().map(|r| r.is_some()).unwrap_or(false) {
+        return Err("录屏已在进行".into());
+    }
+    let dir = capture_dir_for(&session, &serial, &package)?;
+    let handle =
+        Arc::new(xperf_core::mirror::start_recorder(Some(&serial), &dir).map_err(|e| e.to_string())?);
+    let path = handle.record_path().map(|p| p.to_string_lossy().into_owned());
+    *session.recorder.lock().map_err(|e| e.to_string())? = Some(handle.clone());
+    let s = serial.clone();
+    std::thread::spawn(move || {
+        let mut handle = handle;
+        let mut path = path;
+        let mut retried = false;
+        let (stage, message);
+        loop {
+            let (mut st, mut msg) = match handle.wait_exit() {
+                xperf_core::mirror::MirrorExit::Stopped => ("stopped", String::new()),
+                xperf_core::mirror::MirrorExit::Closed => ("closed", String::new()),
+                xperf_core::mirror::MirrorExit::Failed(tail) => ("failed", tail),
+            };
+            // 产物核验：进程正常退出但 MP4 从未产出（视频流未建立）= 失败，
+            // 不能让前端报「录屏已保存」假阳性（CLI 侧 spawn_record_thread 同口径）
+            let produced = path.as_ref().map(|p| std::path::Path::new(p).is_file()).unwrap_or(false);
+            if !produced && st != "failed" {
+                st = "failed";
+                msg = format!("录屏未产出文件（视频流未建立）: {}", handle.stderr_tail_text());
+            }
+            // 设备端 server 启动偶发中止的自愈重试（仅一次；用户停止/已产出不触发）
+            if st == "failed" && !retried {
+                retried = true;
+                if let Ok(h2) = xperf_core::mirror::start_recorder(Some(&s), &dir) {
+                    let h2 = Arc::new(h2);
+                    if let Some(st2) = app.try_state::<AppState>() {
+                        if let Ok(mut r) = st2.session(&s).recorder.lock() {
+                            *r = Some(h2.clone());
+                        }
+                    }
+                    let _ = app.emit(
+                        "record",
+                        serde_json::json!({ "serial": s, "stage": "retrying", "message": "录屏视频流未建立，自动重试一次", "path": serde_json::Value::Null }),
+                    );
+                    path = h2.record_path().map(|p| p.to_string_lossy().into_owned());
+                    handle = h2;
+                    continue;
+                }
+            }
+            stage = st;
+            message = msg;
+            break;
+        }
+        if let Some(st) = app.try_state::<AppState>() {
+            if let Ok(mut r) = st.session(&s).recorder.lock() {
+                *r = None;
+            }
+        }
+        let _ = app.emit(
+            "record",
+            serde_json::json!({ "serial": s, "stage": stage, "message": message, "path": path }),
+        );
+    });
+    Ok(format!("录屏已开始: {}", serial))
+}
+
+/// 停止录屏（按钮 toggle / 关窗收尾）：SIGINT 优雅封盘（MP4 finalize，进程随后
+/// 自行退出；隧道/规则清理由监护线程的 `wait_exit → cleanup` 完成）
+#[tauri::command]
+async fn stop_recording(serial: String, state: State<'_, AppState>) -> Result<String, String> {
+    let session = state.session(&serial);
+    let h = session.recorder.lock().map_err(|e| e.to_string())?.take();
+    match h {
+        Some(h) => {
+            h.stop();
+            Ok(format!("录屏停止中（封盘）: {}", serial))
+        }
+        None => Err("录屏未在进行".into()),
     }
 }
 
@@ -1552,6 +1688,9 @@ fn main() {
             acquire_root,
             start_mirror,
             stop_mirror,
+            take_screenshot,
+            start_recording,
+            stop_recording,
             export_csv,
             save_baseline,
             compare_baseline,
@@ -1573,6 +1712,7 @@ fn main() {
                 let state = window.state::<AppState>();
                 let mut any_running = false;
                 let mut any_mirror = false;
+                let mut any_recorder = false;
                 if let Ok(map) = state.sessions.lock() {
                     for s in map.values() {
                         let mut running = s.running.lock().unwrap();
@@ -1588,6 +1728,13 @@ fn main() {
                                 any_mirror = true;
                             }
                         }
+                        // 录屏：SIGINT 优雅封盘（MP4 finalize），监护线程收尾同上
+                        if let Ok(mut r) = s.recorder.lock() {
+                            if let Some(h) = r.take() {
+                                h.stop();
+                                any_recorder = true;
+                            }
+                        }
                     }
                 }
                 if any_running {
@@ -1597,6 +1744,10 @@ fn main() {
                 if any_mirror {
                     // 等镜像监护线程完成 cleanup（kill → try_wait 轮询 ≤150ms → 摘 hop#2）
                     std::thread::sleep(std::time::Duration::from_millis(600));
+                }
+                if any_recorder {
+                    // 等录屏封盘（SIGINT → finalize ≤1s → 监护线程 cleanup）
+                    std::thread::sleep(std::time::Duration::from_millis(1500));
                 }
                 // 关窗收尾远程后端：清理 forward 规则 + 关隧道（R9/R10）
                 xperf_core::shutdown_remote();
@@ -1683,6 +1834,32 @@ Host hppc          # 重复别名去重
         assert_eq!(a.package, "com.example.app");
         assert_eq!(a.startup_extra.unwrap().0, 500);
         assert!(map.get("devB").unwrap().startup_extra.is_none());
+    }
+
+    #[test]
+    fn test_capture_dir_for() {
+        // 采样中：随会话 CSV 目录的 capture/ 子目录（时间轴对照）
+        let session = DeviceSession::new();
+        *session.csv_dir.lock().unwrap() = Some((
+            "com.x".to_string(),
+            gui_data_root().join("com.x").join("20260101_000000-devX"),
+        ));
+        let d = capture_dir_for(&session, "devX", "com.y").unwrap();
+        assert_eq!(
+            d,
+            gui_data_root().join("com.x").join("20260101_000000-devX").join("capture")
+        );
+        // 无会话有包名：新建 <pkg>/<ts>-<serial>/capture
+        let s2 = DeviceSession::new();
+        let d = capture_dir_for(&s2, "devX", "com.y").unwrap();
+        assert!(d.starts_with(gui_data_root().join("com.y")), "{d:?}");
+        assert!(d.to_string_lossy().contains("-devX"), "{d:?}");
+        assert_eq!(d.file_name().unwrap(), "capture");
+        // 无包名：设备级 device-<serial> 兜底
+        let d = capture_dir_for(&s2, "devX", "").unwrap();
+        assert!(d.starts_with(gui_data_root().join("device-devX")), "{d:?}");
+        // 非法包名拦截（路径遍历）
+        assert!(capture_dir_for(&s2, "devX", "../evil").is_err());
     }
 
     #[test]
