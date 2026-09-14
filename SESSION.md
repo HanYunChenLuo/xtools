@@ -6,7 +6,13 @@
 > 新会话开始时可先读本文件了解近期上下文。
 
 ---
-## 2026-09-14 深夜 — logcat 性能开销分析与视图渲染节流（8b45830，直接 main）
+## 2026-09-14 深夜(2) — logcat UI review 修复（0ce8b45）
+
+**任务**：用户要求 review 代码与文档（重点 UI）。发现并修复 4 项：**A 滚动失效**（`.logcat-view` 无 overflow，`view.scrollTop` 是 no-op，滚动实际发生在外层 trace-report-box——「暂停滚动/自动滚底」从未生效；改为 view 自滚动 overflow-y:auto+height:100%）；**B error 槽位死锁**（core 秒死放弃后 handle 滞留 GUI 槽位，再点开始永远「已在抓取」；core 加 `is_done()`，start 探测死句柄清槽接管 + 前端 error 兜底调 stop_logcat）；**C 会话隔离**（停止后再开始视图/buf 残留旧会话行；start 成功后清）；**D 重放判定**（设备页激活但日志 tab 隐藏时也重建 DOM；renderLogcatIfDirty 加可见性前置）。核对无误项：restart 持锁 adb 数百 ms（无死锁，可接受）、start 竞态（旧 handle drop 即 kill 无泄漏 + 前端 disabled 防抖）、stop/pending/Error 交互、CSS 色板主题跟随。core 119+GUI 10 全绿，AX 冒烟无回归。
+
+---
+
+## 2026-09-14 深夜 — logcat 性能开销分析与视图渲染节流（8b45830 + b2f04a4）
 
 **任务**：用户问询 logcat 开销 + 观察「全机不过滤抓取时 xperf-gui + webkit 合计 20%+」是否正常。
 
