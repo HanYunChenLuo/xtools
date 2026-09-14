@@ -5,11 +5,11 @@
 //! hop#1 隧道（`ADB_SERVER_SOCKET`，见 [`crate::utils::adb_for`]），本机读 stdout
 //! 落盘，零隧道改动。
 //!
-//! **按包过滤**（[`resolve_package_filter`]）：Android 12+ 用 `logcat --uid=`（uid
+//! **按包过滤**（[`crate::logcat::resolve_package_filter`]）：Android 12+ 用 `logcat --uid=`（uid
 //! 不随进程重启变化，崩溃/重启后新进程日志不丢；SS4 多用户返回逗号列表原样透传）；
 //! Android 11 及以下 logcat 无 `--uid`（SS2MAX 实测 `Unknown option`），降级
 //! `--pid=<pidof 首个 pid>`——限制：进程重启后新进程日志缺失，且只覆盖首个进程，
-//! 调用方应如实提示。无包名时 [`LogcatFilter::All`] 全机抓取。
+//! 调用方应如实提示。无包名时 [`crate::logcat::LogcatFilter::All`] 全机抓取。
 //!
 //! **时间轴对齐**：日志行格式 `-v threadtime -v year`（设备时钟），与采样 CSV 的
 //! Timestamp（agent 设备端 epoch）同源，天然可对齐。`-T 0` 不回放历史缓冲（A11 会
@@ -17,7 +17,7 @@
 //!
 //! **断连恢复**：adb logcat 因设备断开 EOF 时，1s 退避自动重 spawn（与采样
 //! `reconnect_agent` 语义一致）；设备在线但子进程秒死（参数错误类永久性失败）连续
-//! 3 次则放弃并经 [`LogcatEvent::Error`] 上报（避免静默死循环）。
+//! 3 次则放弃并经 [`crate::logcat::LogcatEvent::Error`] 上报（避免静默死循环）。
 
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
@@ -63,7 +63,7 @@ pub enum LogcatEvent {
     Error(String),
 }
 
-/// logcat 抓取句柄：[`stop`] 杀子进程并收线程（幂等）；Drop 同语义兜底
+/// logcat 抓取句柄：[`LogcatHandle::stop`] 杀子进程并收线程（幂等）；Drop 同语义兜底
 pub struct LogcatHandle {
     /// 落盘文件路径（`<dest_dir>/logcat.log`）
     path: PathBuf,
