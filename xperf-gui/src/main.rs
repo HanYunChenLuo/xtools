@@ -1168,6 +1168,33 @@ async fn stop_logcat(serial: String, state: State<'_, AppState>) -> Result<Strin
     }
 }
 
+/// 热切换 logcat 过滤口径（「日志」tab 的级别下拉 / 按包过滤勾选 / 包名变更时
+/// 前端联动调用）：不打断抓取会话——core `restart` 复用断连重连路径按新参数
+/// 重 spawn，同一文件续写（标记行带新口径）。解析失败（如 A11 未运行）报错，
+/// 旧口径继续抓取不受影响
+#[tauri::command]
+async fn restart_logcat(
+    serial: String,
+    package: String,
+    filter_package: bool,
+    level: String,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    let session = state.session(&serial);
+    let guard = session.logcat.lock().map_err(|e| e.to_string())?;
+    let h = guard.as_ref().ok_or("logcat 未在抓取")?;
+    let filter = if filter_package && !package.is_empty() {
+        validate_package(&package)?;
+        xperf_core::logcat::resolve_package_filter(Some(&serial), &package)
+            .map_err(|e| e.to_string())?
+    } else {
+        xperf_core::logcat::LogcatFilter::All
+    };
+    let desc = format!("{:?}", filter);
+    h.restart(filter, level.chars().next());
+    Ok(format!("logcat 已切换: filter={} level={}（同文件续写）", desc, level))
+}
+
 /// 在线设备清单（顶栏设备 tab 用）：`{devices: [{serial, model, version}]}`
 #[tauri::command]
 fn list_devices() -> Result<serde_json::Value, String> {
@@ -1797,6 +1824,7 @@ fn main() {
             stop_recording,
             start_logcat,
             stop_logcat,
+            restart_logcat,
             export_csv,
             save_baseline,
             compare_baseline,

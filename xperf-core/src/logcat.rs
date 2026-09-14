@@ -69,6 +69,11 @@ pub struct LogcatHandle {
     path: PathBuf,
     stop: Arc<AtomicBool>,
     child: Arc<std::sync::Mutex<Option<Child>>>,
+    /// 当前过滤口径（[`LogcatHandle::restart`] 热更新；写线程每次重 spawn 时读取）
+    config: Arc<std::sync::Mutex<(LogcatFilter, Option<char>)>>,
+    /// restart 触发的计划内重 spawn 标记（EOF 处理处消费）：restart 的 kill 是主动行为，
+    /// 不计入秒死统计——否则快速连切级别会误判永久失败把抓线程打死
+    restarting: Arc<AtomicBool>,
     join: Option<std::thread::JoinHandle<()>>,
 }
 
@@ -76,6 +81,18 @@ impl LogcatHandle {
     /// 落盘文件路径
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// 热切换过滤口径（级别/按包过滤变更）：更新共享配置 + 杀当前子进程——
+    /// 写线程走既有断连重连路径按新配置重 spawn（同一文件续写，标记行带新口径）。
+    /// 重连退避窗口内调用同样生效（重 spawn 时读的是最新配置）；进程重启换包等
+    /// 需重新解析 uid/pid 的场景，调用方先走 [`crate::logcat::resolve_package_filter`]
+    pub fn restart(&self, filter: LogcatFilter, min_level: Option<char>) {
+        *self.config.lock().unwrap() = (filter, min_level);
+        self.restarting.store(true, Ordering::SeqCst);
+        if let Some(c) = self.child.lock().unwrap().as_mut() {
+            let _ = c.kill();
+        }
     }
 
     /// 停止抓取：置停止标志 + 杀子进程（读线程随 EOF 退出）+ join 写线程。
@@ -254,27 +271,33 @@ pub fn start_logcat(
 ) -> Result<LogcatHandle> {
     std::fs::create_dir_all(dest_dir)?;
     let path = dest_dir.join("logcat.log");
-    let args = build_logcat_args(&filter, min_level);
+    // 过滤口径共享槽：restart() 热更新，写线程每次重 spawn 时重读组装参数
+    let config = Arc::new(std::sync::Mutex::new((filter, min_level)));
+    let (init_filter, init_level) = config.lock().unwrap().clone();
+    let args = build_logcat_args(&init_filter, init_level);
     let serial_owned = serial.map(|s| s.to_string());
 
     let (tx, rx) = mpsc::channel::<Msg>();
     let child = spawn_logcat(serial, &args, tx.clone())?;
     let child_slot: Arc<std::sync::Mutex<Option<Child>>> = Arc::new(std::sync::Mutex::new(Some(child)));
     let stop = Arc::new(AtomicBool::new(false));
+    let restarting = Arc::new(AtomicBool::new(false));
 
     let mut file = BufWriter::new(std::fs::File::create(&path)?);
     let header = format!(
         "# xperf logcat | start={} | serial={} | filter={:?} | level={}",
         Local::now().format("%Y-%m-%d %H:%M:%S%.3f"),
         crate::utils::resolve_serial(serial).unwrap_or_else(|| "(auto)".into()),
-        filter,
-        min_level.map(|l| l.to_string()).unwrap_or_else(|| "V".into()),
+        init_filter,
+        init_level.map(|l| l.to_string()).unwrap_or_else(|| "V".into()),
     );
     writeln!(file, "{}", header)?;
     file.flush()?;
 
     let writer_stop = stop.clone();
     let writer_child = child_slot.clone();
+    let writer_config = config.clone();
+    let writer_restarting = restarting.clone();
     let join = std::thread::spawn(move || {
         let mut batch: Vec<String> = Vec::new();
         let mut last_emit = Instant::now();
@@ -315,7 +338,9 @@ pub fn start_logcat(
                     if writer_stop.load(Ordering::SeqCst) {
                         break;
                     }
-                    let died_fast = spawned_at.elapsed() < FAST_DEATH;
+                    // restart 触发的计划内重 spawn：消费标记，跳过秒死统计
+                    let planned = writer_restarting.swap(false, Ordering::SeqCst);
+                    let died_fast = !planned && spawned_at.elapsed() < FAST_DEATH;
                     if died_fast {
                         fast_deaths += 1;
                     } else {
@@ -334,17 +359,22 @@ pub fn start_logcat(
                         }
                         break;
                     }
+                    // 重 spawn（断连重连 / restart 热切换同路径）：读最新配置组装参数
+                    let (cur_filter, cur_level) = writer_config.lock().unwrap().clone();
+                    let cur_args = build_logcat_args(&cur_filter, cur_level);
                     let _ = writeln!(
                         file,
-                        "# xperf logcat reconnect {}",
-                        Local::now().format("%Y-%m-%d %H:%M:%S%.3f")
+                        "# xperf logcat respawn {} | filter={:?} | level={}",
+                        Local::now().format("%Y-%m-%d %H:%M:%S%.3f"),
+                        cur_filter,
+                        cur_level.map(|l| l.to_string()).unwrap_or_else(|| "V".into()),
                     );
                     let _ = file.flush();
                     std::thread::sleep(RECONNECT_BACKOFF);
                     if writer_stop.load(Ordering::SeqCst) {
                         break;
                     }
-                    match spawn_logcat(serial_owned.as_deref(), &args, tx.clone()) {
+                    match spawn_logcat(serial_owned.as_deref(), &cur_args, tx.clone()) {
                         Ok(c) => {
                             *slot = Some(c);
                             spawned_at = Instant::now();
@@ -375,6 +405,8 @@ pub fn start_logcat(
         path,
         stop,
         child: child_slot,
+        config,
+        restarting,
         join: Some(join),
     })
 }
@@ -458,5 +490,42 @@ mod tests {
     fn test_build_logcat_args_invalid_level_ignored() {
         let args = build_logcat_args(&LogcatFilter::All, Some('X'));
         assert!(!args.iter().any(|a| a.starts_with("*:")));
+    }
+
+    /// 集成测试：start → 全机抓取有行 → restart 切级别+按包过滤（同文件续写
+    /// 标记行）→ restart 回全机 → stop。需 hppc 远程环境 + SS3 在线 +
+    /// gltf 已安装（过滤解析只要求已安装，不要求运行）。
+    #[test]
+    #[ignore = "需要 hppc：SSH 免密 + 远端 adb + SS3(6eb792dfb0f) 在线"]
+    fn test_logcat_restart_hppc() {
+        let target = crate::transport::SshTarget::new("hppc")
+            .with_adb_path("~/Android/Sdk/platform-tools/adb");
+        crate::transport::init_remote(target).expect("init_remote 失败");
+        let serial = "6eb792dfb0f";
+        let dir = std::env::temp_dir().join(format!("xperf_logcattest_{}", std::process::id()));
+        let r = (|| -> Result<()> {
+            let h = start_logcat(Some(serial), &dir, LogcatFilter::All, None, None)?;
+            std::thread::sleep(std::time::Duration::from_secs(4));
+            // 热切换：按包过滤 + W 级别
+            let f = resolve_package_filter(Some(serial), "com.google.android.filament.gltf")?;
+            h.restart(f, Some('W'));
+            std::thread::sleep(std::time::Duration::from_secs(4));
+            // 热切回全机
+            h.restart(LogcatFilter::All, None);
+            std::thread::sleep(std::time::Duration::from_secs(3));
+            let path = h.path().to_path_buf();
+            h.stop();
+            let content = std::fs::read_to_string(&path)?;
+            // 同文件续写：两次 respawn 标记行（携带新口径）
+            let marks = content.matches("# xperf logcat respawn").count();
+            assert!(marks >= 2, "应至少 2 条 respawn 标记行，实际 {}：\n{}", marks, content);
+            assert!(content.contains("filter=Uid"), "标记行应含 Uid 过滤口径");
+            // 全机段应有真实日志行（threadtime+year 行首）
+            assert!(content.contains("2026-"), "应有真实日志行");
+            Ok(())
+        })();
+        crate::transport::shutdown_remote();
+        let _ = std::fs::remove_dir_all(&dir);
+        r.expect("logcat restart 集成测试失败");
     }
 }

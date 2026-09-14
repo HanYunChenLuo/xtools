@@ -508,6 +508,29 @@ class DeviceSession {
     btn.disabled = false;
   }
 
+  // logcat 过滤口径热切换（级别下拉 / 按包过滤勾选 / 包名变更）：抓取中变更即
+  // 调 restart_logcat（同文件续写、不打断会话）；未在抓取时不动作（下次开始
+  // 按当前值读取）。包名变更仅在按包过滤勾选时有意义（全机抓取与包名无关）
+  async restartLogcatIfRunning() {
+    if (!this.logcatRunning) return;
+    const byPkg = this.el('logcat-bypkg').checked;
+    const pkg = this.el('package-input').value.trim();
+    try {
+      const msg = await invoke('restart_logcat', {
+        serial: this.serial,
+        package: pkg,
+        filterPackage: byPkg,
+        level: this.el('logcat-level').value,
+      });
+      this.setStatus(msg);
+      _diag('[' + this.serial + '] logcat: restarted (' + (byPkg ? 'pkg=' + pkg : 'all') + ', level=' + this.el('logcat-level').value + ')');
+    } catch (e) {
+      // 解析失败（如 A11 按包过滤但应用未运行）：旧口径继续抓，如实提示
+      this.setStatus('logcat 切换失败（旧口径继续）: ' + (e && e.message ? e.message : e));
+      _diag('[' + this.serial + '] logcat restart ERROR: ' + (e && e.message ? e.message : JSON.stringify(e)));
+    }
+  }
+
   // logcat 事件（lines=批量日志行 / error=连续秒死放弃）：lines 追加到视图
   // （ring buffer 修剪 + 级别着色 + 自动滚动）；error 复位按钮并提示
   handleLogcatEvent(stage, lines, message) {
@@ -1181,6 +1204,12 @@ class DeviceSession {
     this.el('record-btn').addEventListener('click', () => this.toggleRecord());
     this.el('logcat-btn').addEventListener('click', () => this.toggleLogcat());
     this.el('logcat-clear-btn').addEventListener('click', () => { this.el('logcat-view').innerHTML = ''; });
+    // 级别/按包过滤变更热切换（抓取中即时生效，同文件续写）；包名变更仅在勾选时有意义
+    this.el('logcat-level').addEventListener('change', () => this.restartLogcatIfRunning());
+    this.el('logcat-bypkg').addEventListener('change', () => this.restartLogcatIfRunning());
+    this.el('package-input').addEventListener('change', () => {
+      if (this.el('logcat-bypkg').checked) this.restartLogcatIfRunning();
+    });
     this.el('logcat-pause-btn').addEventListener('click', (e) => {
       this.logcatPaused = !this.logcatPaused;
       e.target.textContent = this.logcatPaused ? '恢复滚动' : '暂停滚动';
