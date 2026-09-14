@@ -419,9 +419,18 @@ pub fn start_logcat(
                         break;
                     }
                     match spawn_logcat(serial_owned.as_deref(), &cur_args, tx.clone()) {
-                        Ok(c) => {
-                            *slot = Some(c);
-                            spawned_at = Instant::now();
+                        Ok(mut c) => {
+                            // 竞态收敛（restart 落在「读 config→spawn」窗口内）：restart 的
+                            // kill 可能落空（当时 slot 已被 take），标记滞留会致新口径静默
+                            // 失效直到下次断连——spawn 后补检 restarting，置位则立即杀掉
+                            // 刚起的进程，随 Eof 走 planned 重 spawn 读到新口径
+                            if writer_restarting.load(Ordering::SeqCst) {
+                                let _ = c.kill();
+                                let _ = c.wait();
+                            } else {
+                                *slot = Some(c);
+                                spawned_at = Instant::now();
+                            }
                         }
                         Err(_) => {
                             // spawn 失败（如 adb 不可用）按断连处理，下轮重试
