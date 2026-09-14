@@ -36,6 +36,9 @@ use crate::utils::{adb_for, run_adb_command_for};
 const EMIT_BATCH_INTERVAL: Duration = Duration::from_millis(200);
 /// 单次批量推送的最大行数（到达即提前推送）
 const EMIT_BATCH_MAX_LINES: usize = 64;
+/// 暂停事件期间后端攒批上限（尾部保留；前端视图 ring buffer 2000 行的 2 倍余量，
+/// 超出从头部丢——与视图「最近 N 行」语义一致，全量数据在落盘文件）
+const PENDING_CAP: usize = 4000;
 /// 断连重连退避间隔
 const RECONNECT_BACKOFF: Duration = Duration::from_secs(1);
 /// 子进程存活低于该时长视为「秒死」（参数错误类永久性失败的判据）
@@ -74,6 +77,11 @@ pub struct LogcatHandle {
     /// restart 触发的计划内重 spawn 标记（EOF 处理处消费）：restart 的 kill 是主动行为，
     /// 不计入秒死统计——否则快速连切级别会误判永久失败把抓线程打死
     restarting: Arc<AtomicBool>,
+    /// 事件推送暂停标志（[`LogcatHandle::pause_events`]）：置位期间写线程不发 `Lines`
+    /// 事件（攒入 pending，上限 4000 行尾部保留），恢复后 ≤200ms 一次性补发——用于 GUI
+    /// 日志页不可见时关掉 webview IPC 开销（实测全机洪泛 ~190 行/s 时 ~3% 单核）。
+    /// `Error` 事件不受暂停影响（抓取终止必须让前端复位按钮）
+    events_paused: Arc<AtomicBool>,
     join: Option<std::thread::JoinHandle<()>>,
 }
 
@@ -93,6 +101,17 @@ impl LogcatHandle {
         if let Some(c) = self.child.lock().unwrap().as_mut() {
             let _ = c.kill();
         }
+    }
+
+    /// 暂停 `Lines` 事件推送（GUI 日志页不可见时调用，关掉 webview IPC 开销）：
+    /// 落盘不受影响；行攒入 pending（上限 4000 行尾部保留），恢复后补发
+    pub fn pause_events(&self) {
+        self.events_paused.store(true, Ordering::SeqCst);
+    }
+
+    /// 恢复事件推送：pending 攒批 ≤200ms 内一次性补发（写线程下一个合帧周期排空）
+    pub fn resume_events(&self) {
+        self.events_paused.store(false, Ordering::SeqCst);
     }
 
     /// 停止抓取：置停止标志 + 杀子进程（读线程随 EOF 退出）+ join 写线程。
@@ -282,6 +301,7 @@ pub fn start_logcat(
     let child_slot: Arc<std::sync::Mutex<Option<Child>>> = Arc::new(std::sync::Mutex::new(Some(child)));
     let stop = Arc::new(AtomicBool::new(false));
     let restarting = Arc::new(AtomicBool::new(false));
+    let events_paused = Arc::new(AtomicBool::new(false));
 
     let mut file = BufWriter::new(std::fs::File::create(&path)?);
     let header = format!(
@@ -298,19 +318,37 @@ pub fn start_logcat(
     let writer_child = child_slot.clone();
     let writer_config = config.clone();
     let writer_restarting = restarting.clone();
+    let writer_paused = events_paused.clone();
     let join = std::thread::spawn(move || {
         let mut batch: Vec<String> = Vec::new();
+        // 暂停事件期间的攒批（尾部保留，恢复时优先补发）
+        let mut pending: Vec<String> = Vec::new();
         let mut last_emit = Instant::now();
         let mut fast_deaths: u32 = 0;
         let mut spawned_at = Instant::now();
 
-        let emit_lines = |batch: &mut Vec<String>| {
+        // 推送当前批（与恢复后排空的 pending）：暂停时攒入 pending；未暂停时
+        // pending 先于新批发出（保序）；无回调（CLI 落盘模式）两者都直接清
+        let emit_lines = |batch: &mut Vec<String>, pending: &mut Vec<String>| {
             if let Some(cb) = &on_event {
+                if writer_paused.load(Ordering::SeqCst) {
+                    if !batch.is_empty() {
+                        pending.append(batch);
+                        while pending.len() > PENDING_CAP {
+                            pending.remove(0);
+                        }
+                    }
+                    return;
+                }
+                if !pending.is_empty() {
+                    cb(LogcatEvent::Lines(std::mem::take(pending)));
+                }
                 if !batch.is_empty() {
                     cb(LogcatEvent::Lines(std::mem::take(batch)));
                 }
             } else {
                 batch.clear();
+                pending.clear();
             }
         };
 
@@ -323,12 +361,12 @@ pub fn start_logcat(
                     if batch.len() >= EMIT_BATCH_MAX_LINES
                         || last_emit.elapsed() >= EMIT_BATCH_INTERVAL
                     {
-                        emit_lines(&mut batch);
+                        emit_lines(&mut batch, &mut pending);
                         last_emit = Instant::now();
                     }
                 }
                 Ok(Msg::Eof) | Err(mpsc::RecvTimeoutError::Disconnected) => {
-                    emit_lines(&mut batch);
+                    emit_lines(&mut batch, &mut pending);
                     // 子进程 EOF：收尸并决定重连或结束
                     let mut slot = writer_child.lock().unwrap();
                     if let Some(mut c) = slot.take() {
@@ -388,14 +426,15 @@ pub fn start_logcat(
                     }
                 }
                 Err(mpsc::RecvTimeoutError::Timeout) => {
-                    emit_lines(&mut batch);
+                    // 空转周期也尝试排空（暂停恢复后无新行时 pending 及时补发）
+                    emit_lines(&mut batch, &mut pending);
                     last_emit = Instant::now();
                 }
             }
             if writer_stop.load(Ordering::SeqCst) {
                 // 停止路径：杀掉子进程后读线程 EOF，随下条 Eof 消息收尾；
                 // 此处提前 drain 批量避免滞留
-                emit_lines(&mut batch);
+                emit_lines(&mut batch, &mut pending);
             }
         }
         let _ = file.flush();
@@ -407,6 +446,7 @@ pub fn start_logcat(
         child: child_slot,
         config,
         restarting,
+        events_paused,
         join: Some(join),
     })
 }

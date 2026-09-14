@@ -321,6 +321,7 @@ hop#2: 本机 P_loc → 远端 adb forward 分配端口（agent 事件流，每�
 - **过滤口径热切换**（`LogcatHandle::restart`，2026-09-14）：抓取中变更级别/按包过滤不打断会话——共享 config 槽更新 + kill 子进程复用断连重连路径按新参数重 spawn（同一文件续写，标记行带新口径；解析失败旧口径继续如实提示）。**restarting 标记防计划内 kill 误计秒死**（否则快速连切 3 次会触发永久失败误杀抓取线程）；GUI 前端级别下拉/按包勾选/包名变更 change 联动触发
 - **CLI `--logcat`**：与采样并行（窗口覆盖采样全程，随采样收尾停止）或独立使用（Ctrl-C 停止）；落盘 `<pkg>/<ts>/logcat/logcat.log`（无包名 `device-<serial>/<ts>/logcat/`）；退出码语义同截屏/录屏（独立失败 exit 1，并行失败只告警）
 - **GUI**：tab toolbar = 开始/停止 toggle + 级别下拉（V~E，`*:W` 过滤符）+ 按包过滤勾选（取侧栏包名）+ 暂停滚动 + 清空（仅视图）；live 视图 ring buffer 2000 行（防 DOM 膨胀）+ 级别着色（正则兼容 A11 行首 `+0800 ` 时区前缀）；落盘采样中随会话 CSV 目录 `logcat/`，否则 `<pkg|device-serial>/<ts>-<serial>/logcat/`；停止同步完成（kill+join，无监护线程），关窗 CloseRequested 统一 stop
+- **渲染/事件双节流（性能，2026-09-14 实测驱动）**：① 日志页非可见（设备页或 tab 切走）不碰 DOM——行恒入 JS ring buffer + 脏标记，切回一次性重放（WebKit 不可见 DOM 变更仍维护渲染/AX 树，全机洪泛 ~190 行/s 时后台白耗 13.5% 单核）；② 事件推送暂停（`pause_events`/`resume_events` + `set_logcat_events` 命令，前端 switchTab/switchDevice/启动后 `syncLogcatEvents` 同步可见性）——不可见时后端不发 `Lines` 事件（攒 pending 上限 4000 尾部保留，恢复 ≤200ms 一次补发；`Error` 不受影响），把剩余 ~3.4% webview IPC 开销也归零。**实测后台 webkit 13.5%→3.4%→0.0%**；恢复补发以 ≥500 行大批为特征（diag `logcat bigbatch N`）
 - **AX 目验教训（2026-09-14）**：① 流式渲染（尤其全机洪泛 ~190 行/s）期间 webkit AX 树会整体剪枝且**粘性不恢复**——此时 `entire contents` 枚举返回空/死引用，**须改递归 `UI elements of` 逐层遍历**（同一实例上 entire contents 全空但递归遍历完整可达）；② AX `set value` 写文本框须先 `set focused of el to true`，否则值不落 DOM input（曾致按包过滤静默退化为全机抓取——落盘目录是 device-* 而非 pkg 名即为判据）
 
 

@@ -12,7 +12,7 @@
 
 **测量（SS3 全机洪泛 ~190 行/s，debug build，隔离变量：无采样/无镜像）**：CLI host ~1.0-1.4% / GUI Rust 后端 +1.3% / **WebKit 前端 +13.4%**（合计 ~15.5%——用户观察的 20%+ 含 ssh/adb 子进程，量级一致）。**根因：日志 tab 后台（用户在看指标页）时前端仍每 200ms append 38 行 DOM——WebKit 不可见 DOM 变更照样维护渲染/AX 树，13%+ 纯浪费**（对照：采样图表本身 webkit 开销 ≈0.1%）。
 
-**修复（8b45830）**：数据恒入 JS ring buffer（2000 上限）+ 脏标记；仅设备页+日志 tab 双激活时碰 DOM；switchTab/switchDevice 切回时一次性 DocumentFragment 重放（与图表「仅绘制激活页」同构）。**实测：后台 webkit 13.5%→3.4%**（剩余为 Tauri 事件 IPC 固有开销——每 200ms emit 反序列化+数组积累，进一步优化需后端感知前端激活态，复杂度不值）；前台渲染/切回重放/切走回落（0.4%）AX 全验证。次要结论：core 逐行 flush ≈0.04% 单核不值得改；全机落盘 ~38KB/s（1h ≈137MB，/tmp 自清）。
+**修复（8b45830 + 后续 IPC 暂停）**：两层节流——① 非可见不碰 DOM（数据恒入 JS ring buffer + 脏标记，切回 DocumentFragment 重放，与图表「仅绘制激活页」同构）：后台 webkit 13.5%→3.4%；② `pause_events`/`resume_events`（core 攒 pending 上限 4000 尾部保留，恢复 ≤200ms 一次补发；`Error` 照发）+ `set_logcat_events` 命令 + 前端 `syncLogcatEvents`（switchTab/switchDevice/启动后同步）：**后台 webkit 归零 0.0%**。AX 实测：后台归零 / 切回 `bigbatch 4000` 补发（暂停 ~45s 攒满）/ 前台渲染恢复 8.2%。次要结论：core 逐行 flush ≈0.04% 单核不值得改；全机落盘 ~38KB/s（1h ≈137MB，/tmp 自清）；**纯暂停（丢事件）会让视图行缺口，必须攒批补发**。
 
 **教训**：`ps aux` 的 %CPU 是进程生命周期平均（被启动期稀释），瞬时值须 `top -l 2` 取第二样本。
 

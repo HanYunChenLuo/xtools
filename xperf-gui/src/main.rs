@@ -1152,6 +1152,26 @@ async fn start_logcat(
     Ok(format!("logcat 抓取中: {}", path))
 }
 
+/// 日志页可见性同步（「日志」tab/设备页切走时前端调用）：不可见 → 暂停 `Lines`
+/// 事件推送（core 攒批待补发，关掉 webview IPC 开销，实测全机洪泛时 ~3% 单核）；
+/// 可见 → 恢复并补发。未在抓取时幂等 no-op（下次开始自然从未暂停态起）
+#[tauri::command]
+async fn set_logcat_events(
+    serial: String,
+    paused: bool,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    let session = state.session(&serial);
+    if let Some(h) = session.logcat.lock().map_err(|e| e.to_string())?.as_ref() {
+        if paused {
+            h.pause_events();
+        } else {
+            h.resume_events();
+        }
+    }
+    Ok(format!("logcat events {}", if paused { "paused" } else { "resumed" }))
+}
+
 /// 停止 logcat 抓取（按钮 toggle / 关窗收尾）：杀子进程收线程（同步完成，
 /// 停止后文件即完整可读）
 #[tauri::command]
@@ -1825,6 +1845,7 @@ fn main() {
             start_logcat,
             stop_logcat,
             restart_logcat,
+            set_logcat_events,
             export_csv,
             save_baseline,
             compare_baseline,

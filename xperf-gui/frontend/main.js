@@ -496,6 +496,7 @@ class DeviceSession {
         btn.textContent = '停止抓取';
         this.el('logcat-path').textContent = msg.replace(/^logcat 抓取中: /, '');
         this.setStatus(msg);
+        this.syncLogcatEvents(); // 可见性同步（启动必在日志页，正常 resume/no-op）
         _diag('[' + this.serial + '] logcat: started');
       } else {
         const msg = await invoke('stop_logcat', { serial: this.serial });
@@ -551,10 +552,20 @@ class DeviceSession {
     }
   }
 
+  // 日志页可见性 → 后端事件推送开关（不可见暂停 IPC，可见恢复并补发 pending；
+  // dirty 重放负责 DOM，两机制独立）。抓取未运行时 no-op
+  syncLogcatEvents() {
+    if (!this.logcatRunning) return;
+    const visible = app.active === this.serial && this.activeTab === 'logcat';
+    invoke('set_logcat_events', { serial: this.serial, paused: !visible }).catch(() => {});
+  }
+
   // 追加日志行：数据恒入 buf（ring buffer 修剪）；仅当设备页+日志 tab 都激活时
   // 才碰 DOM（否则置 dirty，切回重放）——非可见 DOM 变更是 WebKit 无谓开销的大头
   appendLogcatLines(lines) {
     if (!lines.length) return;
+    // 大批发送（≥500 行）= 暂停恢复后的 pending 补发，打点供验证
+    if (lines.length >= 500) _diag('[' + this.serial + '] logcat bigbatch ' + lines.length);
     for (const l of lines) this.logcatBuf.push(l);
     while (this.logcatBuf.length > LOGCAT_VIEW_CAP) this.logcatBuf.shift();
     if (app.active === this.serial && this.activeTab === 'logcat') {
@@ -666,8 +677,9 @@ class DeviceSession {
     for (const t of this.els('subtab')) t.classList.toggle('active', t.dataset.tab === which);
     // 图表容器显隐变化后尺寸需刷新
     if (perf) this.refreshChartSizes();
-    // 日志页重新可见：重放非可见期间积累的行
+    // 日志页重新可见：重放非可见期间积累的行 + 恢复后端事件推送
     if (which === 'logcat') this.renderLogcatIfDirty();
+    this.syncLogcatEvents();
   }
 
   // ---- 面板渲染 ----
@@ -1407,6 +1419,8 @@ const app = {
     s.renderThreads();
     // 日志页若激活：重放设备页隐藏期间积累的行
     s.renderLogcatIfDirty();
+    // 全部设备同步事件推送开关（旧设备暂停，新激活设备恢复）
+    for (const sess of this.sessions.values()) sess.syncLogcatEvents();
   },
 
   // 顶栏状态栏：显示当前激活设备的状态（普通文本 / 录制进度绿色填充）
