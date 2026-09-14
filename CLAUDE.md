@@ -299,7 +299,7 @@ hop#2: 本机 P_loc → 远端 adb forward 分配端口（agent 事件流，每�
 
 形态：**拉起外部 scrcpy 进程**（镜像=窗口视频+触控；录屏=`--no-window --record=<mp4>` 无窗口纯录制，解码/mux 归 scrcpy 客户端，本工具只管进程与隧道生命周期）。两模式共享 `spawn_scrcpy` 启动路径（`ScrcpyMode::{Mirror, Record}`）；依赖本机安装 scrcpy（`find_scrcpy`：PATH → `/opt/homebrew/bin` 等常见位置兜底——GUI 从 Finder 启动时 PATH 不含 homebrew；scrcpy-server 由客户端内嵌随版本走，不需额外 vendor）。
 
-**录屏与镜像的差异点**：①停止须 **SIGINT 优雅封盘**（MP4 须 finalize，SIGKILL 产坏文件——`stop()` 发 SIGINT + `sigint_at` 去重 + `wait_exit` 3s 超时 SIGKILL 兜底 + Drop 路径原地宽限）；②CLI `--record N` 倒计时从**产物文件出现**起算（spawn/推 server 启动延迟可达 ~8s，不吃进录制窗口）；③收尾**产物核验**——scrcpy 可优雅退出但未产出文件（视频流未建立），CLI/GUI 都校验 `path.is_file()` 防「已保存」假阳性；④`sweep_scrcpy_rules` 跳过本进程 hop#2 映射表端口（`SshTunnel::mapped_remote_ports`）——并发会话建连中的规则不被误扫。**遗留缺陷**：镜像+录屏同机并存失败（见 WORKSPACE A 节）。
+**录屏与镜像的差异点**：①停止须 **SIGINT 优雅封盘**（MP4 须 finalize，SIGKILL 产坏文件——`stop()` 发 SIGINT + `sigint_at` 去重 + `wait_exit` 3s 超时 SIGKILL 兜底 + Drop 路径原地宽限）；②CLI `--record N` 倒计时从**产物文件出现**起算（spawn/推 server 启动延迟可达 ~8s，不吃进录制窗口）；③收尾**产物核验**——scrcpy 可优雅退出但未产出文件（视频流未建立），CLI/GUI 都校验 `path.is_file()` 防「已保存」假阳性；④`sweep_scrcpy_rules` 两层并发保护：跳过本进程 hop#2 映射表端口（`SshTunnel::mapped_remote_ports`）+ 远程模式下跳过**本机端口被占用**的规则（占用 = 另一进程活会话持有 hop#2 监听——**跨进程**保护；本地模式判据不适用，规则监听器在本机 adb server 上恒占用）；⑤**录屏启动失败自愈重试一次**（CLI 录屏线程 / GUI 监护线程同策略，GUI 前端有 `retrying` 状态事件）：设备端 scrcpy-server 启动期存在平台级偶发中止（2026-09-14 SS3 实测 ~15%——server 进程在绑定 abstract socket 前死亡、stderr 零输出，客户端报 "Server connection failed"；与隧道/端口/注册无关，wrapper 证据链见 SESSION 当日条目）；**勘察纪律**：探测 hop#2/forward 端口的任何 connect（含 `nc -z`）都会被设备端 server accept 占槽（顺序 accept 无对端认证，首个连接=视频流），属于投毒操作。
 
 ### 截屏（`xperf-core/src/capture.rs`，CLI `--screenshot` / GUI「截屏」按钮）
 

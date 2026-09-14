@@ -972,6 +972,11 @@ async fn take_screenshot(
 /// 开始录屏（侧栏「录屏」按钮 toggle）：scrcpy 无窗口录制 MP4（host 侧落盘无时长
 /// 上限）。监护线程等进程退出后清槽位并 emit `record {serial, stage, message, path}`
 /// 复位前端按钮（stage: stopped=用户停止 / closed=进程正常退出 / failed=异常）。
+///
+/// **失败自愈（重试一次）**：设备端 server 启动期偶发中止（并发镜像流下实测
+/// ~15%，CLI `spawn_record_thread` 同策略）——监护线程发现异常退出且未产出时，
+/// 自动重启一次录制（新端口 + 新 server 实例，前端按钮保持录制态）；用户主动
+/// 停止（Stopped）不触发重试。
 #[tauri::command]
 async fn start_recording(
     serial: String,
@@ -991,17 +996,45 @@ async fn start_recording(
     *session.recorder.lock().map_err(|e| e.to_string())? = Some(handle.clone());
     let s = serial.clone();
     std::thread::spawn(move || {
-        let (mut stage, mut message) = match handle.wait_exit() {
-            xperf_core::mirror::MirrorExit::Stopped => ("stopped", String::new()),
-            xperf_core::mirror::MirrorExit::Closed => ("closed", String::new()),
-            xperf_core::mirror::MirrorExit::Failed(tail) => ("failed", tail),
-        };
-        // 产物核验：进程正常退出但 MP4 从未产出（视频流未建立）= 失败，
-        // 不能让前端报「录屏已保存」假阳性（CLI 侧 spawn_record_thread 同口径）
-        let produced = path.as_ref().map(|p| std::path::Path::new(p).is_file()).unwrap_or(false);
-        if !produced && stage != "failed" {
-            stage = "failed";
-            message = format!("录屏未产出文件（视频流未建立）: {}", handle.stderr_tail_text());
+        let mut handle = handle;
+        let mut path = path;
+        let mut retried = false;
+        let (stage, message);
+        loop {
+            let (mut st, mut msg) = match handle.wait_exit() {
+                xperf_core::mirror::MirrorExit::Stopped => ("stopped", String::new()),
+                xperf_core::mirror::MirrorExit::Closed => ("closed", String::new()),
+                xperf_core::mirror::MirrorExit::Failed(tail) => ("failed", tail),
+            };
+            // 产物核验：进程正常退出但 MP4 从未产出（视频流未建立）= 失败，
+            // 不能让前端报「录屏已保存」假阳性（CLI 侧 spawn_record_thread 同口径）
+            let produced = path.as_ref().map(|p| std::path::Path::new(p).is_file()).unwrap_or(false);
+            if !produced && st != "failed" {
+                st = "failed";
+                msg = format!("录屏未产出文件（视频流未建立）: {}", handle.stderr_tail_text());
+            }
+            // 设备端 server 启动偶发中止的自愈重试（仅一次；用户停止/已产出不触发）
+            if st == "failed" && !retried {
+                retried = true;
+                if let Ok(h2) = xperf_core::mirror::start_recorder(Some(&s), &dir) {
+                    let h2 = Arc::new(h2);
+                    if let Some(st2) = app.try_state::<AppState>() {
+                        if let Ok(mut r) = st2.session(&s).recorder.lock() {
+                            *r = Some(h2.clone());
+                        }
+                    }
+                    let _ = app.emit(
+                        "record",
+                        serde_json::json!({ "serial": s, "stage": "retrying", "message": "录屏视频流未建立，自动重试一次", "path": serde_json::Value::Null }),
+                    );
+                    path = h2.record_path().map(|p| p.to_string_lossy().into_owned());
+                    handle = h2;
+                    continue;
+                }
+            }
+            stage = st;
+            message = msg;
+            break;
         }
         if let Some(st) = app.try_state::<AppState>() {
             if let Ok(mut r) = st.session(&s).recorder.lock() {

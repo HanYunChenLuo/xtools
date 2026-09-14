@@ -443,9 +443,15 @@ class DeviceSession {
     btn.disabled = false;
   }
 
-  // 录屏进程退出事件（stopped=用户停止封盘 / closed=进程正常退出 / failed=异常）：
-  // 统一复位按钮；stopped 附产物路径
+  // 录屏进程退出事件（stopped=用户停止封盘 / closed=进程正常退出 / failed=异常 /
+  // retrying=设备端 server 启动失败自动重试中）：retrying 只更新状态栏不复位按钮；
+  // 其余统一复位按钮；stopped 附产物路径
   handleRecordEvent(stage, message, path) {
+    if (stage === 'retrying') {
+      this.setStatus('录屏视频流未建立，自动重试一次…');
+      _diag('[' + this.serial + '] record retrying');
+      return;
+    }
     if (stage !== 'stopped' && stage !== 'closed' && stage !== 'failed') return;
     const btn = this.el('record-btn');
     this.recording = false;

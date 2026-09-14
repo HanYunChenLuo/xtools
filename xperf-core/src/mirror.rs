@@ -146,21 +146,32 @@ fn send_sigint(child: &Child) {
 /// 规则由 adb server 持有残留；按 serial 限定作用域，不影响其他设备/其他工具）。
 /// 启动前与退出清理各执行一次；adb 失败 best-effort 忽略。
 ///
-/// **并发保护**：远程模式下跳过本进程 hop#2 映射表中的端口——同设备并发会话
-/// （镜像+录屏）里，先起会话在建连前其规则仍在列表，误扫会把它打断
-/// （"Device disconnected"，2026-09-11 真机实撞）；本会话自身端口在 cleanup 里
-/// 先 `remove_forward` 再扫，不构成漏扫。
+/// **并发保护（两层）**：
+/// 1. 远程模式下跳过本进程 hop#2 映射表中的端口——同进程并发会话（镜像+录屏）
+///    里，先起会话在建连前其规则仍在列表，误扫会把它打断（"Device disconnected"，
+///    2026-09-11 真机实撞）；本会话自身端口在 cleanup 里先 `remove_forward`
+///    再扫，不构成漏扫。
+/// 2. 远程模式下跳过本机端口被占用的规则——**跨进程**活会话（另一 CLI/GUI 进程）
+///    全程持有其 hop#2 本机监听，其规则即使在建连窗口内也受保护：规则若在
+///    scrcpy 注册后、建连完成前被删，对端 connect 永远 refused，10s 重试耗尽后
+///    客户端死亡（2026-09-14 killer 实验实锤）；残留规则（宿主被 SIGKILL，隧道
+///    随进程消亡）本机无监听，正常清扫不受影响。本地模式不适用此判据（规则的
+///    监听器在本机 adb server 上恒占用），仅靠第 1 层。
 pub fn sweep_scrcpy_rules(serial: &str) {
     // 活会话保护集（本地模式无隧道 = 全扫，本地 scrcpy 走 reverse 无 forward 规则）
     let protected: HashSet<u16> = crate::transport::tunnel()
         .map(|t| t.mapped_remote_ports().into_iter().collect())
         .unwrap_or_default();
+    let remote = matches!(
+        crate::transport::transport(),
+        crate::transport::Transport::Ssh(_)
+    );
     let Ok(out) = crate::utils::adb_for(None).args(["forward", "--list"]).output() else {
         return;
     };
     let list = String::from_utf8_lossy(&out.stdout).to_string();
     for line in list.lines() {
-        if let Some(port) = rule_sweep_port(line, serial, &protected) {
+        if let Some(port) = rule_sweep_port(line, serial, &protected, remote) {
             let _ = crate::utils::adb_for(Some(serial))
                 .args(["forward", "--remove", &format!("tcp:{port}")])
                 .output();
@@ -169,11 +180,15 @@ pub fn sweep_scrcpy_rules(serial: &str) {
 }
 
 /// 单条 forward 规则的清扫判定（纯函数）：属于目标设备 + scrcpy 规则 + 端口未被
-/// 活会话保护 → 返回待移除端口；否则 None
-fn rule_sweep_port(line: &str, serial: &str, protected: &HashSet<u16>) -> Option<u16> {
+/// 本进程映射表保护 + （远程模式）本机无活会话监听 → 返回待移除端口；否则 None。
+/// `remote` 为 true 时以本机端口占用作为跨进程活会话判据（见函数级文档第 2 层）
+fn rule_sweep_port(line: &str, serial: &str, protected: &HashSet<u16>, remote: bool) -> Option<u16> {
     let (s, port, target) = parse_forward_line(line)?;
-    (s == serial && target.starts_with("localabstract:scrcpy") && !protected.contains(&port))
-        .then_some(port)
+    (s == serial
+        && target.starts_with("localabstract:scrcpy")
+        && !protected.contains(&port)
+        && (!remote || local_port_free(port)))
+    .then_some(port)
 }
 
 /// 一路 scrcpy 会话（镜像窗口或录屏，scrcpy 子进程 + 远程模式的 hop#2 端口映射）。
@@ -628,23 +643,46 @@ mod tests {
     fn test_rule_sweep_port_concurrency_protection() {
         // 同设备 scrcpy 残留规则：未被保护 → 待清扫
         let line = "6eb792dfb0f tcp:27183 localabstract:scrcpy-abc123";
-        assert_eq!(rule_sweep_port(line, "6eb792dfb0f", &HashSet::new()), Some(27183));
-        // 端口被活会话保护（镜像+录屏并发：先起会话建连中的规则）→ 跳过
+        assert_eq!(rule_sweep_port(line, "6eb792dfb0f", &HashSet::new(), false), Some(27183));
+        // 端口被本进程映射表保护（同进程并发：先起会话建连中的规则）→ 跳过
         let protected: HashSet<u16> = [27183].into_iter().collect();
-        assert_eq!(rule_sweep_port(line, "6eb792dfb0f", &protected), None);
+        assert_eq!(rule_sweep_port(line, "6eb792dfb0f", &protected, false), None);
         // 其他设备的规则 / 非 scrcpy 规则（xperf-agent 等）→ 不动
         assert_eq!(
-            rule_sweep_port("other-dev tcp:27183 localabstract:scrcpy-x", "6eb792dfb0f", &HashSet::new()),
+            rule_sweep_port("other-dev tcp:27183 localabstract:scrcpy-x", "6eb792dfb0f", &HashSet::new(), false),
             None
         );
         assert_eq!(
             rule_sweep_port(
                 "6eb792dfb0f tcp:40759 localabstract:xperf-agent",
                 "6eb792dfb0f",
-                &HashSet::new()
+                &HashSet::new(),
+                false,
             ),
             None
         );
+    }
+
+    #[test]
+    fn test_rule_sweep_port_cross_process_guard() {
+        // 跨进程活会话保护（远程模式）：本机端口被监听 = 另一进程活会话持有 hop#2
+        // → 跳过；同一规则在本地模式（判据不适用）或无监听（残留）时正常清扫
+        let l = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = l.local_addr().unwrap().port();
+        let line = format!("6eb792dfb0f tcp:{port} localabstract:scrcpy-live00");
+        assert_eq!(
+            rule_sweep_port(&line, "6eb792dfb0f", &HashSet::new(), true),
+            None,
+            "远程模式+本机监听 = 跨进程活会话，须跳过"
+        );
+        assert_eq!(
+            rule_sweep_port(&line, "6eb792dfb0f", &HashSet::new(), false),
+            Some(port),
+            "本地模式不按本机占用跳过（规则监听器在本机 adb server 上恒占用）"
+        );
+        drop(l); // 释放监听 → 模拟残留规则（宿主已死）
+        // 只测忙→闲方向中「无监听则清扫」：刚释放的端口可能 TIME_WAIT，bind 失败
+        // 属可接受误跳过（仅多留一条残留），故此处不断言 Some
     }
 
     #[test]

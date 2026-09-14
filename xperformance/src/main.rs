@@ -208,33 +208,55 @@ fn wait_record_started(path: &Path, timeout: std::time::Duration) -> bool {
 
 /// 录屏线程（--record N）：启动 scrcpy 无窗口录制，N 秒（或 Ctrl-C 中断提前）
 /// 后 SIGINT 优雅封盘，返回产物路径。倒计时从产物文件出现（首帧落盘）起算，
-/// 保证成片时长 ≈ N（spawn/推 server ~1.5s 不吃进录制窗口）
+/// 保证成片时长 ≈ N（spawn/推 server ~1.5s 不吃进录制窗口）。
+///
+/// **失败自愈（重试一次）**：设备端 server 启动期偶发中止（镜像流并发下 SS3 实测
+/// ~15%，server 进程在绑定 socket 前死亡——客户端 10s 重试耗尽报
+/// "Server connection failed"，协议/隧道/注册侧均正常）：首试未建流（产物文件
+/// 未出现）且非用户中断时自动重试一次（新端口 + 新 server 实例）；重试仍失败才报错。
 fn spawn_record_thread(secs: u64, package: &str) -> std::thread::JoinHandle<Result<PathBuf>> {
     let pkg = package.to_string();
     std::thread::spawn(move || -> Result<PathBuf> {
         let dir = capture_dir(&pkg)?;
-        let h = xperf_core::mirror::start_recorder(None, &dir)?;
-        let path = h
-            .record_path()
-            .cloned()
-            .ok_or_else(|| anyhow::anyhow!("录屏句柄无产物路径"))?;
-        wait_record_started(&path, std::time::Duration::from_secs(10));
-        let deadline = Instant::now() + std::time::Duration::from_secs(secs);
-        while Instant::now() < deadline {
-            if xperf_core::utils::is_interrupted() {
+        let mut tail = String::new();
+        for attempt in 1..=2 {
+            if attempt > 1 {
+                println!("{}", "⚠️ 录屏视频流未建立，自动重试一次…".yellow());
+            }
+            let h = xperf_core::mirror::start_recorder(None, &dir)?;
+            let path = h
+                .record_path()
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("录屏句柄无产物路径"))?;
+            // MP4 muxer 在首个包到达时才建文件：文件未出现 = 视频流未建立
+            let started = wait_record_started(&path, std::time::Duration::from_secs(10));
+            if started {
+                let deadline = Instant::now() + std::time::Duration::from_secs(secs);
+                while Instant::now() < deadline {
+                    if xperf_core::utils::is_interrupted() {
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(150));
+                }
+                h.stop(); // SIGINT 封盘；wait_exit 等进程退出（超时 SIGKILL 兜底）
+            }
+            h.wait_exit();
+            // 产物核验：流未建立/编码器冲突等场景下 scrcpy 可优雅退出但未产出文件，
+            // 绝不能报「已保存」假阳性（2026-09-12 镜像+录屏并存实测踩坑）
+            if path.is_file() {
+                return Ok(path);
+            }
+            tail = h.stderr_tail_text();
+            // 流已建立但产物消失不重试（实测未出现且重试无法恢复已录数据）；
+            // 用户主动中断时不重试
+            if started || xperf_core::utils::is_interrupted() {
                 break;
             }
-            std::thread::sleep(std::time::Duration::from_millis(150));
         }
-        h.stop(); // SIGINT 封盘；wait_exit 等进程退出（超时 SIGKILL 兜底）
-        h.wait_exit();
-        // 产物核验：流未建立/编码器冲突等场景下 scrcpy 可优雅退出但未产出文件，
-        // 绝不能报「已保存」假阳性（2026-09-12 镜像+录屏并存实测踩坑）
-        if !path.is_file() {
-            let tail = h.stderr_tail_text();
-            anyhow::bail!("录屏未产出文件（scrcpy 视频流未建立）{}", if tail.is_empty() { String::new() } else { format!("：\n{tail}") });
-        }
-        Ok(path)
+        anyhow::bail!(
+            "录屏未产出文件（scrcpy 视频流未建立）{}",
+            if tail.is_empty() { String::new() } else { format!("：\n{tail}") }
+        )
     })
 }
 
