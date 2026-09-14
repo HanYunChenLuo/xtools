@@ -6,6 +6,30 @@
 > 新会话开始时可先读本文件了解近期上下文。
 
 ---
+## 2026-09-14 晚 — logcat 支持（`feature/logcat` 合 main）
+
+**任务**：WORKSPACE I 节新功能候补 ①——设备 logcat 抓取/查看接入工具链（要求 SSH 远程可用）。
+
+**形态决策**（用户确认 A/A/A）：core 新模块 `logcat.rs`（spawn `adb logcat` 流式子进程，走 hop#1 零隧道改动）；按包过滤 UID 优先（A11 降级 pid）；GUI 每设备第 4 子 tab「日志」（live 视图 + 落盘），弃「仅侧栏落盘」；断连 1s 退避自动重连（对齐采样语义），弃「EOF 即停」。
+
+**commit**：35a92f3（core logcat 模块 + 9 单测）→ f803a3b（CLI --logcat）→ 551d50c（GUI 日志 tab）→ a41c091（doc 链接修复）。
+
+**实现要点**：
+- core：读线程（blocking lines → mpsc）+ 写线程（`recv_timeout` 200ms 合帧 → 文件逐行 flush + 事件回调批量推 GUI）；`LogcatFilter::{All,Uid,Pid}`；`resolve_package_filter` 按 `ro.build.version.release` ≥12 选 `--uid`（`pm list package -U`，SS4 多用户 `10220,99910220` 逗号列表原样透传），否则 `pidof` 首 pid 降级（**A11 logcat 无 `--uid`，实测 `Unknown option`**）
+- 行格式 `-v threadtime -v year -T 0`：threadtime 设备时钟与采样 CSV（agent 设备端 epoch）同源天然对齐；`-T 0` 不回放历史（A11 降级 1 行 backlog + stderr 告警，stdout 干净——实测锁定）
+- 断连重连：EOF → 1s 退避重 spawn（文件内 `# xperf logcat reconnect` 标记行）；**设备在线但秒死（<3s）×3 → 判永久性失败**（参数错误类）`LogcatEvent::Error` 上报退出，防静默死循环
+- CLI：并行（窗口覆盖采样全程）/独立（Ctrl-C）两模式；独立失败 exit 1、并行失败只告警（同截屏/录屏语义）；截屏「唯一目的」判定补充豁免 logcat
+- GUI：`DeviceSession.logcat` 槽位（停止同步完成无监护线程）；`start_logcat/stop_logcat` 命令 + `logcat {serial, stage, lines|message}` 事件；前端 ring buffer 2000 行 + 级别着色（正则兼容 A11 `+0800 ` 时区前缀行首）+ 暂停滚动/清空；关窗 CloseRequested 统一 stop
+
+**真机回归（均 --remote hppc）**：SS3 uid=10136 独立 ✓ / SS2MAX pid=1744 降级+限制提示 ✓ / SS4 多用户 uid 透传（冷启动 burst 111 行）✓ / `--cpu --logcat` 并行同目录（时间轴逐秒对齐）✓ / 无包名全机（1517 行/8s，device-<serial> 目录）✓ / `adb reconnect` 断连→重连标记行+继续 ✓ / A11 未运行与包未安装两错误路径 exit 1 文案清晰 ✓。**GUI AX 三轮实测**：日志 tab 切换→包名填写→开始抓取→停止抓取全链（diag `logcat: started/stopped` + 落盘 uid 过滤正确佐证）。**关键教训**：① AX `set value` 写文本框须先 `set focused true`（否则值不落 DOM，按包过滤静默退化为全机——落盘目录 device-* 而非 pkg 名即为判据）；② 流式渲染期间 webkit AX 树粘性整体剪枝（枚举返回 4k 死引用、属性全 error）——交互须在启动前健康窗口完成；③ run_cmd 超时杀整个进程组——被测 GUI 与脚本须分属不同 run_cmd 调用（一次 180s 超时把同组 GUI 一并杀掉，伪崩溃排查）。
+
+**测试**：core 119（+9 logcat）+ GUI 10 + CLI 5 + xrm 2 全绿；clippy/cargo doc/rustdoc missing_docs 零警告。
+
+**遗留**：live 视图行渲染未能 AX 读出（上述剪枝问题）——代码走查 + 与 sample/trace 同事件模式，用户一眼确认即可。
+
+---
+
+
 ## 2026-09-14 — 镜像+录屏并存缺陷核销（`feature/screen-capture` 收尾合 main）
 
 **任务**：WORKSPACE A 节遗留——镜像+录屏同机并存失败（录屏卡死不产出 + 近同时启动镜像被杀）。
