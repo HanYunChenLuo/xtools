@@ -266,7 +266,7 @@ pub fn start_logcat(
     let header = format!(
         "# xperf logcat | start={} | serial={} | filter={:?} | level={}",
         Local::now().format("%Y-%m-%d %H:%M:%S%.3f"),
-        serial.unwrap_or("(auto)"),
+        crate::utils::resolve_serial(serial).unwrap_or_else(|| "(auto)".into()),
         filter,
         min_level.map(|l| l.to_string()).unwrap_or_else(|| "V".into()),
     );
