@@ -217,9 +217,14 @@ class DeviceSession {
     this.mirrorRunning = false;
     this.recording = false;
     // logcat 抓取（「日志」tab）：running=抓取中；paused=视图暂停滚动（不落盘）；
-    // 视图为 ring buffer（超 LOGCAT_VIEW_CAP 行从头部修剪，防长会话 DOM 膨胀卡顿）
+    // buf=行数据 ring buffer（LOGCAT_VIEW_CAP 上限）；dirty=非可见期间有未渲染行
+    //（设备页/日志 tab 非激活时不碰 DOM——WebKit 不可见 DOM 变更仍要维护渲染/AX 树，
+    // 实测全机洪泛 ~190 行/s 时白耗 ~13% 单核；切回时一次性重放）
     this.logcatRunning = false;
     this.logcatPaused = false;
+    this.logcatBuf = [];
+    this.logcatDirty = false;
+    this.activeTab = 'perf'; // 当前激活子 tab（switchTab 更新；渲染节流判定用）
     // 同型号多机并存时 tab 标签附 serial 尾 4 位消歧（App.refreshTabLabels 维护）
     this.dupModel = false;
 
@@ -546,10 +551,21 @@ class DeviceSession {
     }
   }
 
-  // 追加日志行到视图：threadtime 行解析级别字符着色（A11 行首带时区前缀故
-  // 正则允许 `+0800 ` 前导）；超 LOGCAT_VIEW_CAP 从头部修剪；未暂停时滚到底部
+  // 追加日志行：数据恒入 buf（ring buffer 修剪）；仅当设备页+日志 tab 都激活时
+  // 才碰 DOM（否则置 dirty，切回重放）——非可见 DOM 变更是 WebKit 无谓开销的大头
   appendLogcatLines(lines) {
     if (!lines.length) return;
+    for (const l of lines) this.logcatBuf.push(l);
+    while (this.logcatBuf.length > LOGCAT_VIEW_CAP) this.logcatBuf.shift();
+    if (app.active === this.serial && this.activeTab === 'logcat') {
+      this.renderLogcatLines(lines);
+    } else {
+      this.logcatDirty = true;
+    }
+  }
+
+  // 渲染行到 DOM（调用前提：日志页可见）：级别着色 + 修剪 + 未暂停时滚到底部
+  renderLogcatLines(lines) {
     const view = this.el('logcat-view');
     const frag = document.createDocumentFragment();
     for (const line of lines) {
@@ -562,6 +578,15 @@ class DeviceSession {
     view.appendChild(frag);
     while (view.childElementCount > LOGCAT_VIEW_CAP) view.removeChild(view.firstChild);
     if (!this.logcatPaused) view.scrollTop = view.scrollHeight;
+  }
+
+  // 切回日志页/设备页时重放非可见期间积累的行（一次性 DocumentFragment 重建）
+  renderLogcatIfDirty() {
+    if (!this.logcatDirty) return;
+    this.logcatDirty = false;
+    const view = this.el('logcat-view');
+    view.innerHTML = '';
+    if (this.logcatBuf.length) this.renderLogcatLines(this.logcatBuf);
   }
 
   // ---- 状态栏（顶栏显示当前激活设备的状态；非激活设备暂存自己的状态） ----
@@ -633,6 +658,7 @@ class DeviceSession {
   // ---- 子 tab 切换（性能指标 / Perfetto / Simpleperf / 日志；侧栏公共模块常驻） ----
   switchTab(which) {
     const perf = which === 'perf';
+    this.activeTab = which;
     this.el('perf-content').classList.toggle('hidden', !perf);
     this.el('trace-content').classList.toggle('hidden', which !== 'trace');
     this.el('stack-content').classList.toggle('hidden', which !== 'stack');
@@ -640,6 +666,8 @@ class DeviceSession {
     for (const t of this.els('subtab')) t.classList.toggle('active', t.dataset.tab === which);
     // 图表容器显隐变化后尺寸需刷新
     if (perf) this.refreshChartSizes();
+    // 日志页重新可见：重放非可见期间积累的行
+    if (which === 'logcat') this.renderLogcatIfDirty();
   }
 
   // ---- 面板渲染 ----
@@ -1203,7 +1231,11 @@ class DeviceSession {
     this.el('shot-btn').addEventListener('click', () => this.takeScreenshot());
     this.el('record-btn').addEventListener('click', () => this.toggleRecord());
     this.el('logcat-btn').addEventListener('click', () => this.toggleLogcat());
-    this.el('logcat-clear-btn').addEventListener('click', () => { this.el('logcat-view').innerHTML = ''; });
+    this.el('logcat-clear-btn').addEventListener('click', () => {
+      this.el('logcat-view').innerHTML = '';
+      this.logcatBuf = [];
+      this.logcatDirty = false;
+    });
     // 级别/按包过滤变更热切换（抓取中即时生效，同文件续写）；包名变更仅在勾选时有意义
     this.el('logcat-level').addEventListener('change', () => this.restartLogcatIfRunning());
     this.el('logcat-bypkg').addEventListener('change', () => this.restartLogcatIfRunning());
@@ -1373,6 +1405,8 @@ const app = {
     this.renderStatus();
     s.renderLive();
     s.renderThreads();
+    // 日志页若激活：重放设备页隐藏期间积累的行
+    s.renderLogcatIfDirty();
   },
 
   // 顶栏状态栏：显示当前激活设备的状态（普通文本 / 录制进度绿色填充）
