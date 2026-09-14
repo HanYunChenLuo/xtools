@@ -8,7 +8,9 @@
 ---
 ## 2026-09-14 深夜(3) — logcat review 第二轮（0771155）
 
-**任务**：继续 review（core 线程逻辑 / GUI 后端 / CLI / 文档）。修复 2 项：CLI 混合独立模式（`--screenshot --logcat`）logcat 失败补 `capture_failed` → exit 1（对齐 record/screenshot 语义；并行采样模式保持「失败只告警」不置码）；前端 `syncLogcatEvents` catch 静默吞错改 diag（IPC 掉线时后端暂停态失同步会致视图静默停滞，幂等重发自愈）。**记录不修**：① restart 与断连重连的极窄竞态（`restarting` 标记可能被紧随的自然断连消费，仅少计一次秒死，无功能错误——修复需序列化两路径，复杂度不值）；② `logcat_dir_for` 与 `capture_dir_for` 结构相似（遵循既有模式不过早抽象）；③ spawn 失败的无限重试循环（adb 恢复即自愈，每秒一次空尝试开销可忽略）。**核对无误**：Eof 分支锁时序（slot 锁内 adb 调用与 stop_inner 无死锁）、`emit_lines` 闭包借用、`is_done` 与 stop/start 竞态、`--trace/--stack` 并行窗口语义（logcat 跟随采样不限时）、关窗清理顺序。core 119 / CLI 5 / clippy / doc 零警告。
+**任务**：继续 review（core 线程逻辑 / GUI 后端 / CLI / 文档）。修复 2 项：CLI 混合独立模式（`--screenshot --logcat`）logcat 失败补 `capture_failed` → exit 1（对齐 record/screenshot 语义；并行采样模式保持「失败只告警」不置码）；前端 `syncLogcatEvents` catch 静默吞错改 diag（IPC 掉线时后端暂停态失同步会致视图静默停滞，幂等重发自愈）。
+
+**后续（7118091）**：用户质疑「记录不修」评估后重新推演，**项 ①（restart 竞态）评估不成立已修**——写线程 Eof 分支为「读 config → sleep(1s) → spawn」，restart 三步落在该窗口内时 kill 落空（slot 已 take）→ 旧口径 respawn 起来后无 Eof → `restarting` 标记滞留、新口径静默失效到下次断连，状态栏却已显示「已切换」；窗口 1s 非极窄，断连退避期间切级别高概率触发。修复：spawn 后补检 `restarting`，置位立即杀刚起的进程走 planned 路径按新口径重 spawn（全时序场景收敛，含 kill 落空/µs 窗口/正常路径）。项 ② ③ 维持不修（目录函数重复为风格项非正确性项；spawn 无限重试与断连重连同语义且 stop/关窗/Ctrl-C 退出路径全覆盖）。core 119 / CLI 5 / clippy / doc 零警告，集成测试回归通过。**教训：竞态「窗口窄」的判断必须对照真实代码时序（含 sleep），不能凭直觉——本例 sleep(1s) 恰是窗口主体。**
 
 ---
 
