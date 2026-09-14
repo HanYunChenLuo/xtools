@@ -76,6 +76,7 @@
           <button class="tab subtab active" data-tab="perf">性能指标</button>
           <button class="tab subtab" data-tab="trace">Perfetto 分析</button>
           <button class="tab subtab" data-tab="stack">Simpleperf 分析</button>
+          <button class="tab subtab" data-tab="logcat">日志</button>
         </div>
         <div class="tab-content perf-content">
           <div class="perf-controls">
@@ -183,6 +184,29 @@
           </div>
           <div class="trace-report-box">
             <pre class="stack-report"></pre>
+          </div>
+        </div>
+        <div class="tab-content logcat-content hidden">
+          <div class="trace-toolbar">
+            <button class="small logcat-btn" title="抓取设备 logcat 流式落盘（与采样 CSV 同设备时钟可对齐）；断连自动重连">开始抓取</button>
+            <label class="toolbar-record">级别
+              <select class="logcat-level" title="最低级别（*:V 全部 … *:E 仅错误）">
+                <option value="V" selected>全部</option>
+                <option value="D">D+</option>
+                <option value="I">I+</option>
+                <option value="W">W+</option>
+                <option value="E">E</option>
+              </select>
+            </label>
+            <label class="toolbar-record" title="按侧栏包名过滤：Android 12+ 按 UID（进程重启耐受）；11 及以下按 pid（需应用已运行，重启后新进程日志缺失）。不勾选或包名为空 = 全机抓取">
+              <input class="logcat-bypkg" type="checkbox" checked /> 按包过滤
+            </label>
+            <button class="small logcat-pause-btn" title="暂停/恢复自动滚动到底部">暂停滚动</button>
+            <button class="small logcat-clear-btn" title="清空当前视图（不影响落盘文件）">清空</button>
+            <span class="trace-file-label logcat-path"></span>
+          </div>
+          <div class="trace-report-box logcat-view-box">
+            <div class="logcat-view"></div>
           </div>
         </div>
       </section>
