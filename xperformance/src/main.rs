@@ -1776,6 +1776,11 @@ async fn main() -> Result<()> {
                     std::process::exit(1);
                 }
                 println!("{}", format!("logcat 启动失败: {:#}（继续）", e).yellow());
+                // 混合独立模式（如 --screenshot --logcat）失败如实置败（退出码 1）；
+                // 并行采样模式遵循「失败只告警不置码」语义（同 record）
+                if samplingless {
+                    capture_failed = true;
+                }
                 None
             }
         }

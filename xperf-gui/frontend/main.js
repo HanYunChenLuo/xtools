@@ -564,7 +564,11 @@ class DeviceSession {
   syncLogcatEvents() {
     if (!this.logcatRunning) return;
     const visible = app.active === this.serial && this.activeTab === 'logcat';
-    invoke('set_logcat_events', { serial: this.serial, paused: !visible }).catch(() => {});
+    invoke('set_logcat_events', { serial: this.serial, paused: !visible }).catch((e) => {
+      // 极端情况（IPC 掉线）：后端暂停状态可能与前端认知失同步（视图静默停滞），
+      // 打点供诊断；恢复靠下一次任意切换的 sync（幂等重发）
+      _diag('[' + this.serial + '] logcat syncEvents ERROR: ' + JSON.stringify(e));
+    });
   }
 
   // 追加日志行：数据恒入 buf（ring buffer 修剪）；仅当设备页+日志 tab 都激活时
