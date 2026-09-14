@@ -25,6 +25,8 @@ pub mod csvstream;
 pub mod fps;
 /// host 侧采样通道（SS4 专属：ligfx GPU busy，合成事件汇入 AgentStream）。
 pub mod hostchan;
+/// logcat 日志抓取：adb logcat 流式落盘（按包 UID/pid 过滤、断连自动重连）。
+pub mod logcat;
 /// 时间轴打点：Unix socket 监听与打点事件。
 pub mod marker;
 /// 内存采样协议类型。
