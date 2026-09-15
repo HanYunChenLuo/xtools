@@ -1,42 +1,25 @@
-# 探测流水线（临时文件，验证后替换为正式 CI）：
-#   1) artifactory 镜像源拉取（ubuntu:20.04 / rust:1.93.0）
-#   2) apt 软件源可达性（ubuntu archive + rust 镜像的 debian archive）
-#   3) crates.io 依赖拉取 + CLI Linux 构建（端到端）
-#   4) release-cli 官方镜像（registry.gitlab.com）是否可拉
-#   5) dl.google.com NDK zip 可达性
-# 全部 job 并行、无条件执行。
+# 探测流水线 #2（临时文件）：runner 侧 apt 走 aliyun 镜像重写后的可达性/速度。
+# 结论 #1：artifactory 镜像拉取 ✅ / dl.google.com ✅ / registry.gitlab.com ✅ /
+#          archive.ubuntu.com + deb.debian.org 直连不可用（apt 卡死 15min+）。
 
 stages:
   - probe
 
-probe:ubuntu-artifactory:
+probe:ubuntu-aliyun:
   stage: probe
   image: artifactory.ep.chehejia.com/docker-remote/library/ubuntu:20.04
   script:
-    - head -2 /etc/os-release
-    - apt-get update -qq && apt-get install -y -qq curl build-essential pkg-config ca-certificates libfontconfig1-dev
-    - curl --version | head -1
+    - sed -i 's|archive.ubuntu.com|mirrors.aliyun.com|g; s|security.ubuntu.com|mirrors.aliyun.com|g' /etc/apt/sources.list
+    - time apt-get update -qq
+    - time apt-get install -y -qq pkg-config libfontconfig1-dev
+    - pkg-config --modversion fontconfig
 
-probe:rust-cli-build:
+probe:rust-bullseye-aliyun:
   stage: probe
-  image: artifactory.ep.chehejia.com/docker-remote/library/rust:1.93.0
-  variables:
-    CARGO_HOME: $CI_PROJECT_DIR/.cargo
+  image: artifactory.ep.chehejia.com/docker-remote/library/rust:1.93.0-bullseye
   script:
-    - rustc --version
-    - apt-get update -qq && apt-get install -y -qq pkg-config libfontconfig1-dev
-    - cargo build --release -p xperf-cli
-    - ls -lh target/release/xperf-cli
-
-probe:release-cli-image:
-  stage: probe
-  image: registry.gitlab.com/gitlab-org/release-cli:latest
-  script:
-    - release-cli --version
-
-probe:ndk-egress:
-  stage: probe
-  image: artifactory.ep.chehejia.com/docker-remote/library/ubuntu:20.04
-  script:
-    - apt-get update -qq && apt-get install -y -qq curl ca-certificates
-    - curl -sI -m 20 https://dl.google.com/android/repository/android-ndk-r25b-linux.zip | head -6
+    - sed -i 's|deb.debian.org|mirrors.aliyun.com|g; s|security.debian.org|mirrors.aliyun.com|g' /etc/apt/sources.list
+    - time apt-get update -qq
+    - time apt-get install -y -qq pkg-config libfontconfig1-dev
+    - pkg-config --modversion fontconfig
+    - echo "tools:"; for t in unzip python3 busybox curl git; do command -v $t || echo "  $t MISSING"; done
