@@ -6,6 +6,28 @@
 > 新会话开始时可先读本文件了解近期上下文。
 
 ---
+## 2026-09-15 下午 — J 节收尾：1.74 CPU 增量根因破案 + 应用侧批量提交优化真机回归（超 1.38 基线）
+
+**任务**：WORKSPACE J 节——结合 hppc 源码定位 facedemo 1.74.1 相对主线 1.38 的 +5.06pp CPU 增量并落地优化。
+
+**根因链（源码 + 反汇编 + 同协议 simpleperf 对照三重证据）**：
+1. face_lib 3DGS 排序管线每帧 **15 次 `engine.flush_and_wait()`**（排序 13：init + 4 radix pass × upsweep/scan/downsweep，在 `dispatch_gpu` 的 pass 循环内；renderer 2：sort_points/calc_view_data_gpu_full）——反汇编 libinterface.so 扫 BL 找到 `Engine::flushAndWait` 全部 7 调用点确认。
+2. 1.74 后端 `VulkanDriver::finish()` = flush + **vkQueueWaitIdle** + waitForFences + readPixels；1.38 的 finish 仅 flush（ffence 等待语义两版相同，但 1.74 每次调用多付 2+ ioctl）。
+3. 1.74 每次 submit：新 semaphore（池化但逐提交轮转）+ `mLastSubmit` 链式 wait → Adreno 驱动每提交做 kgsl syncobj create/destroy + FD 开关（children 报告：gsl_syncobj_create 3.26% + put 5.39% + sync_file/close 链）；1.38 固定 45 槽 semaphore/fence 复用，同协议对照无 churn。1.74 另独有 `getRecording`+`vkBeginCommandBuffer` 8.36%/7.28%（1.38 报告全零）。
+4. 量化（同协议 30s children 对照）：flush 子树 16.40% vs 4.85%、vkQueueSubmit 13.29% vs 2.71%、updateBufferObjectCommon 12.60% vs loadFromCpu 5.12%、dispatchCompute 7.60% vs 2.65%（进程口径）。
+
+**优化（应用侧，未动 filament 源码）**：mindui-1.74 `face_lib/.../gaussian_splat/{sorting,renderer}.rs`——排序批量提交：upsweep/scan/downsweep 每 pass 独立 MaterialInstance（×4，消除 host 即时 vkUpdateDescriptorSets 与在飞 GPU 读的竞争；UBO 参数走 staging copy 本就有 cmdbuf 保序；每 MI 绑定逐帧恒定→跨帧同值覆写安全），删除全部 15 次 flush_and_wait，dispatch_gpu 末尾 + calc_view 末尾各留一次 `flush()`（保「compute 先于 render pass」语义；正确性依据 = 1.74 后端 dispatchCompute 已恢复的 post-dispatch barrier Lixiang fix）。
+
+**真机回归（SS4 localhost:5559 --remote hppc，broadcast_error 60s）**：进程 CPU **16.89% → 9.70%**，XFW:Main **12.21% → 5.08%**（**低于主线 1.38 的 11.69%/7.15%**——1.38 也付 15 次 submit+fence 等待），FPS 44.82 不变，GPU 进程 busy 10.67%（基线 11.94% 同量级），RSS 192MB 稳定。awaken2 对照 10.24%/5.15%/44.82 无病理。补丁后 simpleperf：flush 16.40→4.12%、vkQueueSubmit 13.29→1.72%、finish/vkQueueWaitIdle/syncobj 链消失。截图目验 niuzai 渲染正确，logcat 无错误。
+
+**产物与操作记录**（全在 hppc）：补丁 `/tmp/facedemo/batched-sort-1.74.patch`（311 行）；优化 APK `/tmp/facedemo/v1.74.1-batching.apk`（已装 SS4，回退 = `install -r /tmp/facedemo/v1.74.1.apk`）；源文件备份 `*.bak-batching`（mindui-1.74 非 git 仓）。构建链踩坑记录：rustup shim `nightly-2025-02-14`（系统 cargo 1.75 不支持 edition2024）+ NDK env 三变量 + **必须 `--lib`**（bin 是 PC 目标会挂）+ **`--features "filament_source backend_vulkan"`**（否则 material-tool 去 artifactory 拉不存在的 matc 预编译包）；APK 换 so 快通道 = zip STORED 替换 libinterface.so + zipalign -p 4096 + apksigner（platform.jks，12345678/chehejia），脚本 `/tmp/repack_apk.sh`。
+
+**遗留候选（未做）**：后端侧 ①`finish()` 去 vkQueueWaitIdle（FFence 已兜底，对齐 1.38）；②`mLastSubmit` 链 + 每 submit 新 semaphore 可按需信号化（仅 present 前带 signal）——影响面整个 fork，建议 filament 仓单独评审；③每帧 SurfaceRenderer drop→present 的 fence FD churn（两版共有）已成占比最高剩余路径。filament 两个 dev 目录未动（只读勘察）。
+
+**xtools 侧**：仅文档（WORKSPACE J 节勾销），无代码改动。
+
+---
+
 ## 2026-09-15 — facedemo filament 1.74 CPU 升高归因（WORKSPACE J 节，无代码改动）
 
 **任务**：飞书文档两个 facedemo APK（主线 filament 1.38 / v1.74.1）在 SS4.0 niuzai 皮肤循环动画场景 CPU 7.3→11.6，找出 1.74 升高原因。全程 `--remote hppc --device localhost:5559`。
