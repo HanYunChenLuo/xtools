@@ -94,8 +94,6 @@ build:linux:
   extends: .rust-job
   variables:
     ANDROID_NDK_HOME: $CI_PROJECT_DIR/$NDK_DIR
-    # static.rust-lang.org 从 runner 不可达（Fastly 同 crates.io 被阻断），rustup 组件走 ustc 镜像
-    RUSTUP_DIST_SERVER: https://mirrors.ustc.edu.cn/rust-static
   cache:
     - key:
         files:
@@ -113,7 +111,17 @@ build:linux:
       curl -fsSL --header "JOB-TOKEN: $CI_JOB_TOKEN" -o /tmp/ndk.zip \
         "$CI_API_V4_URL/projects/$CI_PROJECT_ID/packages/generic/ndk/25.1.8937393/android-ndk-r25b-linux.zip"
       unzip -q /tmp/ndk.zip && rm -f /tmp/ndk.zip
-    - rustup target add aarch64-linux-android
+    # rust-std（android target）同 NDK 一并 vendor——static.rust-lang.org 从 runner 不可达
+    # （Fastly 被阻断），ustc 镜像可用但极慢（~4min/40MB）；版本须与镜像 rustc 一致，
+    # 升级 RUST_IMAGE 时同步重传 package registry
+    - |
+      rustc --version | grep -q " 1.93.0 " || { echo "镜像 rustc 非 1.93.0——须同步重传 rust-std 到 package registry"; exit 1; }
+      TC=$(ls -d /usr/local/rustup/toolchains/* | head -1)
+      curl -fsSL --header "JOB-TOKEN: $CI_JOB_TOKEN" -o /tmp/std.tar.xz \
+        "$CI_API_V4_URL/projects/$CI_PROJECT_ID/packages/generic/rust-std/1.93.0-aarch64-linux-android/rust-std-1.93.0-aarch64-linux-android.tar.xz"
+      tar -xJf /tmp/std.tar.xz -C /tmp
+      cp -r /tmp/rust-std-1.93.0-aarch64-linux-android/rust-std-aarch64-linux-android/lib/rustlib/aarch64-linux-android "$TC/lib/rustlib/"
+      ls "$TC/lib/rustlib/aarch64-linux-android/lib"/*.rlib | wc -l
     - cargo build --locked -p xperf-agent --target aarch64-linux-android --release
     - VER=$(sed -n 's/^version = "\(.*\)"$/\1/p' xperf-cli/Cargo.toml | head -1)
     - PKG="xtools-v$VER-linux-x86_64"
