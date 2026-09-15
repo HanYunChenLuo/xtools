@@ -7,6 +7,16 @@
 
 ---
 
+## 2026-09-15 晚(3) — hppc 默认远端切换内部 GitLab（运维，无代码）
+
+**任务**：用户要求 hppc 端默认远端从 GitHub 调整为内部 GitLab。
+
+**改动**（全在 hppc 仓库配置）：remote `li` URL https → ssh（`git@gitlab.chehejia.com:ligraphic/xtools.git`，ssh -T 认证 @wangjinhan 已通，免 https 凭证）；`git push li main`（gitlab 侧 main fa1e63c 为本地祖先、落后 68 提交，fast-forward 推送 e7d9bf9，LFS 无新对象零传输）；`git branch --set-upstream-to=li/main main`——hppc 上裸 `git push`/`git pull` 默认走 GitLab。GitHub `origin` 保留，显式 `git push origin main` 仍可推。本机拓扑不变（推 hppc）。CLAUDE.md 拓扑段已同步。
+
+**遗留**：无。（GitHub 与 GitLab 从 09-15 起开始分叉——若仍需镜像 GitHub，记得显式推 origin。）
+
+---
+
 ## 2026-09-15 晚(2) — CLI 更名 xperf-cli（xperformance → xperf-cli）
 
 **任务**：用户建议 CLI 更名为 `xperf-cli`（与其余成员 `xperf-core`/`xperf-gui`/`xperf-agent` 命名对齐）。
