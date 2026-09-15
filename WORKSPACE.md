@@ -2,7 +2,7 @@
 
 > 本文件记录跨会话的待办事项（backlog）。每次会话的历史总结见 `SESSION.md`。
 > 完成一项就把状态改为 ✅ 并注明完成的 commit；新增想法随时追加。
-> 最后更新：2026-09-14 晚：**logcat 支持完成（`feature/logcat` 合 main）**——CLI `--logcat` + GUI 第 4 子 tab「日志」（按包 UID/pid 过滤、断连自动重连、live 视图 ring buffer 级别着色）；真机回归三平台全通（详见 I 节条目）。I 节仅剩「命令行输入」
+> 最后更新：2026-09-15：**J 节 facedemo 1.74 CPU 归因完成**——1.74 帧路径 +56% 为文档增幅来源（提交链/UBO 上传/每帧 SurfaceRenderer 析构）；主线 1.38 另有每帧管线编译病理（bindPipeline 句柄 key miss→libllvm 编译）致实测 15.4%≠文档 7.3%。上一状态：2026-09-14 晚 logcat 支持完成（`feature/logcat` 合 main，详见 I 节条目）；I 节仅剩「命令行输入」
 
 ## 当前状态速览
 
@@ -114,6 +114,18 @@
 - [x] ~~**scrcpy 集成**~~（**已完成**，2026-09-11 深夜，`feature/scrcpy-mirror` 合 main + 补丁 `a99dee7`）：形态=拉起外部 scrcpy 窗口（解码/触控归 scrcpy）。core `mirror.rs` + `SshTunnel::add_forward_pinned`（固定端口 hop#2——**实测 adb reverse 在远端 server 拓扑下流回不到 TCP 客户端，不可用**；远程走 `-p P --tunnel-port=P` 双钉同号——**scrcpy 4.x 的 --tunnel-port 只钉本地 connect 口，adb forward 注册口由 -p/port_range 在 server 侧扫描**（v4.1 源码），只传 tunnel-port 时多镜像并存错配必败，用户实撞 SS3+SS4 场景修复）；端口池 27183..=27199 两侧同号空闲扫描。CLI `--mirror`（与采样并行 / 单独镜像-only）；GUI 每设备侧栏「屏幕镜像」toggle + 监护线程事件复位按钮（stopped/closed/failed 三态——scrcpy 正常运行也有 stderr 日志，凭 exit status 分流而非 stderr 非空）。真机：SS3/SS2MAX/SS4 远程全通、双设备并行端口隔离、SIGINT 全清理零残留
 - [ ] **命令行输入**：GUI 提供设备 shell 命令输入能力（交互式 shell or 单条执行，形态待定）。SSH 远程注意：命令通道同 adb 走 hop#1；若做成交互式长连接 shell 则类似 agent 流需 hop#2 式映射。
 - [x] ~~**截屏与录屏**~~（**已完成**，2026-09-12 主体 + 2026-09-14 并存缺陷核销，`feature/screen-capture` 合 main）：截屏=`adb exec-out screencap -p` 直写本机 PNG（PNG 魔数偏移定位剥 stdout 前缀警告——SS4 实踩）；录屏=scrcpy `--no-window --record`（复用镜像隧道双钉同号全链路；停止 SIGINT 优雅封盘 ≤3s 宽限 SIGKILL 兜底；CLI 倒计时从首帧落盘起算；产物核验防假阳性；**启动未建流自动重试一次**——设备端 server 启动偶发中止的自愈，CLI/GUI 同策略，GUI 前端 `retrying` 状态）。CLI `--screenshot`/`--record N`（独立+采样并行同窗口）；GUI 侧栏「屏幕捕获」区截屏按钮+录屏 toggle（AX 目验通过）。真机回归 SS3/SS4 全通，镜像+录屏并存 13 连过
+
+---
+
+## J. 性能分析任务（facedemo filament 版本对比）
+
+- [x] ~~**filament 1.74 CPU 升高归因**~~（**已完成**，2026-09-15，真机 SS4 `--remote hppc` 全程实测）：场景 = `毛绒 3DGS 调试`（FurBoy3dgsActivity2）+ niuzai 3DGS 模型 + awaken2 循环播放（用户指正场景入口；FaceActivity/PIXS 均非目标）。**核心结论**：
+  - **1.74.1 渲染帧路径 CPU = 12.0%（单核口径）vs 主线 1.38 帧路径 ≈ 7.7% —— +56%，即文档 7.3→11.6 增幅的来源**（FPS 44.9 / GPU 进程 busy 11.5% 两版完全一致，纯 CPU 侧差异，全部集中在 XFW:Main 渲染线程）。1.74 增量分布（simpleperf 符号化热点）：Vulkan 提交链（`VulkanDriver::finish` 26.7% → `flush` 21.1% → `vkQueueSubmit` 16.9% → ioctl 13.7%）、UBO 上传（`updateBufferObjectCommon` 15.7%）、compute dispatch 10.3%、每帧 `SurfaceRenderer` 析构 10.1%（fdsan close + `gsl_syncobj` 销毁）
+  - **主线 1.38 在该设备存在每帧 Vulkan 管线重建病理**：CPU 的 50.6% 持续花在 `VulkanPipelineCache::createPipeline` → `vkCreateGraphicsPipelines` → Adreno `libllvm-qgl` 着色器编译（实测 15.4% 总量，10+ 分钟无衰减、与白天/黑夜模式无关；扣除后 ≈7.7% 恰为文档主线 7.3%）。**机制（反汇编实锤）**：1.38 的 `bindPipeline` 以 336 字节渲染状态快照为缓存 key（MurmurHash3 + 逐字节 memcmp），`bindRenderPass` 把 **VkRenderPass 指针**、`bindVertexArray` 把顶点缓冲句柄直接写入 key（按句柄身份而非兼容性）——demo 每帧有句柄变化（嫌疑：应用层每帧 SurfaceRenderer 重建 / 3DGS 排序缓冲重建，两版共有行为）→ 每帧 miss → 全量编译。1.74 Vulkan 后端已重构（函数族完全不同）不受影响
+  - **实测与文档的差异**：v1.74.1 实测 12.0% 吻合文档 11.6%；主线实测 15.4% ≠ 文档 7.3%（差值即上述编译病理）——文档主线测量时无此现象，测量条件（固件/日期/工具口径）待用户确认
+  - 附带发现：**facedemo 的 FaceActivity（主驾入口）在两版 APK 上均 100% native 崩溃**（`NoClassDefFoundError: androidx.coordinatorlayout.widget.CoordinatorLayout` 仅被 dex 引用未定义（被 catch 非致命）→ 随后 native 堆损坏 scudo/FORTIFY SIGABRT，109ms 内死）——与 filament 版本无关的应用/环境问题；FurBoy3dgsActivity2 / PixsActivity 不受影响
+  - 数据目录：`/tmp/xperf/com.lixiang.facedemo/`（CLI 采样 CSV + simpleperf 报告，Mac 端）；APK 留存 hppc `/tmp/facedemo/`
+  - 停止动画对照：两版渲染循环均与动画绑定（停止 → FPS 0 / CPU <0.6%，无静止重绘）
 
 ---
 

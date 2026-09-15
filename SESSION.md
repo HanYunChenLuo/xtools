@@ -6,6 +6,28 @@
 > 新会话开始时可先读本文件了解近期上下文。
 
 ---
+## 2026-09-15 — facedemo filament 1.74 CPU 升高归因（WORKSPACE J 节，无代码改动）
+
+**任务**：飞书文档两个 facedemo APK（主线 filament 1.38 / v1.74.1）在 SS4.0 niuzai 皮肤循环动画场景 CPU 7.3→11.6，找出 1.74 升高原因。全程 `--remote hppc --device localhost:5559`。
+
+**场景锁定**（踩坑后用户指正）：`毛绒 3DGS 调试` = FurBoy3dgsActivity2 + niuzai 3DGS 模型（默认加载）+ awaken2 循环播放。**FaceActivity（主驾）两版 APK 均 100% native 崩溃**（CoordinatorLayout 类仅被 dex 引用未定义 → NoClassDefFoundError 被 catch → 随后 scudo 堆损坏 SIGABRT），与 filament 版本无关；PIXS（spine 2D）非目标。
+
+**数据矩阵**（单核口径，各 3-4 轮，FPS 44.9 / GPU 进程 busy ~11.5% 两版一致）：
+
+| 状态 | 主线 1.38 | v1.74.1 | 文档 |
+|---|---|---|---|
+| awaken2 循环 | 15.4%（稳定） | 12.0%（稳定） | 7.3 / 11.6 |
+| 停止动画 | 0.56%（FPS 0，渲染循环与动画绑定） | 0.36%（同） | — |
+
+**结论一（文档增幅来源）**：1.74.1 渲染帧路径 12.0% vs 主线帧路径 ≈7.7%（=15.4−7.8 编译病理）**+56%**，与文档 7.3→11.6（+59%）吻合。simpleperf 热点（.so 带完整 symtab，设备端符号化完美）：全部在 XFW:Main 渲染线程（>95% 进程 CPU），1.74 增量 = Vulkan 提交链（finish 26.7%/flush 21.1%/vkQueueSubmit 16.9%/ioctl 13.7%）+ UBO 上传 updateBufferObject 15.7% + compute dispatch 10.3% + 每帧 SurfaceRenderer 析构 10.1%（fdsan close + gsl_syncobj 销毁——应用层每帧重建 surface 的行为两版共有）。
+
+**结论二（实测与文档矛盾的解释）**：主线 1.38 在该设备有**每帧 Vulkan 管线重建病理**——50.6% CPU 持续在 `VulkanPipelineCache::createPipeline`→`vkCreateGraphicsPipelines`→Adreno `libllvm-qgl` 着色器编译（10+ 分钟无衰减、白天/黑夜无差），扣除后主线 ≈7.7% ≈ 文档 7.3。**机制（Mac 上 objdump 反汇编实锤）**：`bindPipeline` 的缓存 key 是 336 字节渲染状态快照（MurmurHash3 + memcmp），`bindRenderPass` 把 **VkRenderPass 指针**（str x1,[x0,#0x140]）、`bindVertexArray` 把顶点缓冲句柄写入 key——按句柄身份而非兼容性；demo 每帧句柄变化 → 每帧 miss → 全量编译。1.74 Vulkan 后端重构后无此问题（createPipeline 0%）。调用链在 createPipeline 处断链（fp/dwarf 双模式确认，疑 XFW 框架栈切换），改用 BL 指令模式扫描 .text 静态找到唯一调用者 bindPipeline。
+
+**遗留**：文档主线 7.3% 的测量条件（固件/日期/工具口径）待用户确认——当前设备状态复测主线必然 15.4%。深挖可选项：1.74 提交链增量的帧级 perfetto 归因（本次未做——两版 Vulkan 后端函数族不同名，逐函数 diff 不可行，帧级对照需 trace）。
+
+**工程备忘**：SS4 的 uiautomator 可完整 dump 该 app 控件树（无障碍可达），自动化点击/滑列表可靠；Car HU 窗口区域（DRIVER/COPILOT）会动态重排，每次进入场景后须重新 dump 取坐标；采样进程 pid 存在 namespace 扭曲现象（pidof 与 /proc 视图不一致，不影响按包名采样）；隔夜设备闲置后 app 渲染循环自动停（FPS 0），实验前须重新拉起。
+
+---
 ## 2026-09-14 深夜(3) — logcat review 第二轮（0771155）
 
 **任务**：继续 review（core 线程逻辑 / GUI 后端 / CLI / 文档）。修复 2 项：CLI 混合独立模式（`--screenshot --logcat`）logcat 失败补 `capture_failed` → exit 1（对齐 record/screenshot 语义；并行采样模式保持「失败只告警」不置码）；前端 `syncLogcatEvents` catch 静默吞错改 diag（IPC 掉线时后端暂停态失同步会致视图静默停滞，幂等重发自愈）。
