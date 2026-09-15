@@ -7,6 +7,14 @@
 
 ---
 
+## 2026-09-15 晚(4) — 软件发布打包需求入 WORKSPACE（仅勘察记录，未施工）
+
+**任务**：用户要求支持 Linux/macOS 软件发布打包（结合 GitLab CI）——本会话只记录需求与勘察结论，新会话施工。
+
+**产出**：WORKSPACE I 节新条目「软件发布打包」——含现有 `.gitlab-ci.yml` 状态（test stage 空壳 / macOS job 全注释 / release description 硬编码）、最高风险前置项（内部 GitLab runner 可用性，尤其 macOS）、GUI 打包依赖缺口（webkit2gtk/Xcode）、agent 是否随包决策、打包形态与版本号细节、push 流程（已切 li）。无代码改动。
+
+---
+
 ## 2026-09-15 晚(3) — hppc 默认远端切换内部 GitLab（运维，无代码）
 
 **任务**：用户要求 hppc 端默认远端从 GitHub 调整为内部 GitLab。
