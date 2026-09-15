@@ -6,6 +6,30 @@
 > 新会话开始时可先读本文件了解近期上下文。
 
 ---
+
+## 2026-09-15 — logcat 文本过滤（`feature/logcat-text-filter` 合 main）
+
+**任务**：WORKSPACE I 节候补——按包过滤之外增加文本内容过滤（关键字/正则，下沉设备端），CLI 参数 + GUI 输入框，叠加生效，口径变更走热切换。
+
+**commit**：e728b69（core：config/restart/build_args 增文本正则，`-e` 下沉 + 标记行 text= 口径 + 5 单测）→ e676d04（CLI --logcat-regex + 秒死 Error 透传 stderr）→ ca009c1（GUI 日志 tab 过滤输入框 + start/restart 命令 text 参数 + change 热切换联动）→ 文档收尾。
+
+**形态决策**：设备端 `logcat -e <regex>`（消息体 POSIX ERE）——backlog 提示的「洪泛场景下沉设备端」直接采纳，不做 host 侧过滤；host 不校验正则语法（ERE 与 Rust regex 不等价，设备校验是权威），非法正则走既有秒死 Error 路径。
+
+**关键实测结论**：
+- **非法正则三平台一致**：A11/A12/A16 的 logcat 收到 `[invalid` 均立即 rc=134（`regex_error was thrown in -fno-exceptions mode` abort）→ 子进程秒死 ×3 → `LogcatEvent::Error`——CLI 新增事件回调把该错误打到 stderr（此前 CLI 传 None，参数不兼容类失败不可见；非法正则是该路径首个用户可达诱因）
+- A11 的 `-e` 正常可用（有效正则过滤正确；此前仅验证过 `--uid` 不支持）
+- SS4 多用户 uid 逗号列表与 `-e` 叠加正常（`--uid=10220,99910220 -e filament`）
+- adb 参数转义可信：正则含 `|`/空格/中文经 `.args()` 由 adb client 转义，无 shell 注入面
+
+**真机回归（--remote hppc）**：SS3 uid+`-e` 叠加（文件头 `filter=Uid("10136") | text=filament`，仅命中行+beginning 标记）✓；SS2MAX 全机+`-e` ✓；SS4 多用户 uid+`-e` ✓；非法正则 `[invalid` → ❌ 秒死放弃透传 ✓；热切换集成测试（restart 带 text=FATAL，标记行佐证同文件续写）✓；**GUI AX 全链**：日志 tab → 过滤输入 filament → 开始（文件头 text=filament）→ 改 SurfaceFlinger（respawn 标记 text=SurfaceFlinger）→ 改 ANR（restart 事件）→ 停止 ✓。
+
+**测试**：core 122+8 ignored（+5 新单测，集成测试 test_logcat_restart_hppc 更新带文本口径）、GUI 10、CLI 5、xrm 2 全绿；clippy/cargo doc/rustdoc missing_docs 零警告。
+
+**勘察插曲（教训）**：① AX 验证一度误判「text 未生效」——实为**用户自己的 GUI 实例（旧镜像，UI 连接 hppc）同秒在同目录起了抓取**，diag/落盘路径共享致假象；判据须 lsof 文件持有者，多实例并存时留意。② WKWebView AX `set value` 异步生效（秒级）、合成 keystroke return 不一定派发 change，可靠触发改 `click` 他元素制造 blur；AX 元素引用跨流式渲染失效须重新遍历。③ AppleScript 保留字 `note`/`st` 不可作标识符；BSD sed 不认 `\b`。（均已记 CLAUDE.md AX 教训条）
+
+**遗留**：无。（GUI live 视图行渲染 AX 读值为旧已知项，不影响本功能。）
+
+---
 ## 2026-09-15 — facedemo filament 版本性能调试（与本仓库无关，已清理）
 
 facedemo 1.74 CPU 回归归因与排序管线优化（应用侧，未动 xtools 代码）：任务完成，真机验证通过。产物在 hppc `/tmp/facedemo/`（patch + APK），详细过程记录已从本文件移除。
