@@ -28,10 +28,6 @@ cargo test
 
 # Run tests for a single crate
 cargo test -p xperformance
-cargo test -p xrm
-
-# Run a specific test
-cargo test -p xrm tests::test_dangerous_operation_detection
 
 # Check for errors without building（主机工具；--workspace 会连 agent 一起检查，
 # 在 macOS/Linux 主机上会被 agent 的 Android-only compile_error 拦截）
@@ -48,7 +44,7 @@ cargo rustdoc -p xperf-gui --bins -- -W missing_docs
 
 Release binaries are written to `target/release/`。
 
-Workspace 成员：`xperf-core`（采样核心）、`xperformance`（CLI）、`xperf-gui`（Tauri GUI）、`xperf-agent`（设备端低间隔采样器，**仅 Android 二进制**——workspace `default-members` 排除它，主机目标显式构建被 `compile_error!` 拦截；交叉编译 `cargo build -p xperf-agent --target aarch64-linux-android --release`，链接器经 `.cargo/ndk-clang.sh` 按宿主 OS 探测（NDK **>= 25.1.8937393** 中取最相近，显式 ANDROID_NDK_HOME 等优先；API 26））、`xrm`（安全删除）。
+Workspace 成员：`xperf-core`（采样核心）、`xperformance`（CLI）、`xperf-gui`（Tauri GUI）、`xperf-agent`（设备端低间隔采样器，**仅 Android 二进制**——workspace `default-members` 排除它，主机目标显式构建被 `compile_error!` 拦截；交叉编译 `cargo build -p xperf-agent --target aarch64-linux-android --release`，链接器经 `.cargo/ndk-clang.sh` 按宿主 OS 探测（NDK **>= 25.1.8937393** 中取最相近，显式 ANDROID_NDK_HOME 等优先；API 26））。（历史成员 `xrm` 安全删除工具已于 2026-09-15 移出本仓库。）
 
 ---
 
@@ -414,32 +410,3 @@ hop#2: 本机 P_loc → 远端 adb forward 分配端口（agent 事件流，每�
 static INTERRUPT_FLAG: AtomicBool          // Ctrl-C 中断标志
 static TIMESTAMP_DIR: OnceLock<Mutex<Option<PathBuf>>>  // 本次会话的输出根目录，首个样本流式落盘时创建并缓存
 ```
-
----
-
-## xrm 设计结构
-
-单文件工具，全同步，无外部依赖（仅 `clap`）。
-
-### 安全检查两层机制
-
-```
-main()
- ├─ 层1（sudo 快速拦截）
- │   is_running_with_sudo()         ← 检查 SUDO_USER / SUDO_UID 环境变量
- │   └─ is_dangerous_operation()    ← 检查 /、/*、/.*，或调用 is_system_critical_path()
- │       提前 exit(1)，不进入删除流程
- │
- └─ 层2（逐文件安全检查��remove_item 内部）
-     ├─ is_symlink() → is_system_critical_path(原始路径) → remove_file
-     ├─ !exists()    → force ? skip : error
-     └─ canonicalize() → is_system_critical_path(真实路径) → remove_file / remove_dir_all
-```
-
-`is_system_critical_path()` 是唯一的路径黑名单，`is_dangerous_operation()` 直接复用它，两处检查列表保持一致。
-
-受保护的路径：`/`, `/bin`, `/boot`, `/dev`, `/etc`, `/lib`, `/lib64`, `/proc`, `/root`, `/sbin`, `/sys`, `/usr`, `/var`（及其子路径）。
-
-### 符号链接处理顺序
-
-`remove_item` 中优先用 `is_symlink()` 检测，在 `exists()` 之前处理，确保悬空符号链接（目标不存在）也能被正确删除，而不是报"文件不存在"错误。

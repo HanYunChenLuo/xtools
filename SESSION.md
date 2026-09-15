@@ -7,6 +7,16 @@
 
 ---
 
+## 2026-09-15 晚 — xrm 移出本仓库（残留清理）
+
+**任务**：用户已删 xrm crate（Cargo.toml members/default-members + xrm/ 目录），检查遗漏。
+
+**清理**：CLAUDE.md（Commands 两处 xrm 测试示例 + Workspace 成员行 + 整节「xrm 设计结构」）、README.md / README_zh.md（表格行 + `### xrm` 章节）、WORKSPACE.md 速览测试行（顺带把过时的测试计数更新为当前基线 core 122+8 / GUI 10 / CLI 5，并注明 xrm 已移出）。**SESSION.md 历史条目按约定不动**。
+
+**核对无遗漏**：`git grep -i xrm` 排除 SESSION/二进制后归零；Cargo.lock 无 xrm 残段；`.claude`/`.github` 无引用；`安全删除` 中文关键词仅剩刚清理的 README。构建/测试（core 122+8 ignored + GUI 10 + CLI 5）/cargo doc 零警告。
+
+---
+
 ## 2026-09-15 — logcat 文本过滤（`feature/logcat-text-filter` 合 main）
 
 **任务**：WORKSPACE I 节候补——按包过滤之外增加文本内容过滤（关键字/正则，下沉设备端），CLI 参数 + GUI 输入框，叠加生效，口径变更走热切换。

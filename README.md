@@ -9,7 +9,6 @@ A collection of development tools for Android development.
 | `xperformance` | CLI: Android app performance monitor (CPU / memory / FPS) |
 | `xperf-gui` | Tauri 2 GUI: real-time charts for the same metrics |
 | `xperf-agent` | On-device sampler binary (pushed automatically, not used standalone) |
-| `xrm` | Safe `rm` replacement with system-path protection |
 
 ### xperformance
 
@@ -92,11 +91,6 @@ CPU/memory charts and per-layer FPS charts on a live canvas.
 ```bash
 ./target/release/xperf-gui --package <package_name> --cpu --memory --fps
 ```
-
-### xrm
-
-Safe deletion tool: refuses to remove system-critical paths (even under sudo),
-handles dangling symlinks correctly.
 
 ## Building
 

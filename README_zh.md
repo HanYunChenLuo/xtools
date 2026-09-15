@@ -9,7 +9,6 @@ Android 开发工具集合。
 | `xperformance` | CLI：Android 应用性能监控（CPU / 内存 / FPS） |
 | `xperf-gui` | Tauri 2 GUI：同指标的实时图表 |
 | `xperf-agent` | 设备端采样器二进制（自动推送，不单独使用） |
-| `xrm` | 带系统路径保护的安全删除工具 |
 
 ### xperformance
 
@@ -92,10 +91,6 @@ Android 开发工具集合。
 ```bash
 ./target/release/xperf-gui --package <包名> --cpu --memory --fps
 ```
-
-### xrm
-
-安全删除工具：拒绝删除系统关键路径（sudo 下同样拦截），正确处理悬空符号链接。
 
 ## 构建
 
