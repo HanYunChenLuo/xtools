@@ -12,7 +12,8 @@
 #     重写 mirrors.aliyun.com 后正常（bullseye update ~38s）
 #   - crates.io 直连从 runner 不可达（index.crates.io 卡死）——cargo 走 aliyun
 #     sparse 镜像（before_script 写 $CARGO_HOME/config.toml，仅 CI 生效）
-#   - dl.google.com / registry.gitlab.com / github.com 从 runner 可达
+#   - dl.google.com / registry.gitlab.com / github.com 从 runner 可达（但 dl.google.com
+#     仅 ~2.4MB/s——NDK 等大文件已 vendor 到本项目 package registry，勿再走外网）
 #   - 基于 bullseye（glibc 2.31）构建保证 ubuntu 20.04+ 可运行
 #   - 无 macOS runner；group runner build-61-102(longteng) 长期 stale
 
@@ -103,19 +104,15 @@ build:linux:
       paths:
         - target/
         - .cargo-ci/
-    - key: $NDK_DIR
-      paths:
-        - $NDK_DIR/
   script:
     - cargo build --locked --release -p xperf-cli
-    # NDK r25b（25.1.8937393，与 .cargo/ndk-clang.sh 基线一致）；命中缓存则跳过下载
+    # NDK r25b（25.1.8937393，与 .cargo/ndk-clang.sh 基线一致）已 vendor 到本项目
+    # package registry——内部下载秒级；dl.google.com 从 runner 仅 ~2.4MB/s 且是外部
+    # 依赖（NDK 升级时重传：PUT .../packages/generic/ndk/<版本>/android-ndk-rXXb-linux.zip）
     - |
-      NDK_CLANG="$NDK_DIR/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android26-clang"
-      if [ ! -x "$NDK_CLANG" ]; then
-        echo "下载 NDK r25b（~700MB，首次或缓存失效时）"
-        curl -fsSL -o /tmp/ndk.zip https://dl.google.com/android/repository/android-ndk-r25b-linux.zip
-        unzip -q /tmp/ndk.zip && rm -f /tmp/ndk.zip
-      fi
+      curl -fsSL --header "JOB-TOKEN: $CI_JOB_TOKEN" -o /tmp/ndk.zip \
+        "$CI_API_V4_URL/projects/$CI_PROJECT_ID/packages/generic/ndk/25.1.8937393/android-ndk-r25b-linux.zip"
+      unzip -q /tmp/ndk.zip && rm -f /tmp/ndk.zip
     - rustup target add aarch64-linux-android
     - cargo build --locked -p xperf-agent --target aarch64-linux-android --release
     - VER=$(sed -n 's/^version = "\(.*\)"$/\1/p' xperf-cli/Cargo.toml | head -1)
