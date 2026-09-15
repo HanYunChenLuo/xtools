@@ -158,6 +158,11 @@ struct Args {
     /// 同停）或单独使用（Ctrl-C 停止）；设备断连自动重连
     #[arg(long)]
     logcat: bool,
+
+    /// logcat 文本过滤正则（设备端 logcat -e 消息体匹配，如 'FATAL|ANR'），
+    /// 与按包过滤叠加生效；非法正则设备端拒收（抓取连续秒死后放弃）
+    #[arg(long, value_name = "REGEX", requires = "logcat")]
+    logcat_regex: Option<String>,
 }
 
 /// 设备选择：`--device` 指定 > 单台自动；多台未指定报错并列出清单。
@@ -213,8 +218,9 @@ fn logcat_dir(package: &str) -> Result<PathBuf> {
 }
 
 /// 启动 logcat 抓取（--logcat）：有包名按包过滤（A12+ UID 进程重启耐受 /
-/// A11 降级 pid 并提示限制），无包名全机。返回句柄（停止走 `stop()`）
-fn start_logcat_capture(package: &str) -> Result<xperf_core::logcat::LogcatHandle> {
+/// A11 降级 pid 并提示限制），无包名全机；`text_regex` 设备端 -e 消息体匹配叠加。
+/// 返回句柄（停止走 `stop()`）
+fn start_logcat_capture(package: &str, text_regex: Option<String>) -> Result<xperf_core::logcat::LogcatHandle> {
     use xperf_core::logcat::{resolve_package_filter, LogcatFilter};
     let filter = if package.is_empty() {
         LogcatFilter::All
@@ -230,8 +236,17 @@ fn start_logcat_capture(package: &str) -> Result<xperf_core::logcat::LogcatHandl
         }
         f
     };
+    if let Some(re) = text_regex.as_deref().map(str::trim).filter(|re| !re.is_empty()) {
+        println!("logcat 文本过滤: -e '{}'", re);
+    }
     let dir = logcat_dir(package)?;
-    let h = xperf_core::logcat::start_logcat(None, &dir, filter, None, None)?;
+    // 事件回调只透传 Error（连续秒死放弃——非法文本正则是主要诱因）；Lines 走落盘
+    let on_event = Box::new(|ev: xperf_core::logcat::LogcatEvent| {
+        if let xperf_core::logcat::LogcatEvent::Error(m) = ev {
+            eprintln!("{}", format!("❌ {}", m).red());
+        }
+    }) as Box<dyn Fn(xperf_core::logcat::LogcatEvent) + Send>;
+    let h = xperf_core::logcat::start_logcat(None, &dir, filter, None, text_regex, Some(on_event))?;
     Ok(h)
 }
 
@@ -1763,7 +1778,7 @@ async fn main() -> Result<()> {
     // logcat 抓取（--logcat）：流式落盘，窗口覆盖采样全程。独立模式
     // （logcat 是唯一目的）启动失败即退出；并行模式失败只告警
     let logcat = if args.logcat {
-        match start_logcat_capture(&package) {
+        match start_logcat_capture(&package, args.logcat_regex.clone()) {
             Ok(h) => {
                 println!("logcat 抓取中: {}", h.path().display());
                 Some(h)
