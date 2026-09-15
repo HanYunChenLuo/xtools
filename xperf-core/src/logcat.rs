@@ -18,6 +18,11 @@
 //! **断连恢复**：adb logcat 因设备断开 EOF 时，1s 退避自动重 spawn（与采样
 //! `reconnect_agent` 语义一致）；设备在线但子进程秒死（参数错误类永久性失败）连续
 //! 3 次则放弃并经 [`crate::logcat::LogcatEvent::Error`] 上报（避免静默死循环）。
+//!
+//! **文本过滤**（`text_regex`）：设备端 `logcat -e <regex>` 按消息体正则过滤，
+//! 与按包过滤/最低级别叠加生效。过滤下沉设备端（洪泛场景不把无关行拉过 adb
+//! 通道）；正则由设备 logcat 解析（POSIX ERE），非法正则表现为子进程秒死，
+//! 连续 3 次走上述 Error 上报路径。
 
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
@@ -57,6 +62,9 @@ pub enum LogcatFilter {
     Pid(u32),
 }
 
+/// 过滤口径共享槽的元组形态：（按包过滤， 最低级别， 文本正则）
+type LogcatConfigTuple = (LogcatFilter, Option<char>, Option<String>);
+
 /// 抓取向调用方上报的事件
 #[derive(Debug)]
 pub enum LogcatEvent {
@@ -73,7 +81,7 @@ pub struct LogcatHandle {
     stop: Arc<AtomicBool>,
     child: Arc<std::sync::Mutex<Option<Child>>>,
     /// 当前过滤口径（[`LogcatHandle::restart`] 热更新；写线程每次重 spawn 时读取）
-    config: Arc<std::sync::Mutex<(LogcatFilter, Option<char>)>>,
+    config: Arc<std::sync::Mutex<LogcatConfigTuple>>,
     /// restart 触发的计划内重 spawn 标记（EOF 处理处消费）：restart 的 kill 是主动行为，
     /// 不计入秒死统计——否则快速连切级别会误判永久失败把抓线程打死
     restarting: Arc<AtomicBool>,
@@ -91,12 +99,12 @@ impl LogcatHandle {
         &self.path
     }
 
-    /// 热切换过滤口径（级别/按包过滤变更）：更新共享配置 + 杀当前子进程——
+    /// 热切换过滤口径（级别/按包过滤/文本正则变更）：更新共享配置 + 杀当前子进程——
     /// 写线程走既有断连重连路径按新配置重 spawn（同一文件续写，标记行带新口径）。
     /// 重连退避窗口内调用同样生效（重 spawn 时读的是最新配置）；进程重启换包等
     /// 需重新解析 uid/pid 的场景，调用方先走 [`crate::logcat::resolve_package_filter`]
-    pub fn restart(&self, filter: LogcatFilter, min_level: Option<char>) {
-        *self.config.lock().unwrap() = (filter, min_level);
+    pub fn restart(&self, filter: LogcatFilter, min_level: Option<char>, text_regex: Option<String>) {
+        *self.config.lock().unwrap() = (filter, min_level, text_regex);
         self.restarting.store(true, Ordering::SeqCst);
         if let Some(c) = self.child.lock().unwrap().as_mut() {
             let _ = c.kill();
@@ -219,8 +227,9 @@ pub fn resolve_package_filter(serial: Option<&str>, package: &str) -> Result<Log
 }
 
 /// 组装 `adb logcat` 参数（纯函数，便于单测）：`-v threadtime -v year -T 0`
-/// + 过滤口径 + 可选最低级别（`*:W` 形式；level 限 V/D/I/W/E/F）
-fn build_logcat_args(filter: &LogcatFilter, min_level: Option<char>) -> Vec<String> {
+/// + 过滤口径 + 可选文本正则（`-e <regex>` 消息体匹配，空白串忽略）
+/// + 可选最低级别（`*:W` 形式 filterspec 须最后；level 限 V/D/I/W/E/F）
+fn build_logcat_args(filter: &LogcatFilter, min_level: Option<char>, text_regex: Option<&str>) -> Vec<String> {
     let mut args: Vec<String> = [
         "logcat", "-v", "threadtime", "-v", "year", "-T", "0",
     ]
@@ -232,12 +241,24 @@ fn build_logcat_args(filter: &LogcatFilter, min_level: Option<char>) -> Vec<Stri
         LogcatFilter::Uid(uids) => args.push(format!("--uid={}", uids)),
         LogcatFilter::Pid(pid) => args.push(format!("--pid={}", pid)),
     }
+    if let Some(re) = text_regex.map(str::trim).filter(|re| !re.is_empty()) {
+        args.push("-e".to_string());
+        args.push(re.to_string());
+    }
     if let Some(l) = min_level {
         if "VDIWEF".contains(l) {
             args.push(format!("*:{}", l));
         }
     }
     args
+}
+
+/// 文本过滤正则在落盘标记行中的展示形态（防换行破坏单行标记格式）
+fn display_regex(text_regex: &Option<String>) -> String {
+    match text_regex {
+        Some(re) if !re.trim().is_empty() => re.replace('\n', "\\n").replace('\r', ""),
+        _ => "(none)".to_string(),
+    }
 }
 
 /// 行读线程 → 写线程的消息
@@ -283,6 +304,7 @@ fn spawn_logcat(
 /// - `serial`：目标设备（`None` 回退全局选择，语义同其他 core 入口）
 /// - `filter`：[`resolve_package_filter`] 的结果或 [`LogcatFilter::All`]
 /// - `min_level`：最低级别（V/D/I/W/E/F），`None` 不过滤
+/// - `text_regex`：文本过滤正则（设备端 `logcat -e` 消息体匹配），`None`/空白不过滤
 /// - `on_event`：可选事件回调（GUI 批量推前端；CLI 传 `None` 只落盘）
 ///
 /// 返回 [`LogcatHandle`]；设备断开自动重连（1s 退避，`-T 0` 不回放历史）。
@@ -292,14 +314,15 @@ pub fn start_logcat(
     dest_dir: &Path,
     filter: LogcatFilter,
     min_level: Option<char>,
+    text_regex: Option<String>,
     on_event: Option<Box<dyn Fn(LogcatEvent) + Send>>,
 ) -> Result<LogcatHandle> {
     std::fs::create_dir_all(dest_dir)?;
     let path = dest_dir.join("logcat.log");
     // 过滤口径共享槽：restart() 热更新，写线程每次重 spawn 时重读组装参数
-    let config = Arc::new(std::sync::Mutex::new((filter, min_level)));
-    let (init_filter, init_level) = config.lock().unwrap().clone();
-    let args = build_logcat_args(&init_filter, init_level);
+    let config = Arc::new(std::sync::Mutex::new((filter, min_level, text_regex)));
+    let (init_filter, init_level, init_text) = config.lock().unwrap().clone();
+    let args = build_logcat_args(&init_filter, init_level, init_text.as_deref());
     let serial_owned = serial.map(|s| s.to_string());
 
     let (tx, rx) = mpsc::channel::<Msg>();
@@ -311,11 +334,12 @@ pub fn start_logcat(
 
     let mut file = BufWriter::new(std::fs::File::create(&path)?);
     let header = format!(
-        "# xperf logcat | start={} | serial={} | filter={:?} | level={}",
+        "# xperf logcat | start={} | serial={} | filter={:?} | level={} | text={}",
         Local::now().format("%Y-%m-%d %H:%M:%S%.3f"),
         crate::utils::resolve_serial(serial).unwrap_or_else(|| "(auto)".into()),
         init_filter,
         init_level.map(|l| l.to_string()).unwrap_or_else(|| "V".into()),
+        display_regex(&init_text),
     );
     writeln!(file, "{}", header)?;
     file.flush()?;
@@ -404,14 +428,15 @@ pub fn start_logcat(
                         break;
                     }
                     // 重 spawn（断连重连 / restart 热切换同路径）：读最新配置组装参数
-                    let (cur_filter, cur_level) = writer_config.lock().unwrap().clone();
-                    let cur_args = build_logcat_args(&cur_filter, cur_level);
+                    let (cur_filter, cur_level, cur_text) = writer_config.lock().unwrap().clone();
+                    let cur_args = build_logcat_args(&cur_filter, cur_level, cur_text.as_deref());
                     let _ = writeln!(
                         file,
-                        "# xperf logcat respawn {} | filter={:?} | level={}",
+                        "# xperf logcat respawn {} | filter={:?} | level={} | text={}",
                         Local::now().format("%Y-%m-%d %H:%M:%S%.3f"),
                         cur_filter,
                         cur_level.map(|l| l.to_string()).unwrap_or_else(|| "V".into()),
+                        display_regex(&cur_text),
                     );
                     let _ = file.flush();
                     std::thread::sleep(RECONNECT_BACKOFF);
@@ -516,7 +541,7 @@ mod tests {
 
     #[test]
     fn test_build_logcat_args_all() {
-        let args = build_logcat_args(&LogcatFilter::All, None);
+        let args = build_logcat_args(&LogcatFilter::All, None, None);
         assert_eq!(
             args,
             vec!["logcat", "-v", "threadtime", "-v", "year", "-T", "0"]
@@ -525,7 +550,7 @@ mod tests {
 
     #[test]
     fn test_build_logcat_args_uid_and_level() {
-        let args = build_logcat_args(&LogcatFilter::Uid("10220,99910220".into()), Some('W'));
+        let args = build_logcat_args(&LogcatFilter::Uid("10220,99910220".into()), Some('W'), None);
         assert_eq!(
             args,
             vec![
@@ -537,18 +562,53 @@ mod tests {
 
     #[test]
     fn test_build_logcat_args_pid() {
-        let args = build_logcat_args(&LogcatFilter::Pid(9671), None);
+        let args = build_logcat_args(&LogcatFilter::Pid(9671), None, None);
         assert!(args.contains(&"--pid=9671".to_string()));
     }
 
     #[test]
     fn test_build_logcat_args_invalid_level_ignored() {
-        let args = build_logcat_args(&LogcatFilter::All, Some('X'));
+        let args = build_logcat_args(&LogcatFilter::All, Some('X'), None);
         assert!(!args.iter().any(|a| a.starts_with("*:")));
     }
 
-    /// 集成测试：start → 全机抓取有行 → restart 切级别+按包过滤（同文件续写
-    /// 标记行）→ restart 回全机 → stop。需 hppc 远程环境 + SS3 在线 +
+    #[test]
+    fn test_build_logcat_args_text_regex() {
+        // 文本正则与按包过滤/级别叠加；filterspec（*:W）恒在最后
+        let args = build_logcat_args(
+            &LogcatFilter::Uid("10136".into()),
+            Some('W'),
+            Some("FATAL|ANR"),
+        );
+        assert_eq!(
+            args,
+            vec![
+                "logcat", "-v", "threadtime", "-v", "year", "-T", "0",
+                "--uid=10136", "-e", "FATAL|ANR", "*:W"
+            ]
+        );
+    }
+
+    #[test]
+    fn test_build_logcat_args_text_regex_blank_ignored() {
+        // 空白/空串不加 -e（GUI 输入框留空场景）
+        for blank in ["", "  ", " \t "] {
+            let args = build_logcat_args(&LogcatFilter::All, None, Some(blank));
+            assert!(!args.iter().any(|a| a == "-e"), "blank={:?}", blank);
+        }
+    }
+
+    #[test]
+    fn test_display_regex() {
+        assert_eq!(display_regex(&None), "(none)");
+        assert_eq!(display_regex(&Some("  ".into())), "(none)");
+        assert_eq!(display_regex(&Some("FATAL".into())), "FATAL");
+        // 换行破坏单行标记格式 → 转义
+        assert_eq!(display_regex(&Some("a\nb\rc".into())), "a\\nbc");
+    }
+
+    /// 集成测试：start → 全机抓取有行 → restart 切级别+按包过滤+文本正则（同文件
+    /// 续写标记行）→ restart 回全机 → stop。需 hppc 远程环境 + SS3 在线 +
     /// gltf 已安装（过滤解析只要求已安装，不要求运行）。
     #[test]
     #[ignore = "需要 hppc：SSH 免密 + 远端 adb + SS3(6eb792dfb0f) 在线"]
@@ -559,14 +619,14 @@ mod tests {
         let serial = "6eb792dfb0f";
         let dir = std::env::temp_dir().join(format!("xperf_logcattest_{}", std::process::id()));
         let r = (|| -> Result<()> {
-            let h = start_logcat(Some(serial), &dir, LogcatFilter::All, None, None)?;
+            let h = start_logcat(Some(serial), &dir, LogcatFilter::All, None, None, None)?;
             std::thread::sleep(std::time::Duration::from_secs(4));
-            // 热切换：按包过滤 + W 级别
+            // 热切换：按包过滤 + W 级别 + 文本正则（"FATAL" 命中稀少，但过滤链路须真实生效）
             let f = resolve_package_filter(Some(serial), "com.google.android.filament.gltf")?;
-            h.restart(f, Some('W'));
+            h.restart(f, Some('W'), Some("FATAL".to_string()));
             std::thread::sleep(std::time::Duration::from_secs(4));
-            // 热切回全机
-            h.restart(LogcatFilter::All, None);
+            // 热切回全机（同时清掉文本过滤）
+            h.restart(LogcatFilter::All, None, None);
             std::thread::sleep(std::time::Duration::from_secs(3));
             let path = h.path().to_path_buf();
             h.stop();
@@ -575,6 +635,7 @@ mod tests {
             let marks = content.matches("# xperf logcat respawn").count();
             assert!(marks >= 2, "应至少 2 条 respawn 标记行，实际 {}：\n{}", marks, content);
             assert!(content.contains("filter=Uid"), "标记行应含 Uid 过滤口径");
+            assert!(content.contains("text=FATAL"), "标记行应含文本过滤口径");
             // 全机段应有真实日志行（threadtime+year 行首）
             assert!(content.contains("2026-"), "应有真实日志行");
             Ok(())
