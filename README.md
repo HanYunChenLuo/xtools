@@ -6,26 +6,26 @@ A collection of development tools for Android development.
 
 | Tool | Description |
 |------|-------------|
-| `xperf-cli` | CLI: Android app performance monitor (CPU / memory / FPS) |
+| `xperf-cli` | CLI: Android app performance monitor (CPU / memory / FPS / GPU / trace / capture / ...) |
 | `xperf-gui` | Tauri 2 GUI: real-time charts for the same metrics |
 | `xperf-agent` | On-device sampler binary (pushed automatically, not used standalone) |
 
 ### xperf-cli
 
 Real-time Android app performance monitor. All sampling runs **on-device** via a
-resident agent binary (`xperf-agent`), streamed back over a single
-`adb exec-out` connection as NDJSON — there is no per-round adb polling, so
-sampling intervals down to ~50 ms are practical.
+resident agent daemon (`xperf-agent`), streamed back over an adb-forwarded TCP
+connection as NDJSON — there is no per-round adb polling, so sampling intervals
+down to ~50 ms are practical.
 
 #### Features
 
 - **CPU usage** (single-core scale, same convention as `adb top`: 100% = one core)
   - Process-level and thread-level usage
   - Peak tracking and process restart detection
-  - Time-series charts (1920x1080) and CSV export (millisecond timestamps)
+  - Time-series charts and CSV export (millisecond timestamps)
 - **Memory usage**
-  - Total PSS, plus category breakdown (Java/Native/Code/Stack/Graphics/...) at
-    intervals ≥ 500 ms (via on-device `dumpsys meminfo`)
+  - Total PSS, plus category breakdown (Java/Native/Code/Stack/Graphics/
+    DMA-BUF/...) at intervals ≥ 500 ms (via on-device `dumpsys meminfo`)
   - At intervals < 500 ms memory falls back to `/proc/<pid>/smaps_rollup`
     (Pss/Rss only — `dumpsys meminfo` costs ~100 ms per call)
 - **FPS** (`--fps`)
@@ -33,15 +33,30 @@ sampling intervals down to ~50 ms are practical.
     SurfaceView/game direct rendering where `gfxinfo` reports nothing
   - Multiple rendering layers are reported as separate series
   - Jank counting relative to the window's median frame interval
+- **Device-level context metrics**: CPU frequency (`--freq`), thermal
+  (`--thermal`), GPU busy/memory (`--gpu` / `--gpu-mem`), process IO (`--io`),
+  network (`--net`)
+- **Deep-dive recording**: perfetto trace + SQL analysis (`--trace N`),
+  simpleperf call-stack profiling with flamegraph (`--stack N`)
+- **Capture**: screenshot (`--screenshot`), screen recording via scrcpy
+  (`--record N`), screen mirror (`--mirror`), logcat capture with package /
+  level / regex filtering (`--logcat [--logcat-regex RE]`)
+- **Verification**: threshold alerts (`--threshold`), cold-start measurement
+  (`--cold-start`), baseline save/compare (`--save-baseline` /
+  `--compare-baseline`)
+- **SSH remote backend** (`--remote HOST`): device attached to a remote Linux
+  machine — sampling, deep-dive and capture all work through an SSH tunnel
+- **Multi-device**: `--device SERIAL` (per-device sessions in the GUI)
 - **Data export**
-  - CSV + charts under `log/<package>/<timestamp>/{cpu,memory,fps,thread}/`
+  - Streaming CSV + charts under `/tmp/xperf/<package>/<timestamp>/{cpu,memory,fps,thread,...}/`
 
 #### Requirements
 
-- An Android device with **root** adb (`adbd` running as root — the agent reads
-  other processes' `/proc` entries)
-- Host: Rust toolchain; Android NDK for the agent cross-build (linker configured
-  in `.cargo/config.toml`; override with `CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER`)
+- An Android device (adb reachable). **root adb is preferred**; non-root works
+  with capability degradation (memory falls back to rate-limited `dumpsys`,
+  process IO unavailable — see WORKSPACE.md section G for the full matrix)
+- Host: Rust toolchain; Android NDK (≥ 25.1) for the agent cross-build — the
+  linker is auto-detected by `.cargo/ndk-clang.sh` per host OS
 
 #### Usage
 
@@ -94,10 +109,11 @@ CPU/memory charts and per-layer FPS charts on a live canvas.
 
 ## Building
 
-The project uses Cargo workspaces. To build all host tools:
+The project uses Cargo workspaces. To build all host tools (the agent is
+Android-only and is **not** part of the default member set):
 
 ```bash
-cargo build --release --workspace
+cargo build --release
 ```
 
 The on-device agent cross-build (normally automatic on first run):
@@ -112,7 +128,8 @@ Host binaries are in `target/release/`; the agent binary in
 ## Tests
 
 ```bash
-cargo test --workspace -- --test-threads=1
+cargo test
 ```
 
-(Tests share a global mock adb runner, so they must run single-threaded.)
+(Host tools only — default member set. `--workspace` would hit the agent's
+host-target `compile_error!` guard.)

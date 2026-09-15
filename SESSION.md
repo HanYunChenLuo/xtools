@@ -7,11 +7,13 @@
 
 ---
 
-## 2026-09-15 晚(4) — 软件发布打包需求入 WORKSPACE（仅勘察记录，未施工）
+## 2026-09-15 晚(4) — 软件发布打包需求入 WORKSPACE + 文档 review 修复（a0eb296 + 本条）
 
-**任务**：用户要求支持 Linux/macOS 软件发布打包（结合 GitLab CI）——本会话只记录需求与勘察结论，新会话施工。
+**任务**：①用户要求支持 Linux/macOS 软件发布打包（结合 GitLab CI）——本会话只记录需求与勘察结论，新会话施工；②review 全部文档。
 
-**产出**：WORKSPACE I 节新条目「软件发布打包」——含现有 `.gitlab-ci.yml` 状态（test stage 空壳 / macOS job 全注释 / release description 硬编码）、最高风险前置项（内部 GitLab runner 可用性，尤其 macOS）、GUI 打包依赖缺口（webkit2gtk/Xcode）、agent 是否随包决策、打包形态与版本号细节、push 流程（已切 li）。无代码改动。
+**产出①**：WORKSPACE I 节新条目「软件发布打包」——含现有 `.gitlab-ci.yml` 状态（test stage 空壳 / macOS job 全注释 / release description 硬编码）、最高风险前置项（内部 GitLab runner 可用性，尤其 macOS）、GUI 打包依赖缺口（webkit2gtk/Xcode）、agent 是否随包决策、打包形态与版本号细节、push 流程（已切 li）。
+
+**产出②（文档 review 修复，README 双语版事实性过时）**：传输描述 `adb exec-out` → daemon+forward/TCP；数据根 `log/` → `/tmp/xperf`；root-only 要求 → 非 root 降级矩阵；linker 描述 `.cargo/config.toml`+env 覆盖 → `.cargo/ndk-clang.sh` 自动探测（NDK ≥25.1）；**`cargo build --release --workspace` → `cargo build --release`（--workspace 会触发 agent 主机目标 compile_error）**；`cargo test --workspace -- --test-threads=1` 的「global mock adb runner」理由已不存在（三件套 01b28ce 已删，测试可并行）→ `cargo test`；功能清单补全（B 类指标/深挖/捕获/验证/远程/多设备）。WORKSPACE 速览测试计数 core 122→123（e7d9bf9 漏更新）。工具坑：zsh 内联 python 字符串中的反引号会被 shell 吃掉（命令替换）——曾致 README 一行损坏，已修复；BSD od 对多字节 UTF-8 显示为 `**`、sed 输出重复均为终端伪影，文件字节以 python repr 验证为准。
 
 ---
 
