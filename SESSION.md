@@ -23,7 +23,7 @@
 
 **结论二（实测与文档矛盾的解释）**：主线 1.38 在该设备有**每帧 Vulkan 管线重建病理**——50.6% CPU 持续在 `VulkanPipelineCache::createPipeline`→`vkCreateGraphicsPipelines`→Adreno `libllvm-qgl` 着色器编译（10+ 分钟无衰减、白天/黑夜无差），扣除后主线 ≈7.7% ≈ 文档 7.3。**机制（Mac 上 objdump 反汇编实锤）**：`bindPipeline` 的缓存 key 是 336 字节渲染状态快照（MurmurHash3 + memcmp），`bindRenderPass` 把 **VkRenderPass 指针**（str x1,[x0,#0x140]）、`bindVertexArray` 把顶点缓冲句柄写入 key——按句柄身份而非兼容性；demo 每帧句柄变化 → 每帧 miss → 全量编译。1.74 Vulkan 后端重构后无此问题（createPipeline 0%）。调用链在 createPipeline 处断链（fp/dwarf 双模式确认，疑 XFW 框架栈切换），改用 BL 指令模式扫描 .text 静态找到唯一调用者 bindPipeline。
 
-**遗留**：文档主线 7.3% 的测量条件（固件/日期/工具口径）待用户确认——当前设备状态复测主线必然 15.4%。深挖可选项：1.74 提交链增量的帧级 perfetto 归因（本次未做——两版 Vulkan 后端函数族不同名，逐函数 diff 不可行，帧级对照需 trace）。
+**结论状态**：`broadcast_error` 已精确复现文档主线 7.3%（渲染线程 7.26%）与 1.74.1 11.6%（渲染线程 12.04%）；主线 `awaken2` 的 15.4% 是额外、动画触发的管线编译病理，不再归因于工具口径或固件差异。**后续任务**：源码对照与优化验证见 WORKSPACE J 节，仍需做 1.74 提交链的帧级/源码归因。
 
 **同日复测（用户要求重测主线）**：全新安装/全新进入，60s 采样 CPU 15.65%（XFW:Main 15.06%）/ FPS 44.8 / GPU 进程 11.2%，`createPipeline` 仍占 50.77%——每帧编译病理在跨天/重装后完全复现，非一次性状态污染。
 
