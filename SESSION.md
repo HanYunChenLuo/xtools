@@ -29,6 +29,8 @@
 
 **broadcast_error 对照（用户要求换动画重测，破案）**：两版同场景 broadcast_error 循环——主线渲染线程 **7.26%**（编译消失：createPipeline 0%，XFW:Main 仅占进程 56%）vs 1.74 **12.04%**（与 awaken2 时 12.0% 一致——1.74 渲染路径开销与动画无关）。**渲染线程口径精确复现文档 7.3/11.6**——文档主线测量无编译现象的原因 = 其测试动画未触发点排序重建（awaken2 特有）。主线 broadcast_error 进程总量 12.86%（+binder×4/ART GC 语音播报开销 ~5.6pp）vs 1.74 16.62%。**结论修正**：文档增幅 = 1.74 渲染路径真实增量 +66%；awaken2 场景的 1.38 句柄 key 病理（每帧点排序缓冲重建→miss→重编译）被 1.74 后端重构顺带修复。
 
+**同日进一步归因（主线 vs 1.74 broadcast_error，严格同场景）**：重新 60s 采样得到主线进程 **11.69% / XFW:Main 7.15% / FPS 44.82 / GPU 11.55%**，1.74 进程 **16.89% / XFW:Main 12.21% / FPS 44.81 / GPU 11.94%**。额外 **5.06pp 几乎全部来自 XFW:Main**，不是 GPU、FPS、binder 或 ART 的差异。主线旧 Filament 路径热点是 `VulkanCommands::flush` 8.67%、`VulkanBuffer::loadFromCpu` 8.55%、present 7.87%、`VulkanStagePool::gc` 5.70%、compute 4.57%；1.74 路径进入 `FEngine::execute`/`FRenderer::renderInternal`，热点变为 `VulkanDriver::finish` 28.46% → `VulkanCommands::flush` 22.95% → `VulkanCommandBuffer::submit` 22.71% → `vkQueueSubmit` 18.85%，以及 `updateBufferObjectCommon` 17.81%、`updateBufferObject` 17.09%、`dispatchCompute` 10.57%、`SurfaceRenderer::drop` 10.37%/`FRenderer::endFrame` 10.22%。这些是调用树 children 百分比，存在包含关系不能相加；根因是 1.74 Vulkan backend 的每帧 command buffer 提交、buffer/descriptor 更新、fence/resource 生命周期管理 CPU 成本明显增加。1.74 反而把应用层动画/CUA 更新从主线约 12.5%/10.2% 降到约 5.8%/4.3%，所以不是 broadcast_error 动画逻辑变重。
+
 **工程备忘**：SS4 的 uiautomator 可完整 dump 该 app 控件树（无障碍可达），自动化点击/滑列表可靠；Car HU 窗口区域（DRIVER/COPILOT）会动态重排，每次进入场景后须重新 dump 取坐标；采样进程 pid 存在 namespace 扭曲现象（pidof 与 /proc 视图不一致，不影响按包名采样）；隔夜设备闲置后 app 渲染循环自动停（FPS 0），实验前须重新拉起。
 
 ---

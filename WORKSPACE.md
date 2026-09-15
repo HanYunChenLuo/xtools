@@ -126,6 +126,7 @@
   - 附带发现：**facedemo 的 FaceActivity（主驾入口）在两版 APK 上均 100% native 崩溃**（`NoClassDefFoundError: androidx.coordinatorlayout.widget.CoordinatorLayout` 仅被 dex 引用未定义（被 catch 非致命）→ 随后 native 堆损坏 scudo/FORTIFY SIGABRT，109ms 内死）——与 filament 版本无关的应用/环境问题；FurBoy3dgsActivity2 / PixsActivity 不受影响
   - 数据目录：`/tmp/xperf/com.lixiang.facedemo/`（CLI 采样 CSV + simpleperf 报告，Mac 端）；APK 留存 hppc `/tmp/facedemo/`
   - **broadcast_error 干净对照（后续补充，关键）**：换 broadcast_error 动画循环后主线**编译病理消失**（createPipeline 0%——awaken2 特有的每帧 3DGS 点排序/缓冲重建是 miss 诱因），渲染线程 XFW:Main：**主线 7.26% vs 1.74 12.04%（+66%）——精确复现文档 7.3→11.6**（文档测量时主线无编译现象的原因即此）。1.74 渲染路径开销与动画类型无关（两动画均 ~12%）；broadcast 另有语音播报开销（binder×4 + ART GC ≈4.6-5.6pp，两版同量级，进程总量 12.86% vs 16.62%）。**结论修正**：文档增幅 = 1.74 渲染路径真实增量（提交链/UBO 上传/每帧 SurfaceRenderer 析构），与动画无关；awaken2 场景下 1.38 的句柄 key 病理被 1.74 重构顺带修复
+  - **broadcast_error 进一步函数归因（2026-09-15）**：严格同场景 60s 重测：主线进程 11.69% / XFW:Main 7.15% / FPS 44.82 / GPU 11.55%；1.74 进程 16.89% / XFW:Main 12.21% / FPS 44.81 / GPU 11.94%。额外 5.06pp 几乎全在 XFW:Main。主线热点为 `VulkanCommands::flush` 8.67%、`VulkanBuffer::loadFromCpu` 8.55%、present 7.87%、`VulkanStagePool::gc` 5.70%；1.74 为 `VulkanDriver::finish` 28.46% → `VulkanCommands::flush` 22.95% → `VulkanCommandBuffer::submit` 22.71% → `vkQueueSubmit` 18.85%，`updateBufferObjectCommon` 17.81%/`updateBufferObject` 17.09%、compute 10.57%、`SurfaceRenderer::drop` 10.37%。children 百分比包含关系不可相加；结论是 1.74 backend 每帧 command buffer 提交、buffer/descriptor 更新、fence/resource 生命周期管理 CPU 更重；应用动画/CUA 更新反而从主线约 12.5%/10.2% 降到约 5.8%/4.3%，差异不是 broadcast_error 动画逻辑。
 
 ---
 
