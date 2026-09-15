@@ -47,7 +47,9 @@
 
 **勘察插曲（教训）**：① AX 验证一度误判「text 未生效」——实为**用户自己的 GUI 实例（旧镜像，UI 连接 hppc）同秒在同目录起了抓取**，diag/落盘路径共享致假象；判据须 lsof 文件持有者，多实例并存时留意。② WKWebView AX `set value` 异步生效（秒级）、合成 keystroke return 不一定派发 change，可靠触发改 `click` 他元素制造 blur；AX 元素引用跨流式渲染失效须重新遍历。③ AppleScript 保留字 `note`/`st` 不可作标识符；BSD sed 不认 `\b`。（均已记 CLAUDE.md AX 教训条）
 
-**同日复核修复（review）**：CLI 独立模式抓取线程异常终止后进程挂等 Ctrl-C 且退出码 0（非法正则是该路径首个用户可达诱因）——等待循环改 `!is_interrupted() && !is_done()`，异常终止退出等待并置 `capture_failed` → exit 1；真机复测：非法正则 ~10s 自退 exit 1、正常抓取 12s 不早退 SIGINT exit 0。SESSION 测试数笔误（+5→+3）一并修正。
+**同日复核修复（review 第一轮）**：CLI 独立模式抓取线程异常终止后进程挂等 Ctrl-C 且退出码 0（非法正则是该路径首个用户可达诱因）——等待循环改 `!is_interrupted() && !is_done()`，异常终止退出等待并置 `capture_failed` → exit 1；真机复测：非法正则 ~10s 自退 exit 1、正常抓取 12s 不早退 SIGINT exit 0。SESSION 测试数笔误（+5→+3）一并修正。
+
+**同日复核增强（review 第二轮，含一次自我纠错）**：①秒死放弃报文自解释——`diagnose_fast_death` 用同参数跑 `logcat -d` 探测 stderr。**第一版直接取 stderr 尾行在真机翻车**：A12（SS3）抓到 `-T 0 invalid` 无害告警（正常路径也有，误导死因）；改为**对照法**（跑两次 `-d`：完整参数一次、去 `-e` 对一次，取 full 有 base 无的差集行）——告警两侧同在即抵消。真机验证：A16 非法正则报文附 `regex_error was thrown in -fno-exceptions mode`、A12 回归原文案（静默 abort 诚实无附加段）、合法正则正常抓取零错误；**adb 客户端不透传设备端退出码（rc 恒 0），stderr 是唯一可信诊断源**。②`args.logcat_regex.clone()` 改 `take()`（唯一消费点）。core 123（+1 format_probe_diag 差集单测）全绿。
 
 **遗留**：无。（GUI live 视图行渲染 AX 读值为旧已知项，不影响本功能。）
 

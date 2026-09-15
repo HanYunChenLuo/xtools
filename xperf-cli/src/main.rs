@@ -1628,7 +1628,7 @@ fn generate_memory_summary_chart(
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let args = Args::parse();
+    let mut args = Args::parse();
     // --clean-cache：清理后即退出（不进监控流程，无需包名）
     if args.clean_cache {
         let r = xperf_core::simpleperf::clean_all_caches()?;
@@ -1778,7 +1778,7 @@ async fn main() -> Result<()> {
     // logcat 抓取（--logcat）：流式落盘，窗口覆盖采样全程。独立模式
     // （logcat 是唯一目的）启动失败即退出；并行模式失败只告警
     let logcat = if args.logcat {
-        match start_logcat_capture(&package, args.logcat_regex.clone()) {
+        match start_logcat_capture(&package, args.logcat_regex.take()) {
             Ok(h) => {
                 println!("logcat 抓取中: {}", h.path().display());
                 Some(h)

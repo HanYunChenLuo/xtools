@@ -261,6 +261,49 @@ fn display_regex(text_regex: &Option<String>) -> String {
     }
 }
 
+/// 连续秒死放弃后的诊断探测（对照法）：同参数跑两次 `logcat -d`（dump 模式立即
+/// 退出）——一次完整参数、一次去掉 `-e <re>` 对，取 full 有而 base 没有的 stderr 行
+/// 附进 Error 报文。直接取 stderr 尾行会误报已知无害告警（A11/A12 的 `-T 0`
+/// 降级 WARNING 正常路径也有），对照差集把它抵消——只有与文本过滤相关的差异
+/// （如 A16 非法正则的 `regex_error`）才进诊断；A11/A12 静默 abort（两侧 stderr
+/// 相同）与 adb 调用失败均无附加段（adb 客户端不透传设备端退出码，rc 不可用作
+/// 判据，只有 stderr 可信）。`logcat -d` 的 flag 位置无关（getopt 式扫描）
+fn diagnose_fast_death(serial: Option<&str>, args: &[String]) -> String {
+    let mut full = args.to_vec();
+    full.push("-d".to_string());
+    // base = 去掉 `-e <re>` 对（秒死与文本过滤无关时 base == full，差集恒空）
+    let mut base: Vec<String> = args.to_vec();
+    if let Some(i) = base.iter().position(|a| a == "-e") {
+        base.drain(i..(i + 2).min(base.len()));
+    }
+    base.push("-d".to_string());
+    let (f, b) = match (
+        adb_for(serial).args(&full).output(),
+        adb_for(serial).args(&base).output(),
+    ) {
+        (Ok(f), Ok(b)) => (f, b),
+        _ => return String::new(),
+    };
+    format_probe_diag(
+        &String::from_utf8_lossy(&f.stderr),
+        &String::from_utf8_lossy(&b.stderr),
+    )
+}
+
+/// 组装诊断附加段（纯函数）：full stderr 中 base 没有的最后一个非空行
+/// （对照差集）；空返回空串（原报文不动）
+fn format_probe_diag(full_stderr: &str, base_stderr: &str) -> String {
+    let base: std::collections::HashSet<&str> = base_stderr.lines().collect();
+    match full_stderr
+        .lines()
+        .rev()
+        .find(|l| !l.trim().is_empty() && !base.contains(l))
+    {
+        Some(t) => format!("（诊断: logcat stderr: {}）", t.trim()),
+        None => String::new(),
+    }
+}
+
 /// 行读线程 → 写线程的消息
 enum Msg {
     /// 一行日志（不含换行）
@@ -419,10 +462,17 @@ pub fn start_logcat(
                     if fast_deaths >= MAX_FAST_DEATHS
                         && crate::agent::device_online(serial_owned.as_deref())
                     {
+                        // 诊断探测（同参数 logcat -d）：非法文本正则等参数错误在
+                        // A16 的 stderr 有 regex_error 输出，附上可直接定位
+                        let (f, l, t) = writer_config.lock().unwrap().clone();
+                        let diag = diagnose_fast_death(
+                            serial_owned.as_deref(),
+                            &build_logcat_args(&f, l, t.as_deref()),
+                        );
                         if let Some(cb) = &on_event {
                             cb(LogcatEvent::Error(format!(
-                                "logcat 子进程连续 {} 次秒死，放弃抓取（设备在线，疑似参数不兼容）",
-                                fast_deaths
+                                "logcat 子进程连续 {} 次秒死，放弃抓取（设备在线，疑似参数不兼容）{}",
+                                fast_deaths, diag
                             )));
                         }
                         break;
@@ -605,6 +655,34 @@ mod tests {
         assert_eq!(display_regex(&Some("FATAL".into())), "FATAL");
         // 换行破坏单行标记格式 → 转义
         assert_eq!(display_regex(&Some("a\nb\rc".into())), "a\\nbc");
+    }
+
+    #[test]
+    fn test_format_probe_diag() {
+        // A16 非法正则：full 有 regex_error、base 无 → 差集即诊断
+        assert_eq!(
+            format_probe_diag("regex_error was thrown in -fno-exceptions mode\n", ""),
+            "（诊断: logcat stderr: regex_error was thrown in -fno-exceptions mode）"
+        );
+        // A12 无害告警（-T 0 降级 WARNING）两侧相同 → 抵消，无附加段（死因非文本过滤）
+        assert_eq!(
+            format_probe_diag(
+                "WARNING: -T 0 invalid, setting to 1\n",
+                "WARNING: -T 0 invalid, setting to 1\n"
+            ),
+            ""
+        );
+        // 告警与真实错误并存：只出差异行
+        assert_eq!(
+            format_probe_diag(
+                "WARNING: -T 0 invalid, setting to 1\nregex_error was thrown\n",
+                "WARNING: -T 0 invalid, setting to 1\n"
+            ),
+            "（诊断: logcat stderr: regex_error was thrown）"
+        );
+        // 两侧 stderr 均空（A11/A12 静默 abort）→ 无附加段
+        assert_eq!(format_probe_diag("", ""), "");
+        assert_eq!(format_probe_diag("  \n\n", "\n"), "");
     }
 
     /// 集成测试：start → 全机抓取有行 → restart 切级别+按包过滤+文本正则（同文件
