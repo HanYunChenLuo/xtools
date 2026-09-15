@@ -10,7 +10,9 @@
 #     Artifactory 代理 artifactory.ep.chehejia.com/docker-remote/<image>
 #   - runner 侧 apt 直连 archive.ubuntu.com / deb.debian.org 卡死（15min+ 无响应）；
 #     重写 mirrors.aliyun.com 后正常（bullseye update ~38s）
-#   - dl.google.com / registry.gitlab.com / github.com / crates.io 从 runner 可达
+#   - crates.io 直连从 runner 不可达（index.crates.io 卡死）——cargo 走 aliyun
+#     sparse 镜像（before_script 写 $CARGO_HOME/config.toml，仅 CI 生效）
+#   - dl.google.com / registry.gitlab.com / github.com 从 runner 可达
 #   - 基于 bullseye（glibc 2.31）构建保证 ubuntu 20.04+ 可运行
 #   - 无 macOS runner；group runner build-61-102(longteng) 长期 stale
 
@@ -39,8 +41,13 @@ variables:
 .rust-job:
   image: $RUST_IMAGE
   before_script:
-    - sed -i "s|deb.debian.org|$APTI_MIRROR|g; s|security.debian.org|$APTI_MIRROR|g" /etc/apt/sources.list
+    - sed -i "s|deb.debian.org|$APT_MIRROR|g; s|security.debian.org|$APT_MIRROR|g" /etc/apt/sources.list
     - apt-get update -qq && apt-get install -y -qq pkg-config libfontconfig1-dev
+    # apt 静默失败保护（update 对坏源也可能返回 0）：fontconfig 不可用立刻失败
+    - pkg-config --modversion fontconfig > /dev/null
+    # crates.io 镜像（见文件头环境事实）；不写仓库 .cargo/config.toml，本地开发不受影响
+    - mkdir -p "$CARGO_HOME"
+    - printf '[source.crates-io]\nreplace-with = "mirror"\n\n[source.mirror]\nregistry = "sparse+https://mirrors.aliyun.com/crates.io-index/"\n' > "$CARGO_HOME/config.toml"
 
 # 校验 tag 规范：v 前缀语义化版本、与 crate 版本一致、CHANGELOG 有对应章节
 validate:tag:
