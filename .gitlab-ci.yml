@@ -29,8 +29,10 @@ stages:
   - build
   - release
 
+# 注意：CARGO_HOME 不能用 $CI_PROJECT_DIR/.cargo——那是仓库自身的 cargo 配置目录
+# （含 aarch64-linux-android 的 ndk-clang.sh linker 配置），会被 CI 侧镜像配置覆盖
 variables:
-  CARGO_HOME: $CI_PROJECT_DIR/.cargo
+  CARGO_HOME: $CI_PROJECT_DIR/.cargo-ci
   DEBIAN_FRONTEND: noninteractive
   RUST_IMAGE: artifactory.ep.chehejia.com/docker-remote/library/rust:1.93.0-bullseye
   APT_MIRROR: mirrors.aliyun.com
@@ -45,7 +47,8 @@ variables:
     - apt-get update -qq && apt-get install -y -qq pkg-config libfontconfig1-dev
     # apt 静默失败保护（update 对坏源也可能返回 0）：fontconfig 不可用立刻失败
     - pkg-config --modversion fontconfig > /dev/null
-    # crates.io 镜像（见文件头环境事实）；不写仓库 .cargo/config.toml，本地开发不受影响
+    # crates.io 镜像（见文件头环境事实）；写在独立 CARGO_HOME，与仓库 .cargo/config.toml
+    # （linker 配置）合并生效，本地开发不受影响
     - mkdir -p "$CARGO_HOME"
     - printf '[source.crates-io]\nreplace-with = "mirror"\n\n[source.mirror]\nregistry = "sparse+https://mirrors.aliyun.com/crates.io-index/"\n' > "$CARGO_HOME/config.toml"
 
@@ -80,7 +83,7 @@ test:linux:
         prefix: test
       paths:
         - target/
-        - .cargo/
+        - .cargo-ci/
   script:
     # GUI 为 macOS 产品（Linux 不发布），测试面限定 core + cli；GUI 测试在 macOS 本地跑
     - cargo test --locked -p xperf-core -p xperf-cli
@@ -99,7 +102,7 @@ build:linux:
         prefix: build
       paths:
         - target/
-        - .cargo/
+        - .cargo-ci/
     - key: $NDK_DIR
       paths:
         - $NDK_DIR/
