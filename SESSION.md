@@ -6,62 +6,12 @@
 > 新会话开始时可先读本文件了解近期上下文。
 
 ---
-## 2026-09-15 下午 — J 节收尾：1.74 CPU 增量根因破案 + 应用侧批量提交优化真机回归（超 1.38 基线）
+## 2026-09-15 — facedemo filament 版本性能调试（与本仓库无关，已清理）
 
-**任务**：WORKSPACE J 节——结合 hppc 源码定位 facedemo 1.74.1 相对主线 1.38 的 +5.06pp CPU 增量并落地优化。
-
-**根因链（源码 + 反汇编 + 同协议 simpleperf 对照三重证据）**：
-1. face_lib 3DGS 排序管线每帧 **15 次 `engine.flush_and_wait()`**（排序 13：init + 4 radix pass × upsweep/scan/downsweep，在 `dispatch_gpu` 的 pass 循环内；renderer 2：sort_points/calc_view_data_gpu_full）——反汇编 libinterface.so 扫 BL 找到 `Engine::flushAndWait` 全部 7 调用点确认。
-2. 1.74 后端 `VulkanDriver::finish()` = flush + **vkQueueWaitIdle** + waitForFences + readPixels；1.38 的 finish 仅 flush（ffence 等待语义两版相同，但 1.74 每次调用多付 2+ ioctl）。
-3. 1.74 每次 submit：新 semaphore（池化但逐提交轮转）+ `mLastSubmit` 链式 wait → Adreno 驱动每提交做 kgsl syncobj create/destroy + FD 开关（children 报告：gsl_syncobj_create 3.26% + put 5.39% + sync_file/close 链）；1.38 固定 45 槽 semaphore/fence 复用，同协议对照无 churn。1.74 另独有 `getRecording`+`vkBeginCommandBuffer` 8.36%/7.28%（1.38 报告全零）。
-4. 量化（同协议 30s children 对照）：flush 子树 16.40% vs 4.85%、vkQueueSubmit 13.29% vs 2.71%、updateBufferObjectCommon 12.60% vs loadFromCpu 5.12%、dispatchCompute 7.60% vs 2.65%（进程口径）。
-
-**优化（应用侧，未动 filament 源码）**：mindui-1.74 `face_lib/.../gaussian_splat/{sorting,renderer}.rs`——排序批量提交：upsweep/scan/downsweep 每 pass 独立 MaterialInstance（×4，消除 host 即时 vkUpdateDescriptorSets 与在飞 GPU 读的竞争；UBO 参数走 staging copy 本就有 cmdbuf 保序；每 MI 绑定逐帧恒定→跨帧同值覆写安全），删除全部 15 次 flush_and_wait，dispatch_gpu 末尾 + calc_view 末尾各留一次 `flush()`（保「compute 先于 render pass」语义；正确性依据 = 1.74 后端 dispatchCompute 已恢复的 post-dispatch barrier Lixiang fix）。
-
-**真机回归（SS4 localhost:5559 --remote hppc，broadcast_error 60s）**：进程 CPU **16.89% → 9.70%**，XFW:Main **12.21% → 5.08%**（**低于主线 1.38 的 11.69%/7.15%**——1.38 也付 15 次 submit+fence 等待），FPS 44.82 不变，GPU 进程 busy 10.67%（基线 11.94% 同量级），RSS 192MB 稳定。awaken2 对照 10.24%/5.15%/44.82 无病理。补丁后 simpleperf：flush 16.40→4.12%、vkQueueSubmit 13.29→1.72%、finish/vkQueueWaitIdle/syncobj 链消失。截图目验 niuzai 渲染正确，logcat 无错误。
-
-**产物与操作记录**（全在 hppc）：补丁 `/tmp/facedemo/batched-sort-1.74.patch`（311 行）；优化 APK `/tmp/facedemo/v1.74.1-batching.apk`（已装 SS4，回退 = `install -r /tmp/facedemo/v1.74.1.apk`）；源文件备份 `*.bak-batching`（mindui-1.74 非 git 仓）。构建链踩坑记录：rustup shim `nightly-2025-02-14`（系统 cargo 1.75 不支持 edition2024）+ NDK env 三变量 + **必须 `--lib`**（bin 是 PC 目标会挂）+ **`--features "filament_source backend_vulkan"`**（否则 material-tool 去 artifactory 拉不存在的 matc 预编译包）；APK 换 so 快通道 = zip STORED 替换 libinterface.so + zipalign -p 4096 + apksigner（platform.jks，12345678/chehejia），脚本 `/tmp/repack_apk.sh`。
-
-**遗留候选（未做）**：后端侧 ①`finish()` 去 vkQueueWaitIdle（FFence 已兜底，对齐 1.38）；②`mLastSubmit` 链 + 每 submit 新 semaphore 可按需信号化（仅 present 前带 signal）——影响面整个 fork，建议 filament 仓单独评审；③每帧 SurfaceRenderer drop→present 的 fence FD churn（两版共有）已成占比最高剩余路径。filament 两个 dev 目录未动（只读勘察）。
-
-**xtools 侧**：仅文档（WORKSPACE J 节勾销），无代码改动。
-
-**当日 review 清理**：应用户要求复查 facedemo 改动 diff——功能改动全部紧扣优化；还原了 3 处顺手带入的纯空白/尾空格噪声（sorting.rs 空行 ×2 + `///` 尾空格 ×1）；消除魔法数字：`RADIX_PASS_COUNT` 改为 `pub` 并由存量 `DEVICE_RADIX_SORT_PASSES` 派生（单一来源），renderer.rs 的 MI 创建循环/capacity/注释统一引用它（不再硬编码 4）；确认我的两个文件零新增编译警告（renderer.rs:14/18 的 unused import 为存量问题，不在本次范围）。清理仅触及空白/注释/常量引用，与已验证 APK 行为等价（未重装），源码已重编译确认干净（增量 ~13s）。
-
-**B1 叠加（参数/绑定静态化，用户排期）**：排序每个 pass-MI 的参数与 SSBO 绑定逐帧恒定 → 新增 `GpuSorter::bind_static()` 一次性设置（init + 4 pass × upsweep/scan/downsweep 全部 set_uint32_parameter/set_storage_buffer），四个 dispatch_* 瘦身成纯 dispatch；`static_bind_key`（count + 6 buffer 的 Rc 指针元组）守卫——资源重建/换模型时自动重绑（原代码每帧重设天然防这个，静态化后必须显式守卫）。真机 broadcast_error 60s：进程 **9.70% → 9.17%**、XFW:Main **5.08% → 4.64%**，FPS 44.85 / GPU 10.66% 不变，截图目验渲染正确。消除每帧 ~100 次 vkUpdateDescriptorSets + ~12 次 UBO staging copy。patch 重生成（561 行），APK `v1.74.1-batching-b1.apk` 已装 SS4。
+facedemo 1.74 CPU 回归归因与排序管线优化（应用侧，未动 xtools 代码）：任务完成，真机验证通过。产物在 hppc `/tmp/facedemo/`（patch + APK），详细过程记录已从本文件移除。
 
 ---
 
-## 2026-09-15 — facedemo filament 1.74 CPU 升高归因（WORKSPACE J 节，无代码改动）
-
-**任务**：飞书文档两个 facedemo APK（主线 filament 1.38 / v1.74.1）在 SS4.0 niuzai 皮肤循环动画场景 CPU 7.3→11.6，找出 1.74 升高原因。全程 `--remote hppc --device localhost:5559`。
-
-**场景锁定**（踩坑后用户指正）：`毛绒 3DGS 调试` = FurBoy3dgsActivity2 + niuzai 3DGS 模型（默认加载）+ awaken2 循环播放。**FaceActivity（主驾）两版 APK 均 100% native 崩溃**（CoordinatorLayout 类仅被 dex 引用未定义 → NoClassDefFoundError 被 catch → 随后 scudo 堆损坏 SIGABRT），与 filament 版本无关；PIXS（spine 2D）非目标。
-
-**数据矩阵**（单核口径，各 3-4 轮，FPS 44.9 / GPU 进程 busy ~11.5% 两版一致）：
-
-| 状态 | 主线 1.38 | v1.74.1 | 文档 |
-|---|---|---|---|
-| awaken2 循环 | 15.4%（稳定） | 12.0%（稳定） | 7.3 / 11.6 |
-| 停止动画 | 0.56%（FPS 0，渲染循环与动画绑定） | 0.36%（同） | — |
-
-**结论一（文档增幅来源）**：1.74.1 渲染帧路径 12.0% vs 主线帧路径 ≈7.7%（=15.4−7.8 编译病理）**+56%**，与文档 7.3→11.6（+59%）吻合。simpleperf 热点（.so 带完整 symtab，设备端符号化完美）：全部在 XFW:Main 渲染线程（>95% 进程 CPU），1.74 增量 = Vulkan 提交链（finish 26.7%/flush 21.1%/vkQueueSubmit 16.9%/ioctl 13.7%）+ UBO 上传 updateBufferObject 15.7% + compute dispatch 10.3% + 每帧 SurfaceRenderer 析构 10.1%（fdsan close + gsl_syncobj 销毁——应用层每帧重建 surface 的行为两版共有）。
-
-**结论二（实测与文档矛盾的解释）**：主线 1.38 在该设备有**每帧 Vulkan 管线重建病理**——50.6% CPU 持续在 `VulkanPipelineCache::createPipeline`→`vkCreateGraphicsPipelines`→Adreno `libllvm-qgl` 着色器编译（10+ 分钟无衰减、白天/黑夜无差），扣除后主线 ≈7.7% ≈ 文档 7.3。**机制（Mac 上 objdump 反汇编实锤）**：`bindPipeline` 的缓存 key 是 336 字节渲染状态快照（MurmurHash3 + memcmp），`bindRenderPass` 把 **VkRenderPass 指针**（str x1,[x0,#0x140]）、`bindVertexArray` 把顶点缓冲句柄写入 key——按句柄身份而非兼容性；demo 每帧句柄变化 → 每帧 miss → 全量编译。1.74 Vulkan 后端重构后无此问题（createPipeline 0%）。调用链在 createPipeline 处断链（fp/dwarf 双模式确认，疑 XFW 框架栈切换），改用 BL 指令模式扫描 .text 静态找到唯一调用者 bindPipeline。
-
-**结论状态**：`broadcast_error` 已精确复现文档主线 7.3%（渲染线程 7.26%）与 1.74.1 11.6%（渲染线程 12.04%）；主线 `awaken2` 的 15.4% 是额外、动画触发的管线编译病理，不再归因于工具口径或固件差异。**后续任务**：源码对照与优化验证见 WORKSPACE J 节，仍需做 1.74 提交链的帧级/源码归因。
-
-**同日复测（用户要求重测主线）**：全新安装/全新进入，60s 采样 CPU 15.65%（XFW:Main 15.06%）/ FPS 44.8 / GPU 进程 11.2%，`createPipeline` 仍占 50.77%——每帧编译病理在跨天/重装后完全复现，非一次性状态污染。
-
-**broadcast_error 对照（用户要求换动画重测，破案）**：两版同场景 broadcast_error 循环——主线渲染线程 **7.26%**（编译消失：createPipeline 0%，XFW:Main 仅占进程 56%）vs 1.74 **12.04%**（与 awaken2 时 12.0% 一致——1.74 渲染路径开销与动画无关）。**渲染线程口径精确复现文档 7.3/11.6**——文档主线测量无编译现象的原因 = 其测试动画未触发点排序重建（awaken2 特有）。主线 broadcast_error 进程总量 12.86%（+binder×4/ART GC 语音播报开销 ~5.6pp）vs 1.74 16.62%。**结论修正**：文档增幅 = 1.74 渲染路径真实增量 +66%；awaken2 场景的 1.38 句柄 key 病理（每帧点排序缓冲重建→miss→重编译）被 1.74 后端重构顺带修复。
-
-**同日进一步归因（主线 vs 1.74 broadcast_error，严格同场景）**：重新 60s 采样得到主线进程 **11.69% / XFW:Main 7.15% / FPS 44.82 / GPU 11.55%**，1.74 进程 **16.89% / XFW:Main 12.21% / FPS 44.81 / GPU 11.94%**。额外 **5.06pp 几乎全部来自 XFW:Main**，不是 GPU、FPS、binder 或 ART 的差异。主线旧 Filament 路径热点是 `VulkanCommands::flush` 8.67%、`VulkanBuffer::loadFromCpu` 8.55%、present 7.87%、`VulkanStagePool::gc` 5.70%、compute 4.57%；1.74 路径进入 `FEngine::execute`/`FRenderer::renderInternal`，热点变为 `VulkanDriver::finish` 28.46% → `VulkanCommands::flush` 22.95% → `VulkanCommandBuffer::submit` 22.71% → `vkQueueSubmit` 18.85%，以及 `updateBufferObjectCommon` 17.81%、`updateBufferObject` 17.09%、`dispatchCompute` 10.57%、`SurfaceRenderer::drop` 10.37%/`FRenderer::endFrame` 10.22%。这些是调用树 children 百分比，存在包含关系不能相加；根因是 1.74 Vulkan backend 的每帧 command buffer 提交、buffer/descriptor 更新、fence/resource 生命周期管理 CPU 成本明显增加。1.74 反而把应用层动画/CUA 更新从主线约 12.5%/10.2% 降到约 5.8%/4.3%，所以不是 broadcast_error 动画逻辑变重。
-
-**新增交接任务（用户要求源码深挖）**：Filament 源码在 hppc `/home/han/code/graphic/filamentdir/src/`：主线 `filament-v1.38.0-dev`、1.74.1 `filament-v1.74.1-dev`。下一会话先检查两个目录 git 状态/commit/tag，不直接修改 hppc 源码；重点对照 Vulkan backend 的 command flush/submit、buffer/descriptor 更新、fence/resource GC、`SurfaceRenderer::drop`→`FRenderer::endFrame`，量化每帧调用次数/命令数/上传字节/同步对象，结合真机 simpleperf/Perfetto 判断优化点。验收必须复用 SS4 broadcast_error 60s（CPU/XFW:Main/FPS/GPU/RSS）并补 awaken2（确认不引入 1.38 管线编译）。
-
-**工程备忘**：SS4 的 uiautomator 可完整 dump 该 app 控件树（无障碍可达），自动化点击/滑列表可靠；Car HU 窗口区域（DRIVER/COPILOT）会动态重排，每次进入场景后须重新 dump 取坐标；采样进程 pid 存在 namespace 扭曲现象（pidof 与 /proc 视图不一致，不影响按包名采样）；隔夜设备闲置后 app 渲染循环自动停（FPS 0），实验前须重新拉起。
-
----
 ## 2026-09-14 深夜(3) — logcat review 第二轮（0771155）
 
 **任务**：继续 review（core 线程逻辑 / GUI 后端 / CLI / 文档）。修复 2 项：CLI 混合独立模式（`--screenshot --logcat`）logcat 失败补 `capture_failed` → exit 1（对齐 record/screenshot 语义；并行采样模式保持「失败只告警」不置码）；前端 `syncLogcatEvents` catch 静默吞错改 diag（IPC 掉线时后端暂停态失同步会致视图静默停滞，幂等重发自愈）。
