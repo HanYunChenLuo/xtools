@@ -26,6 +26,8 @@
 
 **xtools 侧**：仅文档（WORKSPACE J 节勾销），无代码改动。
 
+**当日 review 清理**：应用户要求复查 facedemo 改动 diff——功能改动全部紧扣优化；还原了 3 处顺手带入的纯空白/尾空格噪声（sorting.rs 空行 ×2 + `///` 尾空格 ×1），patch 从 311 行收敛到 304 行；确认我的两个文件零新增编译警告（renderer.rs:14/18 的 unused import 为存量问题，不在本次范围）。清理仅触及空白/注释，与已验证 APK 行为等价（未重装），源码已重编译确认干净（增量 12s）。
+
 ---
 
 ## 2026-09-15 — facedemo filament 1.74 CPU 升高归因（WORKSPACE J 节，无代码改动）
