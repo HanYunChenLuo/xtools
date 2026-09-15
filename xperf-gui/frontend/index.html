@@ -201,6 +201,9 @@
             <label class="toolbar-record" title="按侧栏包名过滤：Android 12+ 按 UID（进程重启耐受）；11 及以下按 pid（需应用已运行，重启后新进程日志缺失）。不勾选或包名为空 = 全机抓取；抓取中变更即时热切换">
               <input class="logcat-bypkg" type="checkbox" checked /> 按包过滤
             </label>
+            <label class="toolbar-record" title="文本过滤（设备端 logcat -e 消息体正则，如 FATAL|ANR；留空不过滤）；与级别/按包过滤叠加，抓取中变更即时热切换">过滤
+              <input class="logcat-text" type="text" placeholder="正则，如 FATAL|ANR" />
+            </label>
             <button class="small logcat-pause-btn" title="暂停/恢复自动滚动到底部">暂停滚动</button>
             <button class="small logcat-clear-btn" title="清空当前视图（不影响落盘文件）">清空</button>
             <span class="trace-file-label logcat-path"></span>

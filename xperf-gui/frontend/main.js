@@ -491,6 +491,7 @@ class DeviceSession {
           package: pkg,
           filterPackage: this.el('logcat-bypkg').checked,
           level: this.el('logcat-level').value,
+          text: this.el('logcat-text').value.trim(),
         });
         this.logcatRunning = true;
         btn.textContent = '停止抓取';
@@ -518,22 +519,24 @@ class DeviceSession {
     btn.disabled = false;
   }
 
-  // logcat 过滤口径热切换（级别下拉 / 按包过滤勾选 / 包名变更）：抓取中变更即
-  // 调 restart_logcat（同文件续写、不打断会话）；未在抓取时不动作（下次开始
-  // 按当前值读取）。包名变更仅在按包过滤勾选时有意义（全机抓取与包名无关）
+  // logcat 过滤口径热切换（级别下拉 / 按包过滤勾选 / 包名 / 文本过滤输入变更）：
+  // 抓取中变更即调 restart_logcat（同文件续写、不打断会话）；未在抓取时不动作
+  // （下次开始按当前值读取）。包名变更仅在按包过滤勾选时有意义（全机抓取与包名无关）
   async restartLogcatIfRunning() {
     if (!this.logcatRunning) return;
     const byPkg = this.el('logcat-bypkg').checked;
     const pkg = this.el('package-input').value.trim();
+    const text = this.el('logcat-text').value.trim();
     try {
       const msg = await invoke('restart_logcat', {
         serial: this.serial,
         package: pkg,
         filterPackage: byPkg,
         level: this.el('logcat-level').value,
+        text: text,
       });
       this.setStatus(msg);
-      _diag('[' + this.serial + '] logcat: restarted (' + (byPkg ? 'pkg=' + pkg : 'all') + ', level=' + this.el('logcat-level').value + ')');
+      _diag('[' + this.serial + '] logcat: restarted (' + (byPkg ? 'pkg=' + pkg : 'all') + ', level=' + this.el('logcat-level').value + ', text=' + (text || '(none)') + ')');
     } catch (e) {
       // 解析失败（如 A11 按包过滤但应用未运行）：旧口径继续抓，如实提示
       this.setStatus('logcat 切换失败（旧口径继续）: ' + (e && e.message ? e.message : e));
@@ -1261,9 +1264,10 @@ class DeviceSession {
       this.logcatBuf = [];
       this.logcatDirty = false;
     });
-    // 级别/按包过滤变更热切换（抓取中即时生效，同文件续写）；包名变更仅在勾选时有意义
+    // 级别/按包过滤/文本过滤变更热切换（抓取中即时生效，同文件续写）；包名变更仅在勾选时有意义
     this.el('logcat-level').addEventListener('change', () => this.restartLogcatIfRunning());
     this.el('logcat-bypkg').addEventListener('change', () => this.restartLogcatIfRunning());
+    this.el('logcat-text').addEventListener('change', () => this.restartLogcatIfRunning());
     this.el('package-input').addEventListener('change', () => {
       if (this.el('logcat-bypkg').checked) this.restartLogcatIfRunning();
     });

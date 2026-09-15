@@ -1096,13 +1096,15 @@ fn logcat_dir_for(
 /// `logcat` 事件批量推前端（`{serial, stage: "lines", lines[]}`；连续秒死放弃时
 /// 推 `{stage: "error", message}`）。filter_package 且包名非空 → 按包过滤
 /// （Android 12+ UID / 11 及以下 pid，限制由 core 报错文案透传）；否则全机抓取。
-/// `level` 为最低级别（V/D/I/W/E/F），空或非法值按 V（全部）
+/// `level` 为最低级别（V/D/I/W/E/F），空或非法值按 V（全部）；
+/// `text` 为文本过滤正则（设备端 logcat -e 消息体匹配），空白不过滤
 #[tauri::command]
 async fn start_logcat(
     serial: String,
     package: String,
     filter_package: bool,
     level: String,
+    text: String,
     state: State<'_, AppState>,
     app: tauri::AppHandle,
 ) -> Result<String, String> {
@@ -1152,6 +1154,7 @@ async fn start_logcat(
         &dir,
         filter,
         level_char,
+        Some(text).filter(|t| !t.trim().is_empty()),
         Some(on_event),
     )
     .map_err(|e| e.to_string())?;
@@ -1196,16 +1199,17 @@ async fn stop_logcat(serial: String, state: State<'_, AppState>) -> Result<Strin
     }
 }
 
-/// 热切换 logcat 过滤口径（「日志」tab 的级别下拉 / 按包过滤勾选 / 包名变更时
-/// 前端联动调用）：不打断抓取会话——core `restart` 复用断连重连路径按新参数
-/// 重 spawn，同一文件续写（标记行带新口径）。解析失败（如 A11 未运行）报错，
-/// 旧口径继续抓取不受影响
+/// 热切换 logcat 过滤口径（「日志」tab 的级别下拉 / 按包过滤勾选 / 包名 /
+/// 文本过滤输入变更时前端联动调用）：不打断抓取会话——core `restart` 复用断连
+/// 重连路径按新参数重 spawn，同一文件续写（标记行带新口径）。解析失败
+/// （如 A11 未运行）报错，旧口径继续抓取不受影响
 #[tauri::command]
 async fn restart_logcat(
     serial: String,
     package: String,
     filter_package: bool,
     level: String,
+    text: String,
     state: State<'_, AppState>,
 ) -> Result<String, String> {
     let session = state.session(&serial);
@@ -1219,8 +1223,13 @@ async fn restart_logcat(
         xperf_core::logcat::LogcatFilter::All
     };
     let desc = format!("{:?}", filter);
-    h.restart(filter, level.chars().next());
-    Ok(format!("logcat 已切换: filter={} level={}（同文件续写）", desc, level))
+    let text_regex = Some(text).filter(|t| !t.trim().is_empty());
+    let text_desc = text_regex.clone().unwrap_or_else(|| "(none)".into());
+    h.restart(filter, level.chars().next(), text_regex);
+    Ok(format!(
+        "logcat 已切换: filter={} level={} text={}（同文件续写）",
+        desc, level, text_desc
+    ))
 }
 
 /// 在线设备清单（顶栏设备 tab 用）：`{devices: [{serial, model, version}]}`
