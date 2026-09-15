@@ -1,9 +1,28 @@
-image: ubuntu:20.04
+# xtools 发布流水线（内部 GitLab CE 17 + yz1 instance runner，docker executor）
+#
+# 触发：main push / tag（vX.Y.Z）/ Run Pipeline（web、api 手动触发）
+# 产物：Linux x86_64 tar.gz（xperf-cli + 预编译 Android agent）；tag 时自动创建
+#       Release 并挂资产。macOS 无 runner，由 scripts/release-macos.sh 本机构建
+#       上传后挂到同一 Release。
+#
+# 环境事实（2026-09-15 勘察实证，调整前先重验）：
+#   - runner 直连 registry-1.docker.io 被阻断（connection reset）——所有镜像走内部
+#     Artifactory 代理 artifactory.ep.chehejia.com/docker-remote/<image>
+#   - runner 侧 apt 直连 archive.ubuntu.com / deb.debian.org 卡死（15min+ 无响应）；
+#     重写 mirrors.aliyun.com 后正常（bullseye update ~38s）
+#   - crates.io 直连从 runner 不可达（index.crates.io 卡死）——cargo 走 aliyun
+#     sparse 镜像（before_script 写 $CARGO_HOME/config.toml，仅 CI 生效）
+#   - dl.google.com / registry.gitlab.com / github.com 从 runner 可达（但 dl.google.com
+#     仅 ~2.4MB/s——NDK 等大文件已 vendor 到本项目 package registry，勿再走外网）
+#   - 基于 bullseye（glibc 2.31）构建保证 ubuntu 20.04+ 可运行
+#   - 无 macOS runner；group runner build-61-102(longteng) 长期 stale
 
-variables:
-  CARGO_HOME: $CI_PROJECT_DIR/.cargo
-  DEBIAN_FRONTEND: noninteractive
-  MACOSX_DEPLOYMENT_TARGET: "11.0"
+workflow:
+  rules:
+    - if: $CI_COMMIT_TAG
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+    - if: $CI_PIPELINE_SOURCE == "web"
+    - if: $CI_PIPELINE_SOURCE == "api"
 
 stages:
   - validate
@@ -11,152 +30,125 @@ stages:
   - build
   - release
 
-# Cache dependencies and build artifacts
-cache:
-  paths:
-    - target/
-    - .cargo/
-  key: $CI_COMMIT_REF_SLUG
+# 注意：CARGO_HOME 不能用 $CI_PROJECT_DIR/.cargo——那是仓库自身的 cargo 配置目录
+# （含 aarch64-linux-android 的 ndk-clang.sh linker 配置），会被 CI 侧镜像配置覆盖
+variables:
+  CARGO_HOME: $CI_PROJECT_DIR/.cargo-ci
+  DEBIAN_FRONTEND: noninteractive
+  RUST_IMAGE: artifactory.ep.chehejia.com/docker-remote/library/rust:1.93.0-bullseye
+  APT_MIRROR: mirrors.aliyun.com
+  NDK_DIR: android-ndk-r25b
 
-.rust-setup: &rust-setup
-  # Install SSL certificates for Rust installer
-  - apt-get update && apt-get install -y curl build-essential pkg-config ca-certificates libfontconfig1-dev
-  - curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-  - source $CARGO_HOME/env
+# CLI 的 plotters/font-kit 链 fontconfig（C 库）；rust 镜像是 debian 系，
+# apt 源重写 aliyun（见文件头环境事实）后安装
+.rust-job:
+  image: $RUST_IMAGE
+  before_script:
+    - sed -i "s|deb.debian.org|$APT_MIRROR|g; s|security.debian.org|$APT_MIRROR|g" /etc/apt/sources.list
+    - apt-get update -qq && apt-get install -y -qq pkg-config libfontconfig1-dev
+    # apt 静默失败保护（update 对坏源也可能返回 0）：fontconfig 不可用立刻失败
+    - pkg-config --modversion fontconfig > /dev/null
+    # crates.io 镜像（见文件头环境事实）；写在独立 CARGO_HOME，与仓库 .cargo/config.toml
+    # （linker 配置）合并生效，本地开发不受影响
+    - mkdir -p "$CARGO_HOME"
+    - printf '[source.crates-io]\nreplace-with = "mirror"\n\n[source.mirror]\nregistry = "sparse+https://mirrors.aliyun.com/crates.io-index/"\n' > "$CARGO_HOME/config.toml"
 
-# Validate tag format (x.y.z)
+# 校验 tag 规范：v 前缀语义化版本、与 crate 版本一致、CHANGELOG 有对应章节
 validate:tag:
   stage: validate
-  script:
-    - |
-      if [[ ! "$CI_COMMIT_TAG" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-        echo "Invalid tag format! Tags must follow semantic versioning (x.y.z or vx.y.z)"
-        exit 1
-      fi
-      echo "Tag format is valid: $CI_COMMIT_TAG"
+  image: $RUST_IMAGE
   rules:
     - if: $CI_COMMIT_TAG
+  script:
+    - |
+      TAG="$CI_COMMIT_TAG"; VER="${TAG#v}"
+      if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        echo "tag 须为 vX.Y.Z（v 前缀语义化版本），当前: $TAG"; exit 1
+      fi
+      CARGO_VER=$(sed -n 's/^version = "\(.*\)"$/\1/p' xperf-cli/Cargo.toml | head -1)
+      if [ "$VER" != "$CARGO_VER" ]; then
+        echo "tag 版本 $VER 与 xperf-cli/Cargo.toml 的 $CARGO_VER 不一致（先 bump 版本再打 tag）"; exit 1
+      fi
+      if ! grep -q "^## \[$TAG\]" CHANGELOG.md; then
+        echo "CHANGELOG.md 缺少 $TAG 章节"; exit 1
+      fi
+      echo "tag 校验通过: $TAG"
+
+test:linux:
+  stage: test
+  extends: .rust-job
+  cache:
+    - key:
+        files:
+          - Cargo.lock
+        prefix: test
+      paths:
+        - target/
+        - .cargo-ci/
+  script:
+    # GUI 为 macOS 产品（Linux 不发布），测试面限定 core + cli；GUI 测试在 macOS 本地跑
+    - cargo test --locked -p xperf-core -p xperf-cli
 
 build:linux:
   stage: build
+  extends: .rust-job
+  variables:
+    ANDROID_NDK_HOME: $CI_PROJECT_DIR/$NDK_DIR
+  cache:
+    - key:
+        files:
+          - Cargo.lock
+        prefix: build
+      paths:
+        - target/
+        - .cargo-ci/
   script:
-    - *rust-setup
-    - rustc --version
-    - cargo --version
-    - cargo build --release --target x86_64-unknown-linux-gnu
-    # Create artifacts directory
-    - mkdir -p artifacts
-    # Copy binary and documentation
-    - cp target/x86_64-unknown-linux-gnu/release/xperf-cli artifacts/
-    - cp README.md artifacts/
-    - cp README_zh.md artifacts/
-    - cp LICENSE artifacts/
-    # Create archive
-    - cd artifacts
-    - tar -czf xtools-linux-x86_64.tar.gz *
+    - cargo build --locked --release -p xperf-cli
+    # NDK r25b（25.1.8937393，与 .cargo/ndk-clang.sh 基线一致）已 vendor 到本项目
+    # package registry——内部下载秒级；dl.google.com 从 runner 仅 ~2.4MB/s 且是外部
+    # 依赖（NDK 升级时重传：PUT .../packages/generic/ndk/<版本>/android-ndk-rXXb-linux.zip）
+    - |
+      curl -fsSL --header "JOB-TOKEN: $CI_JOB_TOKEN" -o /tmp/ndk.zip \
+        "$CI_API_V4_URL/projects/$CI_PROJECT_ID/packages/generic/ndk/25.1.8937393/android-ndk-r25b-linux.zip"
+      unzip -q /tmp/ndk.zip && rm -f /tmp/ndk.zip
+    # rust-std（android target）同 NDK 一并 vendor——static.rust-lang.org 从 runner 不可达
+    # （Fastly 被阻断），ustc 镜像可用但极慢（~4min/40MB）；版本须与镜像 rustc 一致，
+    # 升级 RUST_IMAGE 时同步重传 package registry
+    - |
+      rustc --version | grep -q " 1.93.0 " || { echo "镜像 rustc 非 1.93.0——须同步重传 rust-std 到 package registry"; exit 1; }
+      TC=$(ls -d /usr/local/rustup/toolchains/* | head -1)
+      curl -fsSL --header "JOB-TOKEN: $CI_JOB_TOKEN" -o /tmp/std.tar.xz \
+        "$CI_API_V4_URL/projects/$CI_PROJECT_ID/packages/generic/rust-std/1.93.0-aarch64-linux-android/rust-std-1.93.0-aarch64-linux-android.tar.xz"
+      tar -xJf /tmp/std.tar.xz -C /tmp
+      cp -r /tmp/rust-std-1.93.0-aarch64-linux-android/rust-std-aarch64-linux-android/lib/rustlib/aarch64-linux-android "$TC/lib/rustlib/"
+      ls "$TC/lib/rustlib/aarch64-linux-android/lib"/*.rlib | wc -l
+    - cargo build --locked -p xperf-agent --target aarch64-linux-android --release
+    - VER=$(sed -n 's/^version = "\(.*\)"$/\1/p' xperf-cli/Cargo.toml | head -1)
+    - PKG="xtools-v$VER-linux-x86_64"
+    - mkdir -p "artifacts/$PKG/agent"
+    - cp target/release/xperf-cli "artifacts/$PKG/"
+    - cp "target/aarch64-linux-android/release/xperf-agent" "artifacts/$PKG/agent/"
+    - cp README.md README_zh.md LICENSE CHANGELOG.md "artifacts/$PKG/"
+    - tar -C artifacts -czf "artifacts/$PKG.tar.gz" "$PKG"
+    - ls -lh artifacts/
+  # job artifact 仅作 build→release 的传输（release 上传 package registry 后永久存）
   artifacts:
     paths:
-      - artifacts/xtools-linux-x86_64.tar.gz
-    expire_in: never
-  rules:
-    - if: $CI_COMMIT_BRANCH == "main"
-    - if: $CI_COMMIT_TAG
+      - artifacts/
+    expire_in: 7 days
 
-# build:macos-x86_64:
-#   stage: build
-#   tags:
-#     - macos
-#     - x86_64
-#     - bigsur  # macOS 11
-#   script:
-#     - rustc --version
-#     - cargo --version
-#     - cargo build --release --target x86_64-apple-darwin
-#     # Create artifacts directory
-#     - mkdir -p artifacts
-#     # Copy binary and documentation
-#     - cp target/x86_64-apple-darwin/release/xperf-cli artifacts/
-#     - cp README.md artifacts/
-#     - cp README_zh.md artifacts/
-#     - cp LICENSE artifacts/
-#     # Create archive
-#     - cd artifacts
-#     - tar -czf xtools-macos-x86_64.tar.gz *
-#   artifacts:
-#     paths:
-#       - artifacts/xtools-macos-x86_64.tar.gz
-#     expire_in: never
-#   rules:
-#     - if: $CI_COMMIT_BRANCH == "main"
-#     - if: $CI_COMMIT_TAG
-
-# build:macos-arm64:
-#   stage: build
-#   tags:
-#     - macos
-#     - arm64
-#     - bigsur  # macOS 11
-#   script:
-#     - rustc --version
-#     - cargo --version
-#     - cargo build --release --target aarch64-apple-darwin
-#     # Create artifacts directory
-#     - mkdir -p artifacts
-#     # Copy binary and documentation
-#     - cp target/aarch64-apple-darwin/release/xperf-cli artifacts/
-#     - cp README.md artifacts/
-#     - cp README_zh.md artifacts/
-#     - cp LICENSE artifacts/
-#     # Create archive
-#     - cd artifacts
-#     - tar -czf xtools-macos-arm64.tar.gz *
-#   artifacts:
-#     paths:
-#       - artifacts/xtools-macos-arm64.tar.gz
-#     expire_in: never
-#   rules:
-#     - if: $CI_COMMIT_BRANCH == "main"
-#     - if: $CI_COMMIT_TAG
-
+# 发布：产物上传 package registry（永久存储；job artifact 仅作 job 间传输），
+# 创建 Release（描述取 CHANGELOG 章节）并挂资产链接；macOS 由本地脚本追加
 release:
   stage: release
-  image: registry.gitlab.com/gitlab-org/release-cli:latest
-  script:
-    - echo "Creating release ${CI_COMMIT_TAG}"
-  release:
-    name: "Release $CI_COMMIT_TAG"
-    description: |
-      XTools Release $CI_COMMIT_TAG
-
-      ## Changes
-      <!-- Replace this with the actual changelog for this version -->
-      - Improved memory usage reporting
-      - Enhanced thread monitoring
-      - High-resolution charts (1920x1080)
-      - Absolute time-based sampling for consistent intervals
-
-      ## Downloads
-      - [Linux x86_64](${CI_PROJECT_URL}/-/jobs/artifacts/${CI_COMMIT_TAG}/raw/artifacts/xtools-linux-x86_64.tar.gz?job=build:linux) (Ubuntu 20.04+ compatible)
-      - [macOS x86_64]Support Later! (${CI_PROJECT_URL}/-/jobs/artifacts/${CI_COMMIT_TAG}/raw/artifacts/xtools-macos-x86_64.tar.gz?job=build:macos-x86_64) (macOS 11.0+ Intel)
-      - [macOS ARM64]Support Later! (${CI_PROJECT_URL}/-/jobs/artifacts/${CI_COMMIT_TAG}/raw/artifacts/xtools-macos-arm64.tar.gz?job=build:macos-arm64) (macOS 11.0+ Apple Silicon)
-    tag_name: "$CI_COMMIT_TAG"
-    assets:
-      links:
-        - name: "Linux x86_64"
-          url: "${CI_PROJECT_URL}/-/jobs/artifacts/${CI_COMMIT_TAG}/raw/artifacts/xtools-linux-x86_64.tar.gz?job=build:linux"
-          link_type: "package"
-        # - name: "macOS x86_64"
-        #   url: "${CI_PROJECT_URL}/-/jobs/artifacts/${CI_COMMIT_TAG}/raw/artifacts/xtools-macos-x86_64.tar.gz?job=build:macos-x86_64"
-        #   link_type: "package"
-        # - name: "macOS ARM64"
-        #   url: "${CI_PROJECT_URL}/-/jobs/artifacts/${CI_COMMIT_TAG}/raw/artifacts/xtools-macos-arm64.tar.gz?job=build:macos-arm64"
-        #   link_type: "package"
-  rules:
-    - if: $CI_COMMIT_TAG
+  image: $RUST_IMAGE
   needs:
+    - job: validate:tag
     - job: build:linux
       artifacts: true
-    # - job: build:macos-x86_64
-    #   artifacts: true
-    # - job: build:macos-arm64
-    #   artifacts: true
+  rules:
+    - if: $CI_COMMIT_TAG
+  script:
+    - VER=$(sed -n 's/^version = "\(.*\)"$/\1/p' xperf-cli/Cargo.toml | head -1)
+    - python3 scripts/release_create.py
+    - python3 scripts/release_upload.py "artifacts/xtools-v$VER-linux-x86_64.tar.gz" "Linux x86_64 (CLI + agent)"
