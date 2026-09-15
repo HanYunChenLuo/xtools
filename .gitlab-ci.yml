@@ -126,6 +126,11 @@ build:linux:
     - cp README.md README_zh.md LICENSE CHANGELOG.md "artifacts/$PKG/"
     - tar -C artifacts -czf "artifacts/$PKG.tar.gz" "$PKG"
     - ls -lh artifacts/
+  # job artifact 仅作 build→release 的传输（release 上传 package registry 后永久存）
+  artifacts:
+    paths:
+      - artifacts/
+    expire_in: 7 days
 
 # 发布：产物上传 package registry（永久存储；job artifact 仅作 job 间传输），
 # 创建 Release（描述取 CHANGELOG 章节）并挂资产链接；macOS 由本地脚本追加
