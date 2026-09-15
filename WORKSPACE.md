@@ -2,7 +2,7 @@
 
 > 本文件记录跨会话的待办事项（backlog）。每次会话的历史总结见 `SESSION.md`。
 > 完成一项就把状态改为 ✅ 并注明完成的 commit；新增想法随时追加。
-> 最后更新：2026-09-15：**J 节 facedemo 1.74 CPU 归因完成**——1.74 帧路径 +56% 为文档增幅来源（提交链/UBO 上传/每帧 SurfaceRenderer 析构）；主线 1.38 另有每帧管线编译病理（bindPipeline 句柄 key miss→libllvm 编译）致实测 15.4%≠文档 7.3%。上一状态：2026-09-14 晚 logcat 支持完成（`feature/logcat` 合 main，详见 I 节条目）；I 节仅剩「命令行输入」
+> 最后更新：2026-09-15：**J 节 facedemo 1.74 CPU 归因完成（broadcast_error 对照破案）**——文档 7.3→11.6 = 1.74 渲染路径真实增量 +66%（7.26→12.04，渲染线程口径精确复现）；awaken2 场景主线另有每帧管线编译病理（句柄 key miss）被 1.74 重构顺带修复。上一状态：2026-09-14 晚 logcat 支持完成（`feature/logcat` 合 main，详见 I 节条目）；I 节仅剩「命令行输入」
 
 ## 当前状态速览
 
@@ -125,7 +125,7 @@
   - **实测与文档的差异**：v1.74.1 实测 12.0% 吻合文档 11.6%；主线实测 15.4% ≠ 文档 7.3%（差值即上述编译病理）——文档主线测量时无此现象，测量条件（固件/日期/工具口径）待用户确认
   - 附带发现：**facedemo 的 FaceActivity（主驾入口）在两版 APK 上均 100% native 崩溃**（`NoClassDefFoundError: androidx.coordinatorlayout.widget.CoordinatorLayout` 仅被 dex 引用未定义（被 catch 非致命）→ 随后 native 堆损坏 scudo/FORTIFY SIGABRT，109ms 内死）——与 filament 版本无关的应用/环境问题；FurBoy3dgsActivity2 / PixsActivity 不受影响
   - 数据目录：`/tmp/xperf/com.lixiang.facedemo/`（CLI 采样 CSV + simpleperf 报告，Mac 端）；APK 留存 hppc `/tmp/facedemo/`
-  - 停止动画对照：两版渲染循环均与动画绑定（停止 → FPS 0 / CPU <0.6%，无静止重绘）
+  - **broadcast_error 干净对照（后续补充，关键）**：换 broadcast_error 动画循环后主线**编译病理消失**（createPipeline 0%——awaken2 特有的每帧 3DGS 点排序/缓冲重建是 miss 诱因），渲染线程 XFW:Main：**主线 7.26% vs 1.74 12.04%（+66%）——精确复现文档 7.3→11.6**（文档测量时主线无编译现象的原因即此）。1.74 渲染路径开销与动画类型无关（两动画均 ~12%）；broadcast 另有语音播报开销（binder×4 + ART GC ≈4.6-5.6pp，两版同量级，进程总量 12.86% vs 16.62%）。**结论修正**：文档增幅 = 1.74 渲染路径真实增量（提交链/UBO 上传/每帧 SurfaceRenderer 析构），与动画无关；awaken2 场景下 1.38 的句柄 key 病理被 1.74 重构顺带修复
 
 ---
 
