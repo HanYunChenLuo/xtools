@@ -31,6 +31,8 @@
 
 **同日进一步归因（主线 vs 1.74 broadcast_error，严格同场景）**：重新 60s 采样得到主线进程 **11.69% / XFW:Main 7.15% / FPS 44.82 / GPU 11.55%**，1.74 进程 **16.89% / XFW:Main 12.21% / FPS 44.81 / GPU 11.94%**。额外 **5.06pp 几乎全部来自 XFW:Main**，不是 GPU、FPS、binder 或 ART 的差异。主线旧 Filament 路径热点是 `VulkanCommands::flush` 8.67%、`VulkanBuffer::loadFromCpu` 8.55%、present 7.87%、`VulkanStagePool::gc` 5.70%、compute 4.57%；1.74 路径进入 `FEngine::execute`/`FRenderer::renderInternal`，热点变为 `VulkanDriver::finish` 28.46% → `VulkanCommands::flush` 22.95% → `VulkanCommandBuffer::submit` 22.71% → `vkQueueSubmit` 18.85%，以及 `updateBufferObjectCommon` 17.81%、`updateBufferObject` 17.09%、`dispatchCompute` 10.57%、`SurfaceRenderer::drop` 10.37%/`FRenderer::endFrame` 10.22%。这些是调用树 children 百分比，存在包含关系不能相加；根因是 1.74 Vulkan backend 的每帧 command buffer 提交、buffer/descriptor 更新、fence/resource 生命周期管理 CPU 成本明显增加。1.74 反而把应用层动画/CUA 更新从主线约 12.5%/10.2% 降到约 5.8%/4.3%，所以不是 broadcast_error 动画逻辑变重。
 
+**新增交接任务（用户要求源码深挖）**：Filament 源码在 hppc `/home/han/code/graphic/filamentdir/src/`：主线 `filament-v1.38.0-dev`、1.74.1 `filament-v1.74.1-dev`。下一会话先检查两个目录 git 状态/commit/tag，不直接修改 hppc 源码；重点对照 Vulkan backend 的 command flush/submit、buffer/descriptor 更新、fence/resource GC、`SurfaceRenderer::drop`→`FRenderer::endFrame`，量化每帧调用次数/命令数/上传字节/同步对象，结合真机 simpleperf/Perfetto 判断优化点。验收必须复用 SS4 broadcast_error 60s（CPU/XFW:Main/FPS/GPU/RSS）并补 awaken2（确认不引入 1.38 管线编译）。
+
 **工程备忘**：SS4 的 uiautomator 可完整 dump 该 app 控件树（无障碍可达），自动化点击/滑列表可靠；Car HU 窗口区域（DRIVER/COPILOT）会动态重排，每次进入场景后须重新 dump 取坐标；采样进程 pid 存在 namespace 扭曲现象（pidof 与 /proc 视图不一致，不影响按包名采样）；隔夜设备闲置后 app 渲染循环自动停（FPS 0），实验前须重新拉起。
 
 ---

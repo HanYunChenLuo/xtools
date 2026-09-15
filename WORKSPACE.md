@@ -2,7 +2,7 @@
 
 > 本文件记录跨会话的待办事项（backlog）。每次会话的历史总结见 `SESSION.md`。
 > 完成一项就把状态改为 ✅ 并注明完成的 commit；新增想法随时追加。
-> 最后更新：2026-09-15：**J 节 facedemo 1.74 CPU 归因完成（broadcast_error 对照破案）**——文档 7.3→11.6 = 1.74 渲染路径真实增量 +66%（7.26→12.04，渲染线程口径精确复现）；awaken2 场景主线另有每帧管线编译病理（句柄 key miss）被 1.74 重构顺带修复。上一状态：2026-09-14 晚 logcat 支持完成（`feature/logcat` 合 main，详见 I 节条目）；I 节仅剩「命令行输入」
+> 最后更新：2026-09-15：**J 节完成真机归因，新增 Filament 源码对照与优化验证任务**——hppc 源码位于 `/home/han/code/graphic/filamentdir/src/`，主线 `filament-v1.38.0-dev`、1.74.1 `filament-v1.74.1-dev`。已锁定 broadcast_error 的 1.74 backend CPU 增量，待新会话结合源码定位优化空间。上一状态：2026-09-14 晚 logcat 支持完成（`feature/logcat` 合 main，详见 I 节条目）；I 节仅剩「命令行输入」
 
 ## 当前状态速览
 
@@ -127,6 +127,19 @@
   - 数据目录：`/tmp/xperf/com.lixiang.facedemo/`（CLI 采样 CSV + simpleperf 报告，Mac 端）；APK 留存 hppc `/tmp/facedemo/`
   - **broadcast_error 干净对照（后续补充，关键）**：换 broadcast_error 动画循环后主线**编译病理消失**（createPipeline 0%——awaken2 特有的每帧 3DGS 点排序/缓冲重建是 miss 诱因），渲染线程 XFW:Main：**主线 7.26% vs 1.74 12.04%（+66%）——精确复现文档 7.3→11.6**（文档测量时主线无编译现象的原因即此）。1.74 渲染路径开销与动画类型无关（两动画均 ~12%）；broadcast 另有语音播报开销（binder×4 + ART GC ≈4.6-5.6pp，两版同量级，进程总量 12.86% vs 16.62%）。**结论修正**：文档增幅 = 1.74 渲染路径真实增量（提交链/UBO 上传/每帧 SurfaceRenderer 析构），与动画无关；awaken2 场景下 1.38 的句柄 key 病理被 1.74 重构顺带修复
   - **broadcast_error 进一步函数归因（2026-09-15）**：严格同场景 60s 重测：主线进程 11.69% / XFW:Main 7.15% / FPS 44.82 / GPU 11.55%；1.74 进程 16.89% / XFW:Main 12.21% / FPS 44.81 / GPU 11.94%。额外 5.06pp 几乎全在 XFW:Main。主线热点为 `VulkanCommands::flush` 8.67%、`VulkanBuffer::loadFromCpu` 8.55%、present 7.87%、`VulkanStagePool::gc` 5.70%；1.74 为 `VulkanDriver::finish` 28.46% → `VulkanCommands::flush` 22.95% → `VulkanCommandBuffer::submit` 22.71% → `vkQueueSubmit` 18.85%，`updateBufferObjectCommon` 17.81%/`updateBufferObject` 17.09%、compute 10.57%、`SurfaceRenderer::drop` 10.37%。children 百分比包含关系不可相加；结论是 1.74 backend 每帧 command buffer 提交、buffer/descriptor 更新、fence/resource 生命周期管理 CPU 更重；应用动画/CUA 更新反而从主线约 12.5%/10.2% 降到约 5.8%/4.3%，差异不是 broadcast_error 动画逻辑。
+
+
+- [ ] **Filament 源码对照与优化验证（2026-09-15 新任务，需新会话继续）**：结合 hppc 主机源码定位 1.74.1 相对主线 1.38 的 CPU 增量，评估可落地优化并在 SS4 真机回归。
+  - **源码位置（hppc）**：`/home/han/code/graphic/filamentdir/src/filament-v1.38.0-dev`（主线）与 `/home/han/code/graphic/filamentdir/src/filament-v1.74.1-dev`（1.74.1）；注意 `/home/han/code/graphic/filamentdir` 可能是外层工作区，源码对照应直接进入上述两个版本目录
+  - **已锁定真机复现条件**：SS4 `localhost:5559`（经 `--remote hppc`）、`毛绒 3DGS 调试`/`FurBoy3dgsActivity2`、niuzai 模型、`broadcast_error` 循环；两版 FPS≈44.8、GPU 进程 busy≈11.6-11.9%，但渲染线程 XFW:Main 主线 **7.15%** vs 1.74.1 **12.21%**，进程 CPU **11.69%** vs **16.89%**，差异 **+5.06pp** 集中在 XFW:Main
+  - **已确认热点（simpleperf，`.so` 含完整符号；children 百分比有包含关系，不能相加）**：主线 `VulkanCommands::flush` 8.67%、`VulkanBuffer::loadFromCpu` 8.55%、present 7.87%、`VulkanStagePool::gc` 5.70%、compute 4.57%；1.74.1 `FEngine::execute`/`FRenderer::renderInternal` 路径下，`VulkanDriver::finish` 28.46%、`VulkanCommands::flush` 22.95%、`VulkanCommandBuffer::submit` 22.71%、`vkQueueSubmit` 18.85%、`updateBufferObjectCommon` 17.81%、`updateBufferObject` 17.09%、compute 10.57%、`SurfaceRenderer::drop` 10.37%/`FRenderer::endFrame` 10.22%
+  - **当前判断（待源码证实，不要直接当最终根因）**：1.74 backend 的每帧 command buffer flush/submit、buffer/descriptor 更新、fence 与资源生命周期管理路径 CPU 更重；应用层反而变轻（动画更新/CUA 约主线 12.5%/10.2% → 1.74 约 5.8%/4.3%）。需要源码 diff 证明是实现变化、调用次数变化还是对象生命周期/同步策略变化
+  - **优先源码入口**：两版对应 backend Vulkan 实现（`backend/src/vulkan` 或实际目录）、`VulkanCommands::flush` / `VulkanCommandBuffer::submit` / `VulkanDriver::finish`、buffer upload（`VulkanBuffer::loadFromCpu` vs `VulkanBufferProxy::loadFromCpu` / `updateBufferObjectCommon`）、`VulkanStagePool`/`VulkanDisposer`/`VulkanCmdFence`、`FRenderer::endFrame`/`SurfaceRenderer::drop`；同时检查 `FEngine::execute`、`FRenderer::renderInternal`、FrameGraph/CommandStream 调度是否改变
+  - **需要量化的源码问题**：每帧 command 数量与 flush 次数；每次 submit 的 command buffer/fence 数量；buffer upload 次数/字节数与 staging pool 回收次数；descriptor 更新/commit 次数；SurfaceRenderer drop 是否引发重复 endFrame、syncobj/fd 销毁；1.74 是否增加 FrameGraph pass、resource transition 或 Vulkan fence wait
+  - **优化候选（调查后决定，不预设结论）**：合并/延迟 command flush；减少每帧 staging buffer 与 descriptor 更新；复用 command buffer/fence/syncobj；避免 SurfaceRenderer 每帧 drop 触发重型 endFrame；改 pipeline/cache key 使用兼容性标识而非 Vulkan handle 身份（仅针对 1.38 awaken2 病理，需验证 Vulkan 正确性）；任何优化必须保持 GPU/FPS 不退化
+  - **验证要求**：源码静态 diff + `simpleperf` 函数/调用次数证据；必要时 Perfetto 帧级 trace；优化前后 SS4 `broadcast_error` 60s 对比（CPU、XFW:Main、FPS、GPU、RSS）以及 awaken2 对照（确认不重新引入 1.38 管线编译）；优化代码/补丁在对应 Filament 版本目录或明确记录为应用侧 workaround
+  - **现有产物**：`/tmp/xperf/com.lixiang.facedemo/` 下有采样 CSV/图表；当前会话中 simpleperf 报告与 `.data` 已从设备清理，若需复盘应重新采集；APK/原始附件留在 hppc `/tmp/facedemo/`
+  - **交接纪律**：先读两个版本源码的 git 状态、commit/tag 和相关文件，再做 diff；不要直接修改 hppc 源码；优化前必须复制/记录基线；children 百分比不得跨层相加；`broadcast_error` 的语音 binder/ART GC 与 XFW:Main backend 开销分开统计
 
 ---
 
