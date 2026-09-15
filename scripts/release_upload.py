@@ -72,7 +72,9 @@ def main() -> None:
     else:
         sys.exit("缺少认证：GITLAB_TOKEN 或 CI_JOB_TOKEN")
 
-    # 1) 上传 package registry（generic 仓库 xtools/<tag>/<file>）
+    # 1) 上传 package registry（generic 仓库 xtools/<tag>/<file>）。
+    #    注意：本实例（GitLab CE）的 PUT 响应体只有 {"message":"201 Created"}，
+    #    不含官方文档描述的 package 对象——文件 id 须经查询 API 获取
     quoted = urllib.parse.quote(file_path.name, safe="")
     status, resp = api(
         "PUT",
@@ -81,7 +83,26 @@ def main() -> None:
     )
     if status not in (200, 201):
         sys.exit(f"上传 {file_path.name} 失败: HTTP {status} {json.dumps(resp, ensure_ascii=False)}")
-    file_id = resp["package_files"][0]["id"]
+
+    # 2) 查询包（同版本重传会产生多条记录，取 id 最大=最新的包/文件）
+    status, pkgs = api("GET",
+                       f"/projects/{project_id}/packages?package_name=xtools&per_page=100",
+                       auth=auth)
+    if status != 200:
+        sys.exit(f"查询 package 列表失败: HTTP {status} {json.dumps(pkgs, ensure_ascii=False)}")
+    pkgs = [p for p in pkgs if p["version"] == tag]
+    if not pkgs:
+        sys.exit(f"上传后未找到 xtools/{tag} 包")
+    pkg_id = max(pkgs, key=lambda p: p["id"])["id"]
+    status, files = api("GET",
+                        f"/projects/{project_id}/packages/{pkg_id}/package_files?per_page=100",
+                        auth=auth)
+    if status != 200:
+        sys.exit(f"查询 package files 失败: HTTP {status} {json.dumps(files, ensure_ascii=False)}")
+    matches = [f for f in files if f["file_name"] == file_path.name]
+    if not matches:
+        sys.exit(f"包 {pkg_id} 内未找到 {file_path.name}")
+    file_id = max(matches, key=lambda f: f["id"])["id"]
     file_url = f"{project_url}/-/package_files/{file_id}"
     print(f"uploaded {file_path.name} -> {file_url}")
 
