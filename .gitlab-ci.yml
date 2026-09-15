@@ -90,6 +90,8 @@ build:linux:
   extends: .rust-job
   variables:
     ANDROID_NDK_HOME: $CI_PROJECT_DIR/$NDK_DIR
+    # static.rust-lang.org 从 runner 不可达（Fastly 同 crates.io 被阻断），rustup 组件走 ustc 镜像
+    RUSTUP_DIST_SERVER: https://mirrors.ustc.edu.cn/rust-static
   cache:
     - key:
         files:
