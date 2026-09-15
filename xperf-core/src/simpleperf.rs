@@ -1,5 +1,5 @@
 //! simpleperf 调用栈采样：函数级 CPU 热点定位（回答"CPU 高在哪个函数"）。
-//! CLI（xperformance）与 GUI（xperf-gui）共用——输出目录由调用方传入，报告以文本返回，
+//! CLI（xperf-cli）与 GUI（xperf-gui）共用——输出目录由调用方传入，报告以文本返回，
 //! 进度/打印均由调用方负责（CLI println，GUI 走 Tauri 事件）。
 //!
 //! 定位：与实时采样、perfetto 深挖互补的三级下钻——采样回答"什么时候高"，

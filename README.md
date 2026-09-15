@@ -6,11 +6,11 @@ A collection of development tools for Android development.
 
 | Tool | Description |
 |------|-------------|
-| `xperformance` | CLI: Android app performance monitor (CPU / memory / FPS) |
+| `xperf-cli` | CLI: Android app performance monitor (CPU / memory / FPS) |
 | `xperf-gui` | Tauri 2 GUI: real-time charts for the same metrics |
 | `xperf-agent` | On-device sampler binary (pushed automatically, not used standalone) |
 
-### xperformance
+### xperf-cli
 
 Real-time Android app performance monitor. All sampling runs **on-device** via a
 resident agent binary (`xperf-agent`), streamed back over a single
@@ -46,7 +46,7 @@ sampling intervals down to ~50 ms are practical.
 #### Usage
 
 ```bash
-./target/release/xperformance --package <package_name> [--cpu] [--memory] [--fps] [--thread] [-i <interval_ms>]
+./target/release/xperf-cli --package <package_name> [--cpu] [--memory] [--fps] [--thread] [-i <interval_ms>]
 ```
 
 Options:
@@ -63,13 +63,13 @@ The device-side agent is built (if missing) and pushed to
 Examples:
 ```bash
 # Monitor CPU, memory and FPS at the default 1s interval
-./target/release/xperformance --package com.example.app --cpu --memory --fps
+./target/release/xperf-cli --package com.example.app --cpu --memory --fps
 
 # Fine-grained CPU burst analysis at 50 ms
-./target/release/xperformance --package com.example.app --cpu -i 50
+./target/release/xperf-cli --package com.example.app --cpu -i 50
 
 # Monitor only memory
-./target/release/xperformance --package com.example.app --memory
+./target/release/xperf-cli --package com.example.app --memory
 ```
 
 #### Output Format

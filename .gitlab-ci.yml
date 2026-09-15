@@ -47,7 +47,7 @@ build:linux:
     # Create artifacts directory
     - mkdir -p artifacts
     # Copy binary and documentation
-    - cp target/x86_64-unknown-linux-gnu/release/xperformance artifacts/
+    - cp target/x86_64-unknown-linux-gnu/release/xperf-cli artifacts/
     - cp README.md artifacts/
     - cp README_zh.md artifacts/
     - cp LICENSE artifacts/
@@ -75,7 +75,7 @@ build:linux:
 #     # Create artifacts directory
 #     - mkdir -p artifacts
 #     # Copy binary and documentation
-#     - cp target/x86_64-apple-darwin/release/xperformance artifacts/
+#     - cp target/x86_64-apple-darwin/release/xperf-cli artifacts/
 #     - cp README.md artifacts/
 #     - cp README_zh.md artifacts/
 #     - cp LICENSE artifacts/
@@ -103,7 +103,7 @@ build:linux:
 #     # Create artifacts directory
 #     - mkdir -p artifacts
 #     # Copy binary and documentation
-#     - cp target/aarch64-apple-darwin/release/xperformance artifacts/
+#     - cp target/aarch64-apple-darwin/release/xperf-cli artifacts/
 #     - cp README.md artifacts/
 #     - cp README_zh.md artifacts/
 #     - cp LICENSE artifacts/

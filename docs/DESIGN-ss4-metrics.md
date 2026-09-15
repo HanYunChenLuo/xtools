@@ -106,5 +106,5 @@ flush_period_ms: 1000
 ## 环境备忘（交接时设备状态）
 
 - MindRT 已 root（`adb root`）、GVM 已 root（rootandroid.sh）；gltf viewer 已装 SS4
-- **gltf 崩溃循环的规避**：测前 `--force-stop` 清场（CLI `xperformance --remote hppc --device localhost:5559 --package com.google.android.filament.gltf --force-stop` 或 GUI「停止应用」按钮）；长期建议重建测试 APK 去掉 RemoteServer（filament 仓库 MainActivity.kt:154，try-catch 或删除即可）
+- **gltf 崩溃循环的规避**：测前 `--force-stop` 清场（CLI `xperf-cli --remote hppc --device localhost:5559 --package com.google.android.filament.gltf --force-stop` 或 GUI「停止应用」按钮）；长期建议重建测试 APK 去掉 RemoteServer（filament 仓库 MainActivity.kt:154，try-catch 或删除即可）
 - SS4 掉线自恢复：HU 休眠/插拔后 bridge 自动重桥接（已实测）；MindRT 从 adb 消失时即 HU 休眠/断开

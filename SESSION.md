@@ -7,6 +7,16 @@
 
 ---
 
+## 2026-09-15 晚(2) — CLI 更名 xperf-cli（xperformance → xperf-cli）
+
+**任务**：用户建议 CLI 更名为 `xperf-cli`（与其余成员 `xperf-core`/`xperf-gui`/`xperf-agent` 命名对齐）。
+
+**改动**：目录 `git mv xperformance xperf-cli` + crate/bin 名（Cargo.toml package+[[bin]]）+ 根 workspace members/default-members + CI 产物路径（.github ci.yml ×2、.gitlab-ci.yml ×3，其中 2 处本已注释）+ 代码注释（main.rs 文件头、core trace/simpleperf doc 各 1）+ 活跃文档（CLAUDE/README×2/WORKSPACE）+ docs 设计文档命令示例（DESIGN-ssh-remote ×9、DESIGN-ss4-metrics ×1——命令名变了示例须跟随）。**顺手删除顶层 `src/main.rs`**（first commit 遗留 Hello world，根 Cargo.toml 是纯 [workspace] 从不构建它）。
+
+**验证**：全量测试（core 122+8 ignored / GUI 10 / CLI 5）+ clippy/doc/rustdoc missing_docs 零警告；release 产物 `target/release/xperf-cli`；真机冒烟 `--remote hppc` SS3 采样正常。`git grep xperformance` 归零（SESSION 历史条目除外；target/ 构建缓存除外）。
+
+---
+
 ## 2026-09-15 晚 — xrm 移出本仓库（残留清理）
 
 **任务**：用户已删 xrm crate（Cargo.toml members/default-members + xrm/ 目录），检查遗漏。

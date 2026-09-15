@@ -27,7 +27,7 @@ cargo build --release
 cargo test
 
 # Run tests for a single crate
-cargo test -p xperformance
+cargo test -p xperf-cli
 
 # Check for errors without building（主机工具；--workspace 会连 agent 一起检查，
 # 在 macOS/Linux 主机上会被 agent 的 Android-only compile_error 拦截）
@@ -38,17 +38,17 @@ cargo check
 # #![warn(missing_docs)] 常开）
 cargo doc 2>&1 | grep -cE "^(warning|error)"   # 应为 0
 cargo rustdoc -p xperf-core -- -W missing_docs
-cargo rustdoc -p xperformance --bins -- -W missing_docs
+cargo rustdoc -p xperf-cli --bins -- -W missing_docs
 cargo rustdoc -p xperf-gui --bins -- -W missing_docs
 ```
 
 Release binaries are written to `target/release/`。
 
-Workspace 成员：`xperf-core`（采样核心）、`xperformance`（CLI）、`xperf-gui`（Tauri GUI）、`xperf-agent`（设备端低间隔采样器，**仅 Android 二进制**——workspace `default-members` 排除它，主机目标显式构建被 `compile_error!` 拦截；交叉编译 `cargo build -p xperf-agent --target aarch64-linux-android --release`，链接器经 `.cargo/ndk-clang.sh` 按宿主 OS 探测（NDK **>= 25.1.8937393** 中取最相近，显式 ANDROID_NDK_HOME 等优先；API 26））。（历史成员 `xrm` 安全删除工具已于 2026-09-15 移出本仓库。）
+Workspace 成员：`xperf-core`（采样核心）、`xperf-cli`（CLI）、`xperf-gui`（Tauri GUI）、`xperf-agent`（设备端低间隔采样器，**仅 Android 二进制**——workspace `default-members` 排除它，主机目标显式构建被 `compile_error!` 拦截；交叉编译 `cargo build -p xperf-agent --target aarch64-linux-android --release`，链接器经 `.cargo/ndk-clang.sh` 按宿主 OS 探测（NDK **>= 25.1.8937393** 中取最相近，显式 ANDROID_NDK_HOME 等优先；API 26））。（历史成员 `xrm` 安全删除工具已于 2026-09-15 移出本仓库。）
 
 ---
 
-## xperformance 设计结构
+## xperf-cli 设计结构
 
 ### 整体架构（统一 agent 采样）
 
@@ -174,7 +174,7 @@ fps_sample_round(pid)                    ← agent 内每 PID 每 FPS 轮一次�
 - **host 侧开关收敛为 `MetricFlags`**（xperf-core/agent.rs）：`spawn_agent`/`reconnect_agent` 签名从逐 bool 改为该结构体，CLI/GUI 共用。
 - **速率类指标（io/net/gpu）首样建基线不出数**，窗口按墙钟差值（非假定间隔），overrun 时速率仍准。（例外：kgsl 窗口语义下读数自含占比，首样即出数。）
 
-CLI 退出图表用通用 helper `generate_multi_line_chart`（xperformance/utils.rs）：freq 每核一条、temp 每传感器一条、io 每 PID 读写两条、net RX/TX、gpu busy%。
+CLI 退出图表用通用 helper `generate_multi_line_chart`（xperf-cli/utils.rs）：freq 每核一条、temp 每传感器一条、io 每 PID 读写两条、net RX/TX、gpu busy%。
 
 ---
 
@@ -381,7 +381,7 @@ hop#2: 本机 P_loc → 远端 adb forward 分配端口（agent 事件流，每�
 
 ### 输出文件触发时机
 
-**数据根目录为 `/tmp/xperf`**（CLI 与 GUI 共用同一根，替代旧的 `./log`；`/tmp` 重启自清）。**清理**：CLI `xperformance --clean-cache`（无需 --package）或 GUI 侧栏「清理缓存与数据」按钮（`tauri-plugin-dialog` 原生 confirm——webkit2gtk 的 JS `confirm()` 窗口标题是 "Javascript-taurixxx"，695946a）——清 `~/.cache/xperf`（perfetto UI 镜像）、`/tmp/xperf`（全部采集数据）与 `xperf-core/simpleperf_scripts/`（火焰图脚本下载缓存，下次使用重新下载或 `--update-simpleperf-scripts` 恢复）；`~/.local/share/perfetto`（trace_processor 官方缓存）不动。采样/录制进行中清理会丢当前会话产物（GUI 有 confirm 确认）。
+**数据根目录为 `/tmp/xperf`**（CLI 与 GUI 共用同一根，替代旧的 `./log`；`/tmp` 重启自清）。**清理**：CLI `xperf-cli --clean-cache`（无需 --package）或 GUI 侧栏「清理缓存与数据」按钮（`tauri-plugin-dialog` 原生 confirm——webkit2gtk 的 JS `confirm()` 窗口标题是 "Javascript-taurixxx"，695946a）——清 `~/.cache/xperf`（perfetto UI 镜像）、`/tmp/xperf`（全部采集数据）与 `xperf-core/simpleperf_scripts/`（火焰图脚本下载缓存，下次使用重新下载或 `--update-simpleperf-scripts` 恢复）；`~/.local/share/perfetto`（trace_processor 官方缓存）不动。采样/录制进行中清理会丢当前会话产物（GUI 有 confirm 确认）。
 
 | 场景 | 触发条件 | 输出位置 |
 |------|---------|---------|

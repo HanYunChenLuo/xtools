@@ -77,7 +77,7 @@
 ```
 ┌───────────────────── Mac（本机）─────────────────────┐
 │                                                      │
-│  表现层    CLI (xperformance)      GUI (xperf-gui)    │
+│  表现层    CLI (xperf-cli)      GUI (xperf-gui)    │
 │              │                        │              │
 │  ────────────┴────────────────────────┴────────────   │
 │  能力层    trace.rs   simpleperf.rs   coldstart.rs    │
@@ -348,7 +348,7 @@ CLI/GUI 解析 --remote hppc
 ```
 
 **顺序是硬约束**：`init_remote` 必须早于**任何** adb 调用，
-特别是 `select_device`（`xperformance/src/main.rs:118`）与 GUI 的 `list_adb_devices()`
+特别是 `select_device`（`xperf-cli/src/main.rs:118`）与 GUI 的 `list_adb_devices()`
 （`xperf-gui/src/main.rs:1159`）。
 
 ### 5.2 采样会话建立（每设备）
@@ -404,12 +404,12 @@ simpleperf 同构：`record` → 设备端 `report` 三视图 → `pull .data` �
 
 ```bash
 # 本地（默认，行为与改造前完全一致）
-xperformance --package com.foo --cpu
+xperf-cli --package com.foo --cpu
 
 # 远程
-xperformance --remote hppc --package com.foo --cpu
-xperformance --remote hppc --remote-adb ~/Android/Sdk/platform-tools/adb --package com.foo --cpu
-xperformance --remote hppc --device d1f39648c1f --cpu --trace 10
+xperf-cli --remote hppc --package com.foo --cpu
+xperf-cli --remote hppc --remote-adb ~/Android/Sdk/platform-tools/adb --package com.foo --cpu
+xperf-cli --remote hppc --device d1f39648c1f --cpu --trace 10
 ```
 
 | 参数 | 默认 | 说明 |
@@ -487,13 +487,13 @@ p50 仍 **200ms** —— ssh channel 独立流控，小流量不被大流量饿�
 | `host_report_lib()` 平台库选择 | `simpleperf.rs:345`（本机 macOS → dylib，正确） |
 | 本地 Perfetto UI 镜像服务器 | `trace.rs:1014` |
 | `open`/`xdg-open`/Chrome/Finder/dbus | `trace.rs:936/1125/1163/1173`、`simpleperf.rs:786` |
-| `/tmp/xperf` 数据根、CSV/图表落盘 | `xperformance/utils.rs:41`、`xperf-gui/main.rs:321` |
+| `/tmp/xperf` 数据根、CSV/图表落盘 | `xperf-cli/utils.rs:41`、`xperf-gui/main.rs:321` |
 | `~/.cache/xperf`、`~/.local/share/{xperf,perfetto}` | `trace.rs:833/273`、`baseline.rs:207` |
 | `simpleperf_scripts` vendor 目录 | `simpleperf.rs:330` |
 | marker Unix socket | `marker.rs:23` |
 | agent 交叉编译（`cargo build` + NDK） | `agent.rs:317`（产物经 `adb push` 直达设备） |
 | QNX telnet 通道 | `agent.rs:631`（**从设备端发起**，与 adb 位置无关） |
-| 基线对比 / 阈值告警 / 图表 | `baseline.rs`、`xperformance/alerts.rs`、`utils.rs` |
+| 基线对比 / 阈值告警 / 图表 | `baseline.rs`、`xperf-cli/alerts.rs`、`utils.rs` |
 
 ---
 
@@ -707,6 +707,6 @@ hppc 在完全可信隔离网，**安全前提成立**，故不因安全否决�
 | 重连 | `agent.rs:653` `reconnect_agent`、`:580` `device_online` |
 | trace | `trace.rs:136`（stdin 灌 config）、`:204`（pull）、`:466`（trace_processor） |
 | simpleperf | `simpleperf.rs:147`（record）、`:243`（pull）、`:739`（report_html.py） |
-| CLI 设备选择 | `xperformance/src/main.rs:118` `select_device`、`:1428` 调用点 |
+| CLI 设备选择 | `xperf-cli/src/main.rs:118` `select_device`、`:1428` 调用点 |
 | GUI 命令注册 / 启动参数 / 热插拔 | `xperf-gui/src/main.rs:1257` / `:1143-1194` / `:744` |
 | GUI 多会话状态 | `xperf-gui/src/main.rs:1198` `AppState.sessions` |

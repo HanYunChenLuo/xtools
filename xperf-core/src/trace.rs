@@ -1,5 +1,5 @@
 //! perfetto 深挖模式：录制 N 秒系统级 trace，拉回主机用 trace_processor SQL 归因。
-//! CLI（xperformance）与 GUI（xperf-gui）共用——输出目录由调用方传入，报告以文本返回，
+//! CLI（xperf-cli）与 GUI（xperf-gui）共用——输出目录由调用方传入，报告以文本返回，
 //! 进度/打印均由调用方负责（CLI println，GUI 走 Tauri 事件）。
 //!
 //! 定位：与实时采样互补的「录制-分析」模式——采样回答"什么时候高"，trace 回答"为什么高"：

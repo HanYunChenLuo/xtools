@@ -1,10 +1,10 @@
 [package]
-name = "xperformance"
+name = "xperf-cli"
 version = "0.1.5"
 edition = "2021"
 
 [[bin]]
-name = "xperformance"
+name = "xperf-cli"
 path = "src/main.rs"
 
 [dependencies]

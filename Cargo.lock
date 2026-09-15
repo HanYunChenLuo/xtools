@@ -5625,6 +5625,23 @@ name = "xperf-agent"
 version = "0.1.5"
 
 [[package]]
+name = "xperf-cli"
+version = "0.1.5"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "clap",
+ "colored",
+ "ctrlc",
+ "plotters",
+ "regex",
+ "serde",
+ "serde_json",
+ "tokio",
+ "xperf-core",
+]
+
+[[package]]
 name = "xperf-core"
 version = "0.1.5"
 dependencies = [
@@ -5647,23 +5664,6 @@ dependencies = [
  "tauri",
  "tauri-build",
  "tauri-plugin-dialog",
- "tokio",
- "xperf-core",
-]
-
-[[package]]
-name = "xperformance"
-version = "0.1.5"
-dependencies = [
- "anyhow",
- "chrono",
- "clap",
- "colored",
- "ctrlc",
- "plotters",
- "regex",
- "serde",
- "serde_json",
  "tokio",
  "xperf-core",
 ]

@@ -103,9 +103,9 @@ jobs:
         run: |
           mkdir -p artifacts
           if [ "${{ inputs.build_type }}" = "release" ]; then
-            cp target/${{ matrix.target }}/release/xperformance artifacts/
+            cp target/${{ matrix.target }}/release/xperf-cli artifacts/
           else
-            cp target/${{ matrix.target }}/debug/xperformance artifacts/
+            cp target/${{ matrix.target }}/debug/xperf-cli artifacts/
           fi
           cp README.md artifacts/
           cp README_zh.md artifacts/

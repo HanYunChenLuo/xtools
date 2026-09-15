@@ -6,11 +6,11 @@ Android 开发工具集合。
 
 | 工具 | 说明 |
 |------|------|
-| `xperformance` | CLI：Android 应用性能监控（CPU / 内存 / FPS） |
+| `xperf-cli` | CLI：Android 应用性能监控（CPU / 内存 / FPS） |
 | `xperf-gui` | Tauri 2 GUI：同指标的实时图表 |
 | `xperf-agent` | 设备端采样器二进制（自动推送，不单独使用） |
 
-### xperformance
+### xperf-cli
 
 实时 Android 应用性能监控。**所有采样都在设备端**由常驻 agent（`xperf-agent`）
 完成，经单条 `adb exec-out` 长连接以 NDJSON 流式回传——没有逐轮 adb 轮询，
@@ -46,7 +46,7 @@ Android 开发工具集合。
 #### 使用方法
 
 ```bash
-./target/release/xperformance --package <包名> [--cpu] [--memory] [--fps] [--thread] [-i <间隔毫秒>]
+./target/release/xperf-cli --package <包名> [--cpu] [--memory] [--fps] [--thread] [-i <间隔毫秒>]
 ```
 
 选项：
@@ -63,13 +63,13 @@ Android 开发工具集合。
 示例：
 ```bash
 # 默认 1s 间隔监控 CPU、内存、FPS
-./target/release/xperformance --package com.example.app --cpu --memory --fps
+./target/release/xperf-cli --package com.example.app --cpu --memory --fps
 
 # 50ms 细粒度 CPU 毛刺分析
-./target/release/xperformance --package com.example.app --cpu -i 50
+./target/release/xperf-cli --package com.example.app --cpu -i 50
 
 # 只监控内存
-./target/release/xperformance --package com.example.app --memory
+./target/release/xperf-cli --package com.example.app --memory
 ```
 
 #### 输出格式
