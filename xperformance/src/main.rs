@@ -1822,11 +1822,15 @@ async fn main() -> Result<()> {
         if !print_record_result(record_handle, true) {
             capture_failed = true;
         }
-        // logcat 独立等待：开放抓取，Ctrl-C 停止（镜像等待/录屏限时已先返回）
+        // logcat 独立等待：开放抓取，Ctrl-C 停止（镜像等待/录屏限时已先返回）；
+        // 抓取线程异常终止（连续秒死，如非法文本正则）同样退出等待并如实置失败码
         if let Some(h) = logcat {
             let path = h.path().to_path_buf();
-            while !xperf_core::utils::is_interrupted() {
+            while !xperf_core::utils::is_interrupted() && !h.is_done() {
                 std::thread::sleep(std::time::Duration::from_millis(150));
+            }
+            if h.is_done() && !xperf_core::utils::is_interrupted() {
+                capture_failed = true;
             }
             h.stop();
             println!("logcat 已保存: {}", path.display());
