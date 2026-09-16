@@ -31,6 +31,8 @@ rustup target add aarch64-apple-darwin x86_64-apple-darwin aarch64-linux-android
 
 GUI_CONFIG="tauri.release.json"
 GUI_RESOURCES="xperf-gui/release-resources"
+trap 'rm -rf "$GUI_RESOURCES"' EXIT
+
 prepare_gui_agent() {
     if ! cargo tauri --version >/dev/null 2>&1; then
         echo "==> 安装 cargo-tauri 2.4.1"
@@ -79,5 +81,4 @@ python3 scripts/release_upload.py "artifacts/xtools-$TAG-macos-arm64.tar.gz"  "m
 python3 scripts/release_upload.py "artifacts/xtools-$TAG-macos-x86_64.tar.gz" "macOS x86_64 (CLI + agent)"
 python3 scripts/release_upload.py "artifacts/xtools-v$VER-macos-arm64-gui.dmg"  "macOS ARM64 GUI (DMG + agent)"
 python3 scripts/release_upload.py "artifacts/xtools-v$VER-macos-x86_64-gui.dmg" "macOS x86_64 GUI (DMG + agent)"
-rm -rf "$GUI_RESOURCES"
 echo "==> 完成：macOS CLI 双架构 + GUI 双架构 DMG 已挂到 Release $TAG"
