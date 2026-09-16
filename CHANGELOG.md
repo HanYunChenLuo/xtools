@@ -17,6 +17,7 @@
 ### CI
 
 - GitLab CI 新增 WebKitGTK 4.1 GUI 构建 job，并在 Linux AppImage 打包时显式固定 `ARCH=x86_64`。
+- 修复 macOS DMG/Finder 启动 GUI 时 SSH 远程连接失败：本机 `adb`/`ssh` 不再依赖 shell 的 `PATH`，远程失败时保留原始错误，不再被“已切回本机”覆盖。
 
 
 ## [v0.2.0] - 2026-09-15

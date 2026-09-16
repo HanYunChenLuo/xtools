@@ -19,6 +19,29 @@ use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 
+/// Resolve the host-side ssh executable when a desktop app was launched outside a shell.
+///
+/// `XPERF_SSH` is an explicit override. Otherwise use the inherited PATH and the
+/// system/Homebrew locations commonly used on macOS.
+fn host_ssh_path() -> PathBuf {
+    let mut candidates = Vec::new();
+    if let Some(path) = std::env::var_os("XPERF_SSH") {
+        candidates.push(PathBuf::from(path));
+    }
+    if let Some(path) = std::env::var_os("PATH") {
+        candidates.extend(std::env::split_paths(&path).map(|dir| dir.join("ssh")));
+    }
+    candidates.extend([
+        PathBuf::from("/usr/bin/ssh"),
+        PathBuf::from("/opt/homebrew/bin/ssh"),
+        PathBuf::from("/usr/local/bin/ssh"),
+    ]);
+    candidates
+        .into_iter()
+        .find(|path| path.is_file())
+        .unwrap_or_else(|| PathBuf::from("ssh"))
+}
+
 /// UNIX socket 路径长度上限（`sockaddr_un.sun_path`：macOS 104 / Linux 108），留余量取 100
 const MAX_CONTROL_PATH_LEN: usize = 100;
 
@@ -49,7 +72,7 @@ impl SshTunnel {
     pub fn establish(target: &SshTarget) -> Result<Self> {
         // ① 远端 server 就绪。远端命令经登录 shell 执行，adb_path 的 `~` 可展开。
         let start = format!("{} start-server", target.adb_path);
-        let out = Command::new("ssh")
+        let out = Command::new(host_ssh_path())
             .args(ssh_base_opts())
             .arg(&target.host)
             .arg(&start)
@@ -74,7 +97,7 @@ impl SshTunnel {
         let mut last_err = anyhow::anyhow!("端口自选失败");
         for _ in 0..3 {
             let port = pick_free_port()?;
-            let ok = Command::new("ssh")
+            let ok = Command::new(host_ssh_path())
                 .args(master_ssh_args(&control_path, port, target))
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
@@ -117,7 +140,7 @@ impl SshTunnel {
     /// 隧道存活性：`ssh -S <ctl> -O check <host>`（R3 的定期探活入口）
     pub fn is_alive(&self) -> bool {
         self.control_path.exists()
-            && Command::new("ssh")
+            && Command::new(host_ssh_path())
                 .arg("-S")
                 .arg(&self.control_path)
                 .arg("-O")
@@ -183,7 +206,7 @@ impl SshTunnel {
     /// `-O forward/cancel` 控制操作（返回是否成功；spec 与建立时逐字节一致才可 cancel）。
     /// `ExitOnForwardFailure=yes` 使 `-O forward` 端口占用时返回非零（R4 重试的前提）。
     fn ssh_control(&self, op: &str, local: u16, remote: u16) -> bool {
-        Command::new("ssh")
+        Command::new(host_ssh_path())
             .arg("-S")
             .arg(&self.control_path)
             .arg("-O")
@@ -337,7 +360,7 @@ fn resolve_remote_adb_path(target: &SshTarget) -> Result<String> {
     }
     let mut errs = Vec::new();
     for cand in candidates {
-        let out = Command::new("ssh")
+        let out = Command::new(host_ssh_path())
             .args(ssh_base_opts())
             .arg(&target.host)
             .arg(format!("{cand} version"))
@@ -367,10 +390,10 @@ fn resolve_remote_adb_path(target: &SshTarget) -> Result<String> {
 /// 比对本机 `adb version` 与远端 `<adb_path> version` 的 banner 协议串；
 /// 不一致**报错中止**（绝不主动 kill-server——远端 server 可能被共用）。
 fn check_protocol_version(target: &SshTarget) -> Result<()> {
-    let local_out = crate::utils::run_command("adb", &["version"])
-        .context("本机 adb version 执行失败")?;
+    let local_out = crate::utils::run_adb_version()
+        .context("本机 adb version 执行失败（Finder 启动可能未继承 Android SDK PATH）")?;
     let remote_cmd = format!("{} version", target.adb_path);
-    let remote_out = Command::new("ssh")
+    let remote_out = Command::new(host_ssh_path())
         .args(ssh_base_opts())
         .arg(&target.host)
         .arg(&remote_cmd)
@@ -415,7 +438,7 @@ impl Drop for SshTunnel {
 
 /// `ssh -S <ctl> -O exit <host>` 关 master（不存在/已死均忽略错误）
 fn kill_master(control_path: &std::path::Path, host: &str) -> Result<()> {
-    Command::new("ssh")
+    Command::new(host_ssh_path())
         .arg("-S")
         .arg(control_path)
         .arg("-O")

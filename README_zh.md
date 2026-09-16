@@ -42,7 +42,11 @@ Android 开发工具集合。
 - **验证能力**：阈值告警（`--threshold`）、冷启动测量（`--cold-start`）、
   基线保存/对比（`--save-baseline` / `--compare-baseline`）
 - **SSH 远程后端**（`--remote HOST`）：真机接在远端 Linux 机时，采样/深挖/
-  捕获全功能经 SSH 隧道工作
+  捕获全功能经 SSH 隧道工作。
+  从 Finder/DMG 启动时，本机 `adb` 依次从 `XPERF_ADB`、Android SDK 环境变量、当前
+  `PATH` 和 macOS 常见 SDK 路径解析；`ssh` 同样使用固定路径兜底。
+  远程连接失败会保留原始错误并显示“远程连接失败（当前仍为本机）”，不再用二次静默
+  的本机切换覆盖诊断信息。
 - **多设备**：`--device SERIAL`（GUI 内每设备独立会话并行）
 - **数据导出**
   - 流式 CSV + 图表，位于 `/tmp/xperf/<包名>/<时间戳>/{cpu,memory,fps,thread,...}/`

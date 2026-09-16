@@ -6,6 +6,19 @@
 > 新会话开始时可先读本文件了解近期上下文。
 
 ---
+## 2026-09-16 — DMG 安装版 GUI SSH 远程连接失败（新会话）
+
+**任务**：用户反馈 DMG 安装的 `xperf-gui` 连接其他机器失败，界面显示“已切回本机”；修复并更新相关文档。
+
+**根因**：Finder/LaunchServices 启动的 `.app` 不加载 shell profile，环境 `PATH` 通常不含 `$HOME/Library/Android/sdk/platform-tools`。远程初始化的协议校验先执行本机 `adb version`，但代码用裸 `Command::new("adb")`，因此在建立 SSH 隧道前失败。与此同时前端 catch 分支再次调用 `connect_remote(null)`，把真实错误覆盖为“已切回本机”。SSH 本身也使用裸 `Command::new("ssh")`，存在同类 PATH 风险。
+
+**修复**：host `adb` 统一按 `XPERF_ADB` → PATH → `ANDROID_HOME`/`ANDROID_SDK_ROOT` → macOS/Linux 常见 SDK 路径解析；host `ssh` 按 `XPERF_SSH` → PATH → `/usr/bin/ssh` 等固定路径解析。所有 SSH ControlMaster、forward/check/exit 和 adb 调用复用解析结果；`check_protocol_version` 改用同一 host adb；GUI 远程失败只刷新本机设备列表并保留原始错误，不再二次调用切回本机。
+
+**验证**：`cargo check -p xperf-core -p xperf-gui` 通过；`cargo test -p xperf-core -p xperf-gui` 通过（core 123 passed/8 ignored，GUI 10 passed）；`cargo doc` 与三个 crate 的 `missing_docs` rustdoc 均零 warning。最小环境实测：CLI `env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin ... xperf-cli --remote hppc` 成功建立 SSH 隧道并列出远端 4 台设备（多台仅因未指定 `--device` 停止，属预期）；修复版 arm64 DMG（`tauri.release.json` ad-hoc 签名 + `codesign --verify --deep --strict` 通过）安装到 `/Applications` 后经 Finder `open` 启动 `--remote hppc`，GUI 正常连接远程并加载三台设备（diag：`init devices: 6eb792dfb0f,d1f39648c1f,localhost:5559`），确认 Finder 环境远程链路恢复。分支 `fix/gui-dmg-ssh`（commit 7d7b245）已推送 hppc/GitLab。
+
+---
+
+
 ## 2026-09-16 — GUI AppImage/DMG 发布与内置 agent（分支 `feature/gui-release-packaging`）
 
 **任务**：用户要求 GUI 发布包内置预编译 `xperf-agent`，Linux 使用 AppImage，macOS 使用 DMG；运行时禁止再编译 agent。

@@ -1368,7 +1368,8 @@ fn remote_status() -> serde_json::Value {
 }
 
 /// 切换连接：停全部会话 → 关旧远程 → （可选）建新远程 → 返回新侧设备列表。
-/// `host: None` = 切回本机。前端成功后重建全部设备 tab。
+/// `host: None` = 切回本机。远程初始化失败时保持本机状态并返回原始错误，
+/// 前端不得再调用一次 `connect_remote(null)` 覆盖诊断信息。
 /// 进行中的 trace/stack 录制不等待（时间有界，adb 断开自然报错收尾）。
 #[tauri::command]
 async fn connect_remote(
