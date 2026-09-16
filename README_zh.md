@@ -103,6 +103,16 @@ Android 开发工具集合。
 ./target/release/xperf-gui --package <包名> --cpu --memory --fps
 ```
 
+## 下载
+
+预编译发布包在内部 GitLab：[Releases](https://gitlab.chehejia.com/ligraphic/xtools/-/releases)。
+
+- `xtools-vX.Y.Z-linux-x86_64.tar.gz`——Ubuntu 20.04+（glibc 2.31）
+- `xtools-vX.Y.Z-macos-arm64.tar.gz` / `xtools-vX.Y.Z-macos-x86_64.tar.gz`
+
+每个包内含 `xperf-cli`、`agent/xperf-agent`（预编译 Android 采样器，无需本地 NDK）与文档。
+版本变更说明见 [CHANGELOG.md](CHANGELOG.md)。
+
 ## 构建
 
 Cargo workspace 管理全部工具。构建所有主机侧工具（agent 仅 Android 目标，

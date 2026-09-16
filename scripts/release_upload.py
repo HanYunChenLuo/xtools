@@ -5,7 +5,7 @@ CI（release job）与本地（scripts/release-macos.sh）共用。幂等：同�
 package registry 同版本同名文件会追加新文件（旧文件仍在，链接指向最新上传的）。
 
 用法：
-    python3 scripts/release-upload.py <tar.gz 路径> <资产链接名>
+    python3 scripts/release_upload.py <tar.gz 路径> <资产链接名>
 
 环境变量（CI 内大多由预定义变量自动满足，本地只需 RELEASE_TAG + GITLAB_TOKEN）：
     RELEASE_TAG          必填（或由 CI_COMMIT_TAG 提供）——如 v0.2.0
@@ -71,7 +71,7 @@ def main() -> None:
 
     # 1) 上传 package registry（generic 仓库 xtools/<tag>/<file>）。
     #    注意：本实例（GitLab CE）的 PUT 响应体只有 {"message":"201 Created"}，
-    #    不含官方文档描述的 package 对象——文件 id 须经查询 API 获取
+    #    不含官方文档描述的 package 对象，因此资产链接直接使用 API 下载路径。
     quoted = urllib.parse.quote(file_path.name, safe="")
     status, resp = api(
         "PUT",

@@ -380,6 +380,20 @@ hop#2: 本机 P_loc → 远端 adb forward 分配端口（agent 事件流，每�
 
 ---
 
+### 软件发布（GitLab CI + tag Release，2026-09-15）
+
+**发版流程**：四 crate bump 同版本 → `CHANGELOG.md` 加 `## [vX.Y.Z]` 章节 → 合 main → `git tag -a vX.Y.Z` → 推 hppc 且 hppc 推 li（tag 同样两跳）→ CI 流水线（validate→test→build:linux→release）出 Linux 包挂 Release → Mac 上 `GITLAB_TOKEN=<api 权限 PAT> scripts/release-macos.sh vX.Y.Z` 构建 macOS 双架构上传挂同一 Release。`validate:tag` 校验 tag 格式/crate 版本一致/CHANGELOG 章节，任一不符 tag 流水线在 validate 阶段拦截。资产链接统一指向 **package registry API 下载路径**（`.../api/v4/projects/39859/packages/generic/xtools/<tag>/<file>`，登录态浏览器可直接下载）；**`/-/package_files/<id>` web 路径在本实例 404 不可用**（用户实测）。
+
+**流水线结构**（`.gitlab-ci.yml`；触发=main push / tag / web·api 手动）：`test:linux`（core+cli，GUI 是 macOS 产品不在 Linux 测）→ `build:linux`（单 job：CLI release + NDK agent 交叉 + tar.gz，内含版本目录 `xtools-vX.Y.Z-linux-x86_64/`：`xperf-cli` + `agent/xperf-agent` + README×2 + LICENSE + CHANGELOG）→ `release`（`scripts/release_create.py` 建 Release 描述取 CHANGELOG 章节 + `release_upload.py` 上传挂链，幂等可重跑）。macOS 无 runner，`scripts/release-macos.sh` 本地补（同构包，`COPYFILE_DISABLE=1` 去 AppleDouble）。
+
+**runner 环境事实（2026-09-15 勘察实证，改配置前先重验）**：
+- runner：yz1-gitlabce-runner-prod01/02（instance 级 docker executor，amd64）；**无 macOS runner**；无共享缓存服务（cache 仅 runner 本机——cargo 缓存命中率随分配漂移，miss 时多 1-2min，已接受）
+- **镜像必须走内部 Artifactory**：`artifactory.ep.chehejia.com/docker-remote/<image>`（直连 registry-1.docker.io 被 reset）；构建镜像 `rust:1.93.0-bullseye`（glibc 2.31 = ubuntu 20.04+ 兼容）
+- **apt 必须重写 aliyun**（archive.ubuntu.com / deb.debian.org 直连卡死）；**crates.io 直连卡死** → before_script 写独立 `$CARGO_HOME/config.toml` 用 Aliyun sparse 镜像；CI 的 `CARGO_HOME` 使用 `$CI_PROJECT_DIR/.cargo-ci`，不能覆盖仓库 `.cargo/`（其中有 aarch64 linker 配置；覆盖曾致 agent 链接回退 `cc`）
+- **static.rust-lang.org 不可达（rustup 不可用）** → `rust-std-1.93.0-aarch64-linux-android` 已 vendor 到 package registry，CI 下载解压进工具链（升级 RUST_IMAGE 版本须同步重传，脚本内有版本守卫）；**NDK r25b zip（507MB）已 vendor**（`packages/generic/ndk/25.1.8937393/`，dl.google.com 从 runner 仅 ~2.4MB/s 且是外部依赖）——build job 550s→106s 的主因
+- package registry 的 PUT 响应体是 `{"message":"201 Created"}` 不含 package 对象（与官方文档不符）
+- GitHub workflow 已删（`.github/`），主 CI 路径=内部 GitLab；tag `v0.2.0` = 首个完整发布（Linux + macOS 双架构 + agent）
+
 ### 输出文件触发时机
 
 **数据根目录为 `/tmp/xperf`**（CLI 与 GUI 共用同一根，替代旧的 `./log`；`/tmp` 重启自清）。**清理**：CLI `xperf-cli --clean-cache`（无需 --package）或 GUI 侧栏「清理缓存与数据」按钮（`tauri-plugin-dialog` 原生 confirm——webkit2gtk 的 JS `confirm()` 窗口标题是 "Javascript-taurixxx"，695946a）——清 `~/.cache/xperf`（perfetto UI 镜像）、`/tmp/xperf`（全部采集数据）与 `xperf-core/simpleperf_scripts/`（火焰图脚本下载缓存，下次使用重新下载或 `--update-simpleperf-scripts` 恢复）；`~/.local/share/perfetto`（trace_processor 官方缓存）不动。采样/录制进行中清理会丢当前会话产物（GUI 有 confirm 确认）。

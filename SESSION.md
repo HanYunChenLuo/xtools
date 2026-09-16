@@ -6,6 +6,19 @@
 > 新会话开始时可先读本文件了解近期上下文。
 
 ---
+## 2026-09-15 — 软件发布打包落地（v0.2.0）
+
+**任务**：实现 Linux + macOS 发布包、GitLab CI tag Release、CHANGELOG 驱动发布说明；用户选择 CLI + Android agent，不含 aarch64 Linux/GUI，macOS 由本机补传。
+
+**实现**：`.gitlab-ci.yml` 完成 validate/test/build/release；内部 Artifactory 镜像 + Aliyun apt/crates sparse 镜像；NDK r25b（507MB）和 Android rust-std（26MB）vendor 到 GitLab package registry，build 首次实测 550s→106s。新增 `scripts/release_create.py`、`scripts/release_upload.py`、`scripts/release-macos.sh`；四 crate 统一 bump `0.2.0`，新增 `CHANGELOG.md`，删除 `.github/workflows/ci.yml`。
+
+**验证**：分支流水线 1404810 在 prod01 宿主机内存故障后重试成功（test 99s/build 106s）；tag 流水线 1404834 的 validate/test/build/release 全绿。`v0.2.0` Release 已有 Linux x86_64、macOS arm64、macOS x86_64 三个 CLI + agent 资产，API 下载路径实测可用；`/-/package_files/<id>` web 路径实测 404，资产链接已改为 package registry API。macOS tar 使用 `COPYFILE_DISABLE=1` 去除 AppleDouble/xattr；三包结构与二进制架构已核验，CLI `--version` 冒烟通过。最终本地回归：core 123 passed + 8 ignored、CLI 5、GUI 10，cargo doc/clippy 零 warning。
+
+**关键修复**：本 GitLab CE 的 generic package PUT 响应只有 `{"message":"201 Created"}`，不含官方文档中的 `package_files`，`release_upload.py` 改为不依赖 PUT 响应；后续资产 URL 改用 API 下载路径。NDK/rust-std 不再依赖 runner 外网大文件下载。
+
+**遗留**：无阻塞项。命令行输入仍是 WORKSPACE I 节候补。
+
+---
 
 ## 2026-09-15 晚(4) — 软件发布打包需求入 WORKSPACE + 文档 review 修复（a0eb296 + 本条）
 

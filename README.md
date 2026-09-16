@@ -107,6 +107,16 @@ CPU/memory charts and per-layer FPS charts on a live canvas.
 ./target/release/xperf-gui --package <package_name> --cpu --memory --fps
 ```
 
+## Download
+
+Prebuilt packages are published on the internal GitLab: [Releases](https://gitlab.chehejia.com/ligraphic/xtools/-/releases).
+
+- `xtools-vX.Y.Z-linux-x86_64.tar.gz` — Ubuntu 20.04+ (glibc 2.31)
+- `xtools-vX.Y.Z-macos-arm64.tar.gz` / `xtools-vX.Y.Z-macos-x86_64.tar.gz`
+
+Each tarball contains `xperf-cli`, `agent/xperf-agent` (prebuilt Android sampler —
+no local NDK needed) and docs. Release notes live in [CHANGELOG.md](CHANGELOG.md).
+
 ## Building
 
 The project uses Cargo workspaces. To build all host tools (the agent is
