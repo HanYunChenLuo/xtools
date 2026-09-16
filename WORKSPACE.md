@@ -2,7 +2,7 @@
 
 > 本文件记录跨会话的待办事项（backlog）。每次会话的历史总结见 `SESSION.md`。
 > 完成一项就把状态改为 ✅ 并注明完成的 commit；新增想法随时追加。
-> 最后更新：2026-09-16 晚：① DMG 远程连接慢根因修复合 main（单次 SSH 握手 + mux 预检，449c472/9f441d8）；② 全仓改名 xtools→xperf（GitLab 仓库 ligraphic/xperf，b612ff7；本机与 hppc 仓库目录同步改名，git worktree repair 已做）；③ v0.2.1 删除重发完成（Release 6 资产全在 `generic/xperf/v0.2.1/`，发布版 DMG 安装实测通过）
+> 最后更新：2026-09-16 深夜：AppImage Ubuntu 22.04 harfbuzz 符号崩溃修复（fix/appimage-harfbuzz 合 main d75108f，jammy 容器 A/B 验证通过，随下次 tag 发布；前序：① DMG 远程连接慢根因修复（449c472/9f441d8）；② 全仓改名 xperf；③ v0.2.1 重发完成）
 
 ## 当前状态速览
 
@@ -28,7 +28,7 @@
 
 ## A. 已知缺陷
 
-- [ ] **Linux AppImage 在某台 Ubuntu 22.04 启动失败**（2026-09-16 用户报障，新会话修复）：启动即 `xperf-gui: symbol lookup error: /tmp/.mount_*/usr/lib/libpango-1.0.so.0: undefined symbol: hb_ot_layout_get_horizontal_baseline_tag_for_script`。指向 bundle 内 libpango↔libharfbuzz 版本耦合断裂（harfbuzz 2.x API 缺失），疑 linuxdeploy 收集/排布致旧版 harfbuzz 混载，仅个别 22.04 机器触发。待验证：`LD_DEBUG=libs` 定位 harfbuzz 加载来源 → 比对 AppDir 内版本 → 修收集范围或升级 harfbuzz → 目标机回归（详见 SESSION 当日条目）。
+- [x] ~~**Linux AppImage 在某台 Ubuntu 22.04 启动失败**~~（**已修复**，2026-09-16，`fix/appimage-harfbuzz` 合 main d75108f）：根因实锤——linuxdeploy excludelist 排除 libharfbuzz（假定目标系统自带），而 bundle 内 bookworm 版 pango 1.50.12/webkit 引用 3 个 harfbuzz 3.3+ 新增符号（`hb_font_set_synthetic_slant`/`hb_ot_layout_get_baseline_with_fallback`/`hb_ot_layout_get_horizontal_baseline_tag_for_script`），目标系统 harfbuzz 过旧（jammy=2.7.4）时启动即 symbol lookup error；24.04（8.3.0）有符号故仅 22.04 中招。修复：gui:linux 打包后向 AppDir 注入构建侧 libharfbuzz 6.0.0（glibc 需求 ≤2.33 兼容 jammy）+ nm 质量门 + 复用 tauri 缓存 linuxdeploy 内嵌的 appimagetool 重打包（构建期 /tmp 解包目录随 linuxdeploy 退出即删，须自行 extract）。bundle 其余系统依赖已全量符号审计无偏移（fribidi 两版一致；fontconfig/freetype jammy 版满足全部引用；glibc 最高 2.36 仅 libcups 打印路径，见 E 节）。**jammy 容器 A/B 验证**：旧包复现用户报错原文，新包 WebKit 进程组完整启动零报错。随下次版本 tag 发布。
 
 ## B. 指标覆盖
 
@@ -52,6 +52,8 @@
 - [x] ~~xperf-core 轮询参考实现删除~~（225d89b，-1653 行；保留 ThreadCpuInfo/MemoryDetails/FpsTimeSeriesData/PidStats/SampleEvent 等协议类型）
 
 ## E. 已知遗留（评估过，低风险不阻塞）
+
+- **AppImage 内 libcups 引用 GLIBC_2.36 符号**（2026-09-16 harfbuzz 修复审计发现）：bundle 内 bookworm libcups 2.4.x 引用 `arc4random@GLIBC_2.36`，jammy 仅 2.35——PLT 惰性绑定，启动不受影响（A/B 实测），仅在 jammy 上走到打印路径才会 symbol lookup error；GUI 无打印功能入口，记录不修（若未来暴露打印，方案 = 同 harfbuzz 把 libcups 也排出 bundle 用系统版，或接受 jammy 打印崩）。
 
 - ~~SS4 FPS 无数据源~~（**已解决并二次修正**，终态 2026-09-10 晚 agent v5 / 1486463）：v4 曾误判"QCM 构建阉割 --latency"绕道 host frametimeline 通道（7a3e9fb）；**用户指点 getfps -w 后逆向确认真因：A16 SF 的 --latency 只认 `--list` 原始行的 `<hex> <name>` 别名形态**（带前缀 65 行真数据 vs 干净名 1 行刷新周期）——agent fps.rs 查询名双轨（A16 保留前缀/旧平台干净名），设备端 per-layer 路径恢复（协议 v5，SS4 短路撤销、host frametimeline 通道删除），真机 59-61fps + 杀进程重发现（#549→#579）+ SS2MAX/SS3 回归全通
 - SS2MAX GPU 显存无数据源（2026-09-07 root 下全路径确证：dumpsys gpu 无 Memory snapshot 段 + /sys/kernel/debug 未编译进内核 + /proc/kgsl 不存在，平台限制）

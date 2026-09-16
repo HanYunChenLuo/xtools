@@ -5,6 +5,21 @@
 > 待办事项（backlog）在 `WORKSPACE.md` 维护，本文件只做历史追溯。
 > 新会话开始时可先读本文件了解近期上下文。
 
+## 2026-09-16（深夜）：AppImage Ubuntu 22.04 harfbuzz 符号崩溃修复
+
+**任务**：修复 WORKSPACE A 节「Linux AppImage 在某台 Ubuntu 22.04 启动失败」（libpango symbol lookup error）。
+
+**commit**（已推 hppc + li）：`4fb79b7`（fix: AppDir 注入 libharfbuzz + 重打包）→ `8db22c1`（fix: appimagetool 来源修正）→ `d75108f`（--no-ff 合 main）。
+
+**关键结论**：
+- **根因实锤**（下载 v0.2.1 AppImage 解包审计，非推测）：linuxdeploy excludelist 排除 libharfbuzz（假定目标系统自带），但 bundle 内 bookworm 版 pango 1.50.12/webkit 引用 3 个 harfbuzz 3.3+ 新增符号（hb_font_set_synthetic_slant / hb_ot_layout_get_baseline_with_fallback / hb_ot_layout_get_horizontal_baseline_tag_for_script）；运行时 LD_LIBRARY_PATH 内无 harfbuzz → 落系统 2.7.4（jammy）→ 缺符号启动即崩。24.04 自带 8.3.0 有符号 → 解释了「仅个别 22.04 机器触发」。SESSION 早前「harfbuzz 2.x 的较新 API」判读不准确——实为 3.3+/4.0+ API，2.7.4 全缺。
+- **全量符号审计方法**（可复用）：对 bundle 全部 .so 取 undefined 符号 ∩ 系统侧排除库（Fc/FT_/fribidi_/hb_ 前缀），逐一比对 jammy deb（aliyun pool 直接拉）——仅 harfbuzz 3 个符号偏移，其余零偏移。glibc 侧审计：bundle 最高 GLIBC_2.36 仅 libcups 的 `arc4random`（PLT 惰性绑定不阻塞启动，jammy 上打印路径才炸；GUI 无打印入口，记 WORKSPACE E 节不修）。
+- **修复形态**：gui:linux 在 tauri build 后向 `xperf-gui.AppDir/usr/lib` 注入构建侧 libharfbuzz.so.0（bookworm 6.0.0，glibc 需求 ≤2.33 兼容 jammy）+ nm 质量门断言崩溃符号 + 重打包。坑：tauri 构建期 linuxdeploy 的 `/tmp/appimage_extracted_*` 解包目录**随进程退出即删**不可复用；appimagetool 须从 `$HOME/.cache/tauri/linuxdeploy-x86_64.AppImage` 自行 `--appimage-extract` 取内嵌的 plugin（hppc 实机验证提取路径）。
+- **A/B 验证**（hppc docker `ubuntu:22.04` + xvfb + jammy harfbuzz 2.7.4 复现环境，镜像 `xperf-jammy-test`）：旧包复现用户报错原文（symbol lookup error）；修复包（pipeline 1408622 产物）xvfb 下主进程 + WebKitNetworkProcess + WebKitWebProcess 完整启动、零错误输出、超时存活。
+- **环境观察**：当日 mirrors.aliyun.com 从 hppc/CI 仅 ~137KB/s（平时 build 全 step 10min，当日 gui:linux 40min 主要耗在 apt）；docker 容器内 apt 同样受影响（慢但在前进，非卡死）。
+
+**遗留**：修复随下次版本 tag 发布（v0.2.1 已发资产不含此修复）；libcups GLIBC_2.36 打印路径风险记 WORKSPACE E 节。
+
 ## 2026-09-16（晚）：DMG 远程连接慢根因修复 + v0.2.1 重发 + 全仓改名 xperf
 
 **任务**：用户实测 fix/gui-dmg-ssh 的 DMG 远程可用但连接间歇 30~80s；随后要求删除 v0.2.1 tag/产物重发；中途 GitLab 仓库改名 `ligraphic/xtools` → `ligraphic/xperf`，全 workspace 同步改名。
