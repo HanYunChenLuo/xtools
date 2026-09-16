@@ -5,6 +5,23 @@
 > 待办事项（backlog）在 `WORKSPACE.md` 维护，本文件只做历史追溯。
 > 新会话开始时可先读本文件了解近期上下文。
 
+## 2026-09-16 — Linux AppImage 在某台 Ubuntu 22.04 启动失败（bug 立项，新会话修复）
+
+**现象**（用户报错原文）：`xperf-gui: symbol lookup error: /tmp/.mount_xtoolsZA1ucA/usr/lib/libpango-1.0.so.0: undefined symbol: hb_ot_layout_get_horizontal_baseline_tag_for_script`
+
+**初步判读（仅记录线索，结论以实施会话复现为准）**：报错库在 AppImage squashfs 内（`/tmp/.mount_*/usr/lib/libpango-1.0.so.0`），症状指向 **libpango 与 libharfbuzz 版本耦合断裂**——`hb_ot_layout_get_horizontal_baseline_tag_for_script` 是 harfbuzz 2.x 的较新 API，bundle 内 libpango 链接到了旧版 harfbuzz（或加载到了系统目录的旧副本）导致符号缺失。「某一台 22.04 失败」暗示该机系统 GTK/pango/harfbuzz 组合与 bundle 内副本发生混载（`LD_LIBRARY_PATH`/linuxdeploy 排布语义），并非所有 22.04 必现。
+
+**产出**：`WORKSPACE.md` A 节（已知缺陷）新增条目；无代码改动。待验证方向：① 复现机用 `LD_DEBUG=libs`/`ldd` 定位 harfbuzz 实际加载来源；② 比对 AppDir 内 `libharfbuzz*` 版本与 libpango 符号需求；③ 视结论修 linuxdeploy 收集范围（`--exclude-library` 等）或升级 bundle 内 harfbuzz；④ 修复后在目标 22.04 机器回归启动 + WebKitGTK 渲染。
+
+---
+
+## 2026-09-16 — 「问题反馈」需求文档立项（新会话实施）
+
+**任务**：用户要求新增问题反馈功能——自动抓取最近 1 小时内的 log，在 GitLab 仓库创建 issue 并上传，log 覆盖率须达标（能从 log 分析问题）；本轮只更新文档，新会话开工。
+
+**产出**：`WORKSPACE.md` I 节新增 `[ ] 问题反馈（一键收集日志 → GitLab issue）` 条目，写明实施要点：入口（GUI 数据管理区）、采集范围（`/tmp/xperf` 会话数据按 1h mtime 过滤 + `/tmp/xperf_gui_diag.log` + 设备端 `xperf-agent.log` pull + logcat 回放窗口 + 环境信息）、覆盖率达标定义（打包前自检清单，缺失如实标注）、GitLab 链路（project 39859，uploads + issues API，`GITLAB_TOKEN` 认证）、隐私与失败边界。遗留决策（CLI 形态、token 提供方式、脱敏策略、logcat 回放 A11/A16 兼容性）已在条目内标注为实施会话确认项。无代码改动。
+
+
 ---
 ## 2026-09-16 — DMG 安装版 GUI SSH 远程连接失败（新会话）
 
