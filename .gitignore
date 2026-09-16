@@ -8,3 +8,6 @@ xperf-gui/gen/
 node_modules/
 # python 运行时产物（火焰图脚本运行生成）
 __pycache__/
+
+# 发布打包脚本（scripts/release-macos.sh）的本地构建产物
+artifacts/
