@@ -181,6 +181,29 @@ gui:linux:
     - chmod 755 xperf-gui/release-resources/agent/xperf-agent
     - if ! cargo tauri --version >/dev/null 2>&1; then cargo install tauri-cli --version 2.4.1 --locked; fi
     - cd xperf-gui && ARCH=x86_64 CI=true cargo tauri build --verbose --config tauri.release.json --bundles appimage && cd ..
+    # linuxdeploy excludelist 排除 libharfbuzz（假定目标系统自带），但 bundle 内 bookworm 版
+    # pango/webkit 引用了 3 个 harfbuzz 3.3+ 才新增的符号（hb_font_set_synthetic_slant /
+    # hb_ot_layout_get_baseline_with_fallback / hb_ot_layout_get_horizontal_baseline_tag_for_script），
+    # 目标系统 harfbuzz 过旧（Ubuntu 22.04 = 2.7.4）时启动即 symbol lookup error。
+    # 修复：把构建侧（bookworm 6.0.0，glibc 需求 ≤2.33 兼容 jammy）libharfbuzz 注入
+    # AppDir 后重打包，bundle 内字体栈版本自洽。其余排除项已审计无版本偏移
+    # （fribidi 两版一致；fontconfig/freetype jammy 版满足全部引用）。
+    - |
+      APPDIR=target/release/bundle/appimage/xperf-gui.AppDir
+      AI=$(find target/release/bundle/appimage -maxdepth 1 -name "*.AppImage" | head -1)
+      HB=$(ls /usr/lib/x86_64-linux-gnu/libharfbuzz.so.0.* | head -1)
+      cp -a "$HB" "$APPDIR/usr/lib/"
+      ln -sf "$(basename "$HB")" "$APPDIR/usr/lib/libharfbuzz.so.0"
+      # 质量门：注入的 harfbuzz 必须覆盖触发崩溃的符号
+      nm -D "$APPDIR/usr/lib/libharfbuzz.so.0" | grep -q hb_ot_layout_get_horizontal_baseline_tag_for_script
+      # appimagetool 内嵌于 tauri 缓存的 linuxdeploy AppImage（构建期的 /tmp 解包目录随
+      # linuxdeploy 退出即删，不可用）——自行 --appimage-extract 取用（无需 FUSE，免新外部依赖）
+      LD_EXTRACT=$(mktemp -d)
+      ( cd "$LD_EXTRACT" && "$HOME/.cache/tauri/linuxdeploy-x86_64.AppImage" --appimage-extract >/dev/null )
+      APPIMAGETOOL="$LD_EXTRACT/squashfs-root/plugins/linuxdeploy-plugin-appimage/usr/bin/appimagetool"
+      rm -f "$AI"
+      ARCH=x86_64 "$APPIMAGETOOL" "$APPDIR" "$AI"
+      test -s "$AI"
     - find target/release/bundle -type f -name '*.AppImage' -exec cp {} artifacts/xperf-v$VER-linux-x86_64-gui.AppImage \;
     - test -s artifacts/xperf-v$VER-linux-x86_64-gui.AppImage
   artifacts:
