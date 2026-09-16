@@ -5622,11 +5622,11 @@ dependencies = [
 
 [[package]]
 name = "xperf-agent"
-version = "0.2.0"
+version = "0.2.1"
 
 [[package]]
 name = "xperf-cli"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "chrono",
@@ -5643,7 +5643,7 @@ dependencies = [
 
 [[package]]
 name = "xperf-core"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "chrono",
@@ -5656,7 +5656,7 @@ dependencies = [
 
 [[package]]
 name = "xperf-gui"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "chrono",
  "serde",

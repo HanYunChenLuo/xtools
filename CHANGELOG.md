@@ -4,6 +4,21 @@
 
 ## [Unreleased]
 
+## [v0.2.1] - 2026-09-16
+
+补充 GUI 桌面发布资产，不改动实时采样协议。
+
+### GUI 分发
+
+- Linux x86_64 新增 Tauri 2 AppImage，最低 Ubuntu 22.04（WebKitGTK 4.1）。
+- macOS 新增 arm64/x86_64 DMG。
+- GUI 发布包内置 `agent/xperf-agent`，采样、断连重连和 daemon 重启均使用包内预编译二进制，运行时不调用 Cargo 或 Android NDK。
+
+### CI
+
+- GitLab CI 新增 WebKitGTK 4.1 GUI 构建 job，并在 Linux AppImage 打包时显式固定 `ARCH=x86_64`。
+
+
 ## [v0.2.0] - 2026-09-15
 
 自 v0.1.5（2025-03）以来的全部变更——工具链整体重构为设备端 agent 架构，指标、验证能力与平台覆盖大幅扩展。
@@ -41,6 +56,7 @@ CPU（单核口径，与 `adb top` 一致）、内存（App Summary 分类明细
 ### 分发
 
 - 首次提供预编译发布包：Linux x86_64（CLI + 预编译 Android agent）与 macOS（arm64 / x86_64，本机构建上传），tag 触发 GitLab CI 自动出包挂 Release。
-- GUI 发布形态：Linux x86_64 AppImage（Ubuntu 22.04+，WebKitGTK 4.1）与 macOS arm64/x86_64 DMG；GUI 资源内置预编译 Android agent，运行时不调用 Cargo/NDK。上述 GUI 资产在后续 tag 流水线启用。
+- GUI 发布形态：Linux x86_64 AppImage（Ubuntu 22.04+，WebKitGTK 4.1）与 macOS arm64/x86_64 DMG；GUI 资源内置预编译 Android agent，运行时不调用 Cargo/NDK。GUI 资产随 `v0.2.1` 发布。
 
+[v0.2.1]: https://gitlab.chehejia.com/ligraphic/xtools/-/releases/v0.2.1
 [v0.2.0]: https://gitlab.chehejia.com/ligraphic/xtools/-/releases/v0.2.0
