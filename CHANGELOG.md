@@ -11,8 +11,8 @@
 ### GUI 分发
 
 - Linux x86_64 新增 Tauri 2 AppImage，最低 Ubuntu 22.04（WebKitGTK 4.1）。
-- macOS 新增 arm64/x86_64 DMG。
-- GUI 发布包内置 `agent/xperf-agent`，采样、断连重连和 daemon 重启均使用包内预编译二进制，运行时不调用 Cargo 或 Android NDK。
+- macOS 新增 arm64/x86_64 DMG；DMG 内的 `.app` 使用完整 ad-hoc bundle 签名封印资源，避免安装后因资源签名不完整被系统提示“已损坏”。
+- GUI 发布包内置 `agent/xperf-agent`，采样、断连重连和 daemon 重启均使用包内预编译二进制，运行时不调用 Cargo 或 Android NDK。公开分发仍需 Developer ID 签名和 Apple 公证。
 
 ### CI
 

@@ -9,6 +9,8 @@
 #   GITLAB_TOKEN=<api 权限 PAT> scripts/release-macos.sh v0.2.0
 #
 # 前置：Xcode CLT、rustup、cargo-tauri 2.4.1、Android NDK >= 25.1.8937393；Release 已由 tag 流水线创建。
+# 默认生成完整 ad-hoc 签名的 .app（修复资源未封印导致的“已损坏”提示）；有 Developer ID 时
+# 设置 APPLE_SIGNING_IDENTITY 覆盖发布配置，并另行配置公证凭据。
 # 重复执行幂等（同名资产链接先删后建）。
 set -euo pipefail
 
@@ -44,6 +46,23 @@ prepare_gui_agent() {
     chmod 755 "$GUI_RESOURCES/agent/xperf-agent"
 }
 
+validate_dmg() {
+    local dmg="$1" mount_dir app
+    mount_dir=$(mktemp -d "${TMPDIR:-/tmp}/xperf-dmg.XXXXXX")
+    if ! hdiutil attach -readonly -nobrowse -mountpoint "$mount_dir" "$dmg" >/dev/null 2>&1; then
+        rm -rf "$mount_dir"
+        return 1
+    fi
+    app="$mount_dir/xperf-gui.app"
+    if ! test -d "$app" || ! codesign --verify --deep --strict --verbose=2 "$app"; then
+        hdiutil detach "$mount_dir" >/dev/null 2>&1 || true
+        rm -rf "$mount_dir"
+        return 1
+    fi
+    hdiutil detach "$mount_dir" >/dev/null 2>&1
+    rm -rf "$mount_dir"
+}
+
 build_gui() {  # build_gui <Apple target> <DMG architecture>
     local target="$1" arch="$2"
     echo "==> cargo tauri build --target $target --bundles dmg"
@@ -51,6 +70,7 @@ build_gui() {  # build_gui <Apple target> <DMG architecture>
     local dmg
     dmg=$(find "target/$target/release/bundle/dmg" -type f -name '*.dmg' -print -quit)
     test -n "$dmg" && test -s "$dmg"
+    validate_dmg "$dmg"
     cp "$dmg" "artifacts/xtools-v$VER-macos-$arch-gui.dmg"
 }
 
