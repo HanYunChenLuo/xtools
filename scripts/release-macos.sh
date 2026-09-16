@@ -1,19 +1,21 @@
 #!/bin/bash
 # macOS 发布产物构建 + 上传（内部 GitLab 无 macOS runner 的补偿路径，配合 tag 流水线）：
-#   1. 本机构建 xperf-cli（arm64 + x86_64 双架构）与 xperf-agent（aarch64-linux-android，
-#      经本机 NDK，.cargo/ndk-clang.sh 自动探测）
-#   2. 打包 tar.gz（版本目录：CLI + agent + 文档，与 Linux 包同构）
+#   1. 本机构建 xperf-cli（arm64 + x86_64 双架构）、xperf-agent（aarch64-linux-android）
+#      与 xperf-gui（两个 macOS 架构的 DMG）；agent 经本机 NDK 自动探测
+#   2. 打包 CLI tar.gz；GUI DMG 内置同一份预编译 agent
 #   3. 经 scripts/release_upload.py 上传 package registry 并挂到 tag 的 Release
 #
 # 用法（tag 流水线完成后，在仓库根目录执行）：
 #   GITLAB_TOKEN=<api 权限 PAT> scripts/release-macos.sh v0.2.0
 #
-# 前置：Xcode CLT、rustup、Android NDK >= 25.1.8937393；Release 已由 tag 流水线创建。
+# 前置：Xcode CLT、rustup、cargo-tauri 2.4.1、Android NDK >= 25.1.8937393；Release 已由 tag 流水线创建。
 # 重复执行幂等（同名资产链接先删后建）。
 set -euo pipefail
 
 TAG="${1:?用法: GITLAB_TOKEN=<token> scripts/release-macos.sh vX.Y.Z}"
 VER="${TAG#v}"
+ROOT_DIR=$(cd "$(dirname "$0")/.." && pwd)
+cd "$ROOT_DIR"
 
 CARGO_VER=$(sed -n 's/^version = "\(.*\)"$/\1/p' xperf-cli/Cargo.toml | head -1)
 if [ "$VER" != "$CARGO_VER" ]; then
@@ -26,6 +28,31 @@ export RELEASE_TAG="$TAG"
 
 echo "==> rustup targets"
 rustup target add aarch64-apple-darwin x86_64-apple-darwin aarch64-linux-android
+
+GUI_CONFIG="tauri.release.json"
+GUI_RESOURCES="xperf-gui/release-resources"
+trap 'rm -rf "$GUI_RESOURCES"' EXIT
+
+prepare_gui_agent() {
+    if ! cargo tauri --version >/dev/null 2>&1; then
+        echo "==> 安装 cargo-tauri 2.4.1"
+        cargo install tauri-cli --version 2.4.1 --locked
+    fi
+    rm -rf "$GUI_RESOURCES"
+    mkdir -p "$GUI_RESOURCES/agent"
+    cp target/aarch64-linux-android/release/xperf-agent "$GUI_RESOURCES/agent/xperf-agent"
+    chmod 755 "$GUI_RESOURCES/agent/xperf-agent"
+}
+
+build_gui() {  # build_gui <Apple target> <DMG architecture>
+    local target="$1" arch="$2"
+    echo "==> cargo tauri build --target $target --bundles dmg"
+    (cd xperf-gui && CI=true cargo tauri build --config "$GUI_CONFIG" --target "$target" --bundles dmg)
+    local dmg
+    dmg=$(find "target/$target/release/bundle/dmg" -type f -name '*.dmg' -print -quit)
+    test -n "$dmg" && test -s "$dmg"
+    cp "$dmg" "artifacts/xtools-v$VER-macos-$arch-gui.dmg"
+}
 
 build() {  # build <apple 三元组> <包架构名>
     local target="$1" arch="$2"
@@ -43,10 +70,15 @@ build() {  # build <apple 三元组> <包架构名>
 
 echo "==> cargo build --release -p xperf-agent --target aarch64-linux-android"
 cargo build -p xperf-agent --target aarch64-linux-android --release
+prepare_gui_agent
 
 build aarch64-apple-darwin arm64
 build x86_64-apple-darwin x86_64
+build_gui aarch64-apple-darwin arm64
+build_gui x86_64-apple-darwin x86_64
 
 python3 scripts/release_upload.py "artifacts/xtools-$TAG-macos-arm64.tar.gz"  "macOS ARM64 (CLI + agent)"
 python3 scripts/release_upload.py "artifacts/xtools-$TAG-macos-x86_64.tar.gz" "macOS x86_64 (CLI + agent)"
-echo "==> 完成：macOS 双架构产物已挂到 Release $TAG"
+python3 scripts/release_upload.py "artifacts/xtools-v$VER-macos-arm64-gui.dmg"  "macOS ARM64 GUI (DMG + agent)"
+python3 scripts/release_upload.py "artifacts/xtools-v$VER-macos-x86_64-gui.dmg" "macOS x86_64 GUI (DMG + agent)"
+echo "==> 完成：macOS CLI 双架构 + GUI 双架构 DMG 已挂到 Release $TAG"
