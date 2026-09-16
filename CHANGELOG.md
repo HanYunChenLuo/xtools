@@ -18,6 +18,7 @@
 
 - GitLab CI 新增 WebKitGTK 4.1 GUI 构建 job，并在 Linux AppImage 打包时显式固定 `ARCH=x86_64`。
 - 修复 macOS DMG/Finder 启动 GUI 时 SSH 远程连接失败：本机 `adb`/`ssh` 不再依赖 shell 的 `PATH`，远程失败时保留原始错误，不再被“已切回本机”覆盖。
+- 修复 SSH 远程连接间歇性缓慢（实测 30~80s）：连接建立收敛为单次 SSH 握手（远端预检经 ControlMaster mux 免握手执行，替代原先 5 次独立握手），健康网络下全程 <1s；新增连接链路阶段计时诊断（GUI 写 `/tmp/xperf_gui_diag.log`，CLI 走 stderr）。
 
 
 ## [v0.2.0] - 2026-09-15
