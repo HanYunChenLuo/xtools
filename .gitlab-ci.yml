@@ -196,8 +196,11 @@ gui:linux:
       ln -sf "$(basename "$HB")" "$APPDIR/usr/lib/libharfbuzz.so.0"
       # 质量门：注入的 harfbuzz 必须覆盖触发崩溃的符号
       nm -D "$APPDIR/usr/lib/libharfbuzz.so.0" | grep -q hb_ot_layout_get_horizontal_baseline_tag_for_script
-      # 复用 tauri 已下载并解包的 appimagetool（随 linuxdeploy 插件缓存，免新外部依赖）
-      APPIMAGETOOL=$(ls -t /tmp/appimage_extracted_*/plugins/linuxdeploy-plugin-appimage/usr/bin/appimagetool | head -1)
+      # appimagetool 内嵌于 tauri 缓存的 linuxdeploy AppImage（构建期的 /tmp 解包目录随
+      # linuxdeploy 退出即删，不可用）——自行 --appimage-extract 取用（无需 FUSE，免新外部依赖）
+      LD_EXTRACT=$(mktemp -d)
+      ( cd "$LD_EXTRACT" && "$HOME/.cache/tauri/linuxdeploy-x86_64.AppImage" --appimage-extract >/dev/null )
+      APPIMAGETOOL="$LD_EXTRACT/squashfs-root/plugins/linuxdeploy-plugin-appimage/usr/bin/appimagetool"
       rm -f "$AI"
       ARCH=x86_64 "$APPIMAGETOOL" "$APPDIR" "$AI"
       test -s "$AI"
