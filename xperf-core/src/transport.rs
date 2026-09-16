@@ -64,39 +64,29 @@ pub struct SshTunnel {
 impl SshTunnel {
     /// 建立隧道（hop#1）。
     ///
-    /// 流程：① `ssh <host> '<adb_path> start-server'` 确保远端 server 在跑
-    /// （**绝不 `kill-server`**——远端 server 可能被他人共用，R2）；
-    /// ② 清理无主 control socket（R9）；③ 自选本机空闲端口 + 建 master
+    /// 流程：① 清理无主 control socket（R9）；② 自选本机空闲端口 + 建 master
     /// （`ExitOnForwardFailure=yes` 使端口占用立即失败，TOCTOU 换端口重试 3 次，R4）；
+    /// ③ 远端预检（经 master 复用连接免握手）：解析 adb 路径 + `start-server`
+    /// （**绝不 `kill-server`**——远端 server 可能被他人共用，R2）+ 协议版本校验；
     /// ④ 探活：对 hop#1 端口做 adb `host:version` 握手（验证隧道+远端 server 全链路）。
+    ///
+    /// 设计要点：全程仅 master spawn 一次 SSH 握手。实测到 hppc 的单次握手在网络
+    /// 波动时可达 2.5~10s，旧实现顺序执行 5 次握手（解析路径×2/版本校验/start-server/
+    /// master），总耗时随 RTT 成倍放大（实测 28s+）；预检收敛进 mux 后恒为 1 次握手。
     pub fn establish(target: &SshTarget) -> Result<Self> {
-        // ① 远端 server 就绪。远端命令经登录 shell 执行，adb_path 的 `~` 可展开。
-        let start = format!("{} start-server", target.adb_path);
-        let out = Command::new(host_ssh_path())
-            .args(ssh_base_opts())
-            .arg(&target.host)
-            .arg(&start)
-            .output()
-            .context("执行 ssh start-server 失败（ssh 不可用？需免密登录）")?;
-        if !out.status.success() {
-            bail!(
-                "远端 adb start-server 失败（{}）：{}——确认 --remote-adb 路径正确（远端 PATH 常不含 adb）",
-                target.host,
-                String::from_utf8_lossy(&out.stderr).trim()
-            );
-        }
-
-        // ② R9：清理上次异常退出（SIGKILL）残留的无主 control socket
+        let t0 = std::time::Instant::now();
+        // ① R9：清理上次异常退出（SIGKILL）残留的无主 control socket
         cleanup_stale_control_sockets(&target.host);
         let control_path = control_socket_path(&target.host);
         if let Some(dir) = control_path.parent() {
             std::fs::create_dir_all(dir).ok();
         }
 
-        // ③ 自选端口建 master，失败（ExitOnForwardFailure）换端口重试
+        // ② 自选端口建 master，失败（ExitOnForwardFailure）换端口重试
         let mut last_err = anyhow::anyhow!("端口自选失败");
         for _ in 0..3 {
             let port = pick_free_port()?;
+            let t_master = std::time::Instant::now();
             let ok = Command::new(host_ssh_path())
                 .args(master_ssh_args(&control_path, port, target))
                 .stdout(Stdio::null())
@@ -104,15 +94,39 @@ impl SshTunnel {
                 .status()
                 .map(|s| s.success())
                 .unwrap_or(false);
+            crate::utils::diag(&format!(
+                "tunnel establish ② master spawn 端口 {port}: {:?} ok={ok}",
+                t_master.elapsed()
+            ));
             if !ok {
                 last_err = anyhow::anyhow!("ssh master 建立失败（端口 {port} 或网络问题）");
                 continue;
             }
+            // ③ 远端预检（mux 复用 master 连接，不产生新握手）：解析 adb 路径 +
+            //    start-server + 版本 banner；失败则本轮 master 不留
+            let t_pre = std::time::Instant::now();
+            if let Err(e) = preflight_remote(&control_path, target) {
+                crate::utils::diag(&format!(
+                    "tunnel establish ③ 远端预检失败: {:?}",
+                    t_pre.elapsed()
+                ));
+                let _ = kill_master(&control_path, &target.host);
+                last_err = e;
+                continue;
+            }
+            crate::utils::diag(&format!(
+                "tunnel establish ③ 远端预检: {:?}",
+                t_pre.elapsed()
+            ));
             // ④ 探活：adb host:version 握手（~2s 内重试，隧道刚起可能未就绪）
             let mut probe_err = anyhow::anyhow!("探活未执行");
-            for _ in 0..10 {
+            for attempt in 1..=10 {
                 match probe_adb_server(port) {
                     Ok(_) => {
+                        crate::utils::diag(&format!(
+                            "tunnel establish ④ probe 端口 {port}: 第 {attempt} 次成功（累计 {:?}）",
+                            t0.elapsed()
+                        ));
                         return Ok(Self {
                             host: target.host.clone(),
                             control_path,
@@ -288,27 +302,30 @@ pub(crate) fn clear_tunnel() {
 
 use crate::utils::AdbDevice;
 
-/// 初始化远程后端：解析远端 adb 路径 → 校验 adb 协议版本（R2）→
-/// 建 hop#1 → 返回远端设备列表。
+/// 初始化远程后端：建 hop#1（含远端预检与 R2 协议版本校验，见
+/// [`SshTunnel::establish`]）→ 返回远端设备列表。
 ///
 /// 顺序是硬约束：本函数必须早于**任何** adb 调用。成功后 [`transport`] 切到
 /// `Ssh`，全部 adb 命令经 hop#1 指向远端 server。
 /// 任一步失败：隧道回收、传输保持 `Local`，不产生残留。
 pub fn init_remote(target: SshTarget) -> Result<Vec<AdbDevice>> {
-    // 远端 adb 路径解析：GUI 从 ssh_config 载入的主机不带 adb 路径（默认 "adb"），
-    // 远端 PATH 常不含 → 自动退到标准 SDK 位置
-    let adb_path = resolve_remote_adb_path(&target)?;
-    let target = target.with_adb_path(adb_path);
-    // R2 协议版本校验先于一切 adb 客户端调用：版本不符时 adb 客户端会
-    // kill 远端 server（可能正被他人共用），故先用两侧 CLI banner 比对。
-    check_protocol_version(&target)?;
-
+    let t0 = std::time::Instant::now();
     let t = SshTunnel::establish(&target)?;
+    crate::utils::diag(&format!("init_remote 隧道建立+预检: {:?}", t0.elapsed()));
     install_tunnel(t);
     set_transport(Transport::Ssh(target.clone()));
 
+    let t1 = std::time::Instant::now();
     match crate::utils::list_adb_devices() {
-        Ok(devices) => Ok(devices),
+        Ok(devices) => {
+            crate::utils::diag(&format!(
+                "init_remote 设备枚举 {} 台: {:?}（总计 {:?}）",
+                devices.len(),
+                t1.elapsed(),
+                t0.elapsed()
+            ));
+            Ok(devices)
+        }
         Err(e) => {
             // 设备枚举失败：完整回滚，不留半截状态
             clear_tunnel();
@@ -349,66 +366,62 @@ pub fn rebuild_tunnel() -> Result<()> {
     Ok(())
 }
 
-/// 探测远端 adb 可用路径：先试配置值，失败再试标准 SDK 位置
-/// `~/Android/Sdk/platform-tools/adb`（远端 PATH 常不含 adb，附录 A #12）。
-/// 返回第一个 `version` 子命令跑通的路径。
-fn resolve_remote_adb_path(target: &SshTarget) -> Result<String> {
-    const SDK_FALLBACK: &str = "~/Android/Sdk/platform-tools/adb";
-    let mut candidates = vec![target.adb_path.clone()];
-    if target.adb_path != SDK_FALLBACK {
-        candidates.push(SDK_FALLBACK.to_string());
-    }
-    let mut errs = Vec::new();
-    for cand in candidates {
-        let out = Command::new(host_ssh_path())
-            .args(ssh_base_opts())
-            .arg(&target.host)
-            .arg(format!("{cand} version"))
-            .output();
-        match out {
-            Ok(o) if o.status.success()
-                && String::from_utf8_lossy(&o.stdout).contains("Android Debug Bridge") =>
-            {
-                return Ok(cand)
-            }
-            Ok(o) => errs.push(format!(
-                "{cand}: 退出码非零（{}）",
-                String::from_utf8_lossy(&o.stderr).trim()
-            )),
-            Err(e) => errs.push(format!("{cand}: {e}")),
-        }
-    }
-    bail!(
-        "远端 adb 不可用（{}）：{}——用 --remote-adb 或 GUI 连接配置指定路径",
-        target.host,
-        errs.join("；")
-    )
-}
-
-/// R2：adb 协议版本校验（判据是**协议**版本而非 platform-tools 版本，
-/// 附录 A #30：36.0.2 连 36.0.0 安全，因协议同为 1.0.41）。
-/// 比对本机 `adb version` 与远端 `<adb_path> version` 的 banner 协议串；
-/// 不一致**报错中止**（绝不主动 kill-server——远端 server 可能被共用）。
-fn check_protocol_version(target: &SshTarget) -> Result<()> {
-    let local_out = crate::utils::run_adb_version()
-        .context("本机 adb version 执行失败（Finder 启动可能未继承 Android SDK PATH）")?;
-    let remote_cmd = format!("{} version", target.adb_path);
-    let remote_out = Command::new(host_ssh_path())
+/// 远端预检（经 master 复用连接执行，不产生新握手）：解析 adb 路径（配置值 →
+/// 标准 SDK 位置 `~/Android/Sdk/platform-tools/adb`，远端 PATH 常不含 adb，
+/// 附录 A #12）→ `start-server` → 取 `version` banner → R2 协议版本校验
+/// （判据是**协议**版本而非 platform-tools 版本，附录 A #30；不一致**报错中止**，
+/// 绝不主动 kill-server——远端 server 可能被共用）。
+///
+/// 合并为单条远端脚本的原因：mux 执行虽免握手，多次往返仍增加失败面。
+/// 输出协议：两侧位置均跑不通时打印 `XPERF_NO_ADB` 标记；否则打印
+/// `XPERF_ADB=<path>`（实际使用的路径）+ `version` banner 供本地校验。
+fn preflight_remote(control_path: &std::path::Path, target: &SshTarget) -> Result<()> {
+    let cfg = target.adb_path.replace('\'', r"'\''");
+    // 顺序：解析（配置值失败退标准 SDK 位置）→ 确认可用（不可用报 XPERF_NO_ADB）
+    // → 输出解析到的路径 → start-server → version banner
+    let script = format!(
+        "ADB='{cfg}'; \"$ADB\" version >/dev/null 2>&1 || ADB=~/Android/Sdk/platform-tools/adb; \
+         \"$ADB\" version >/dev/null 2>&1 || {{ echo XPERF_NO_ADB; exit 1; }}; \
+         printf 'XPERF_ADB=%s\\n' \"$ADB\"; \"$ADB\" start-server && \"$ADB\" version"
+    );
+    let out = Command::new(host_ssh_path())
+        .arg("-S")
+        .arg(control_path)
         .args(ssh_base_opts())
         .arg(&target.host)
-        .arg(&remote_cmd)
+        .arg(&script)
         .output()
-        .context("ssh 远端 adb version 执行失败")?;
-    if !remote_out.status.success() {
+        .context("ssh 远端预检执行失败")?;
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    if stdout.lines().any(|l| l == "XPERF_NO_ADB") {
         bail!(
-            "远端 adb version 失败：{}——确认 --remote-adb 路径正确",
-            String::from_utf8_lossy(&remote_out.stderr).trim()
+            "远端 adb 不可用（{}）：配置值与标准 SDK 位置均跑不通——用 --remote-adb 或 GUI 连接配置指定路径",
+            target.host
         );
     }
-    let remote_stdout = String::from_utf8_lossy(&remote_out.stdout);
+    let Some(adb_path) = stdout
+        .lines()
+        .find_map(|l| l.strip_prefix("XPERF_ADB="))
+        .filter(|p| !p.is_empty())
+    else {
+        bail!(
+            "远端预检输出异常（{}）：{}",
+            target.host,
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    };
+    if !out.status.success() {
+        bail!(
+            "远端 adb start-server/version 失败（{adb_path} @ {}）：{}——确认 --remote-adb 路径正确",
+            target.host,
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    let local_out = crate::utils::run_adb_version()
+        .context("本机 adb version 执行失败（Finder 启动可能未继承 Android SDK PATH）")?;
     let local_v = parse_adb_version(&local_out.stdout)
         .context("本机 adb version 输出无法解析")?;
-    let remote_v = parse_adb_version(&remote_stdout)
+    let remote_v = parse_adb_version(&stdout)
         .context("远端 adb version 输出无法解析")?;
     if local_v != remote_v {
         bail!(

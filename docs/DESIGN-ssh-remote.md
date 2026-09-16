@@ -3,7 +3,8 @@
 > **目标**：真机连在远端 Linux 机（`hppc`）上，本机（Mac）跑 GUI/CLI，
 > 经 SSH 完成采样、perfetto、simpleperf 全部功能。
 >
-> **状态**：设计稿 v2（2026-09-09），实现已合入主线；本文保留架构与实测基线。
+> **状态**：设计稿 v3（2026-09-16），实现已合入主线；本文保留架构与实测基线。
+> v3：establish 收敛为单次 SSH 握手（远端预检走 mux，§4.2a）+ 连接阶段计时（§4.2b）。
 > **文中所有机制结论均为 Mac↔hppc 真实拓扑实测**（设备物理接在 hppc），记录见附录 A。
 >
 > v1 曾据反向隧道误判「`forward` 端口在客户端侧监听」，导致 agent 通道设计错误；
@@ -210,10 +211,11 @@ pub struct SshTunnel {
 }
 
 impl SshTunnel {
-    /// 建立隧道（hop#1）。
-    /// ① `ssh <host> '<adb_path> start-server'` 确保远端 server 在跑
+    /// 建立隧道（hop#1）。全程仅 master spawn 一次 SSH 握手（v3 起，见 §4.2a）。
+    /// ① 清无主 control socket（R9）
     /// ② 自选本机空闲端口（`-L 0:` 不被支持，见下）
     /// ③ `ssh -M -S <ctl> -f -N -o … -L <P_srv>:127.0.0.1:<remote_port> <host>`
+    ///    → 远端预检经 mux 免握手执行：解析 adb 路径 + `start-server` + 协议版本校验
     /// ④ 探活：`host:version` 读协议版本
     pub fn establish(target: &SshTarget) -> Result<Self>;
 
@@ -260,6 +262,34 @@ ssh -M -S <control_path> -f -N \
    UNIX socket 路径有长度上限，超长退化到 `temp_dir()`。
 3. **绝不 `adb kill-server`** —— 远端 server 可能被 hppc 上他人共用
    （实测该 server 已存活 1.6 天）。本工具只 `start-server`。
+
+
+### 4.2a 握手收敛（v3，2026-09-16，"DMG 远程连接慢"根因修复）
+
+**现象**：DMG 安装版 GUI 连 hppc 间歇性 30~80s，本机编译版则快。
+**定位**：连接链路阶段计时（`utils::diag`，见 §4.2b）实锤——到 hppc 的**单次** SSH 握手在网络波动时 2.5~10s，而旧实现在 establish 前顺序执行 5 次独立握手（解析 adb 路径×2、`version` 校验、`start-server`、master），总耗时 = 5×握手 RTT，波动期放大到 28s+。DMG/本机二进制的快慢差异只是复测时网络状态的巧合。
+
+**修复**：establish 重排为「先建 master，全部远端执行走 mux」——
+
+```
+ssh -M -S <ctl> -f -N -L … <host>            ← 唯一一次握手
+ssh -S <ctl> <host> '<预检脚本>'              ← mux 复用，~0.1s：
+    ADB='<cfg>'; "$ADB" version >/dev/null 2>&1 || ADB=~/Android/Sdk/platform-tools/adb
+    "$ADB" version >/dev/null 2>&1 || { echo XPERF_NO_ADB; exit 1; }
+    printf 'XPERF_ADB=%s\n' "$ADB"; "$ADB" start-server && "$ADB" version
+```
+
+预检一条脚本完成旧「解析路径 + start-server + 版本 banner」三步；协议版本比对在本地
+进行（远端 banner 经 stdout 带回），R2 语义不变（校验仍先于任何 adb 客户端调用；
+`host:version` 探活为只读握手）。收敛后健康网络全程 <1s，波动期 ≈ 单次握手耗时。
+失败语义保留：`XPERF_NO_ADB` → 提示指定远端 adb 路径；`start-server` 失败 → 透传 stderr；
+版本不一致 → 报错中止。
+
+### 4.2b 连接链路阶段计时（`utils::diag`）
+
+`xperf_core::utils::diag(msg)`：设 `XPERF_DIAG_LOG` 时追加写该文件（GUI `main` 开头设为
+`/tmp/xperf_gui_diag.log`，与前端打点同文件便于时间轴对照），否则写 stderr（CLI）。
+establish 各阶段与 `init_remote`/`connect_remote` 总耗时均有打点，供连接慢类问题定位。
 
 ### 4.3 注入点：`utils.rs`（改造面极小）
 
@@ -351,11 +381,11 @@ device_online(serial) 失败
 CLI/GUI 解析 --remote hppc
   │
   ├─ init_remote(SshTarget)
-  │    ├─ ssh hppc '<adb_path> start-server'        ← 远端 server 就绪
-  │    ├─ 自选 P_srv → ssh -M -N -f -L P_srv:127.0.0.1:5037   ← hop#1
+  │    ├─ ssh -M -N -f -L P_srv:127.0.0.1:5037        ← hop#1（唯一一次握手，§4.2a）
+  │    ├─ mux 预检：解析 adb 路径 + start-server + version banner（R2 校验，不一致报错中止）
+  │    ├─ host:version 探活
   │    ├─ set_transport(Ssh(target))
-  │    ├─ host:version 校验协议版本（不一致 → 报错中止，见 R2）
-  │    └─ list_adb_devices()                        ← 已指向 hppc
+  │    └─ list_adb_devices()                          ← 已指向 hppc
   │
   ├─ pick_device(--device, devices)                 ← 既有策略不变
   └─ 采样/深挖流程（与本地模式同一代码路径）

@@ -276,12 +276,12 @@ hop#2: 本机 P_loc → 远端 adb forward 分配端口（agent 事件流，每�
 ```
 
 **改造面**（极小）：
-- `transport.rs`：`Transport::{Local, Ssh(SshTarget)}` 进程级全局 + `SshTunnel`（establish 四步：远端 `start-server`（**绝不 kill-server**——远端 server 可能被共用，R2）→ 清无主 control socket（R9：pid+序号文件名 + `kill -0` 判活）→ 自选本机端口建 master（`ExitOnForwardFailure` 快速失败换端口重试 3 次，R4）→ adb `host:version` 原始协议握手探活；Drop = `-O exit` 带走全部转发）
+- `transport.rs`：`Transport::{Local, Ssh(SshTarget)}` 进程级全局 + `SshTunnel`（establish 四步，**全程仅 master spawn 一次 SSH 握手**：清无主 control socket（R9：pid+序号文件名 + `kill -0` 判活）→ 自选本机端口建 master（`ExitOnForwardFailure` 快速失败换端口重试 3 次，R4）→ **远端预检经 mux 复用 master 免握手执行**（单条脚本：解析 adb 路径[配置值→标准 SDK 位置] + `start-server`（**绝不 kill-server**，R2）+ version banner 协议校验）→ adb `host:version` 原始协议握手探活；Drop = `-O exit` 带走全部转发）。**握手收敛背景**（2026-09-16，"DMG 远程连接慢"根因）：旧实现顺序 5 次握手（解析路径×2/版本校验/start-server/master），到 hppc 的单次握手网络波动时实测 2.5~10s，总耗时放大到 28~80s；收敛后健康网络 <1s、波动时 ≈ 单次握手耗时。阶段计时经 `utils::diag` 落 `XPERF_DIAG_LOG`（GUI 设为 `/tmp/xperf_gui_diag.log`）或 stderr（CLI）
 - `utils.rs::adb_command()` 唯一 adb 构造点：Ssh 模式注入 `ADB_SERVER_SOCKET` **环境变量**（不用 `-H/-P`：不参与 argv 顺序，不与调用方追加的 `-s`/子命令冲突）；`run_adb`/`run_adb_command_for`/`adb_for`/`list_adb_devices` 全经此，Local 模式零注入（逐字节一致）
 - `agent.rs::ensure_daemon` 端口分流：`Local` 直连 forward 端口；`Ssh` 经 `tunnel.add_forward(remote_port)` 换本机端口——连接/探活/协议代码零改动；映射表按 remote_port 复用（重连/重试不重复建）
-- 生命周期：`init_remote`（R2 协议版本校验=两侧 `adb version` banner 协议串比对，**先于一切 adb 客户端调用**——版本不符客户端会 kill 远端 server；不符报错中止）/ `shutdown_remote`（逐条 `forward --remove` 本工具注册的规则=hop#2 映射表键集，**禁用 `--remove-all`** 会踢他人规则，R10）/ `rebuild_tunnel`（S9：`reconnect_agent` 先判 `tunnel.is_alive()` 再判 `device_online`，隧道死则指数退避 1s→30s 重建；远端 forward 规则 server 持有跨隧道存活，`ensure_forward` 查 list 复用）
+- 生命周期：`init_remote`（R2 协议版本校验=两侧 `adb version` banner 协议串比对，在 establish 远端预检内完成，**先于一切 adb 客户端调用**——版本不符客户端会 kill 远端 server；不符报错中止）/ `shutdown_remote`（逐条 `forward --remove` 本工具注册的规则=hop#2 映射表键集，**禁用 `--remove-all`** 会踢他人规则，R10）/ `rebuild_tunnel`（S9：`reconnect_agent` 先判 `tunnel.is_alive()` 再判 `device_online`，隧道死则指数退避 1s→30s 重建；远端 forward 规则 server 持有跨隧道存活，`ensure_forward` 查 list 复用）
 - CLI `--remote/--remote-adb/--remote-adb-port`（init 接在 `select_device` **之前**；正常/错误退出路径显式 `shutdown_remote`——`process::exit` 不跑析构）；GUI 顶栏「连接」下拉（数据源 = `~/.config/xperf/remotes.json` 已存配置 ∪ `~/.ssh/config` 的 Host 别名，免手工录入）+＋配置浮层 + 5 命令（list_remotes/list_ssh_hosts/save_remote/connect_remote/remote_status）+ `remote-status` 事件 + 热插拔监视器隧道死短路（边沿触发，防每 3s 刷错）。**DMG/Finder 启动**：host `adb` 通过 `XPERF_ADB` → PATH → Android SDK 环境变量/标准 macOS SDK 路径解析，`ssh` 通过 `XPERF_SSH` → PATH → `/usr/bin/ssh` 等固定路径解析；GUI 远程失败保持本机但保留原始错误，不再二次调用 `connect_remote(null)` 覆盖诊断。
-- 远端 adb 路径解析（`resolve_remote_adb_path`）：先试配置值，失败自动退标准 SDK 位置 `~/Android/Sdk/platform-tools/adb`（远端 PATH 常不含 adb，附录 A #12）——ssh_config 来源的主机默认 `adb` 也能直连
+- 远端 adb 路径解析（establish 内 `preflight_remote` 远端脚本）：先试配置值，失败自动退标准 SDK 位置 `~/Android/Sdk/platform-tools/adb`（远端 PATH 常不含 adb，附录 A #12）——ssh_config 来源的主机默认 `adb` 也能直连
 - 多设备并行天然支持：隧道位于 adb client↔server 之间，比「设备」低一层——`-s` 路由/GUI 每设备 tab/深挖并发零改动（每设备 hop#2 一条）；队头阻塞实测不成立（并发 3×47MB 拉取下 200ms 节拍 p50 不退化）
 
 **要点与实测基线**：
