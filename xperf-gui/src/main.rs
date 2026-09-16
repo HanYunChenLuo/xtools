@@ -1399,6 +1399,7 @@ async fn connect_remote(
     };
 
     emit("connecting", Some(&host), format!("正在连接 {host}…"));
+    let t_connect = std::time::Instant::now();
     // 配置查找（按 name 或 host 匹配）；未保存的临时目标用默认 adb 路径/端口
     let cfg = load_remotes()
         .into_iter()
@@ -1411,11 +1412,17 @@ async fn connect_remote(
     }
     match xperf_core::init_remote(target) {
         Ok(devices) => {
+            xperf_core::utils::diag(&format!(
+                "connect_remote {host} 成功: {:?}（{} 台设备）",
+                t_connect.elapsed(),
+                devices.len()
+            ));
             emit("connected", Some(&host), format!("已连接 {host}"));
             Ok(devices_json(devices))
         }
         Err(e) => {
             let msg = format!("{:#}", e);
+            xperf_core::utils::diag(&format!("connect_remote {host} 失败: {:?}: {msg}", t_connect.elapsed()));
             emit("error", Some(&host), msg.clone());
             Err(msg)
         }
@@ -1722,6 +1729,9 @@ fn main() {
     // DMABUF 场景同源）——禁用合成模式回退非合成渲染；本工具 UI 无 CSS 动画/
     // 变换，禁用的性能影响可忽略。
     std::env::set_var("WEBKIT_DISABLE_COMPOSITING_MODE", "1");
+    // 连接链路阶段计时（core utils::diag）与前端打点同写一份诊断日志，
+    // 定位远程连接慢用（DMG 下 stderr 不可见，必须落文件）
+    std::env::set_var("XPERF_DIAG_LOG", "/tmp/xperf_gui_diag.log");
     // 支持命令行自动启动：xperf-gui --package <pkg> [--interval 1000] [--cpu] [--memory] [--fps] [--freq] [--io] [--net] [--gpu] [--thermal] [--trace N] [--stack N]
     // （便于脚本化/验证；不传参数则手动在前端操作）
     let args: Vec<String> = std::env::args().collect();

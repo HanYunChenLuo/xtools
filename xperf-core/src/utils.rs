@@ -30,6 +30,24 @@ fn run_command_inner(cmd: &mut Command, label: &str) -> Result<ProcOutput> {
     })
 }
 
+/// 连接链路阶段计时诊断。
+///
+/// 设置了 `XPERF_DIAG_LOG` 环境变量时追加写该文件（GUI 在 `main` 开头设为
+/// `/tmp/xperf_gui_diag.log`，与前端打点同一文件）；未设置时写 stderr（CLI）。
+/// 行格式与前端打点一致：`[HH:MM:SS.mmm] msg`。
+pub fn diag(msg: &str) {
+    let line = format!("[{}] {}", chrono::Local::now().format("%H:%M:%S%.3f"), msg);
+    if let Some(path) = std::env::var_os("XPERF_DIAG_LOG") {
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+            use std::io::Write;
+            if writeln!(f, "{line}").is_ok() {
+                return;
+            }
+        }
+    }
+    eprintln!("{line}");
+}
+
 /// Resolve the host-side adb executable when a desktop app was launched outside a shell.
 ///
 /// Finder-launched Tauri applications do not load the shell profile, so `PATH` may not
