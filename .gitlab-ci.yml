@@ -37,7 +37,7 @@ variables:
   CARGO_HOME: $CI_PROJECT_DIR/.cargo-ci
   DEBIAN_FRONTEND: noninteractive
   RUST_IMAGE: artifactory.ep.chehejia.com/docker-remote/library/rust:1.93.0-bullseye
-  GUI_RUST_IMAGE: artifactory.ep.chehejia.com/docker-remote/library/ubuntu:22.04
+  GUI_RUST_IMAGE: artifactory.ep.chehejia.com/docker-remote/library/rust:1.93.0-bookworm
   APT_MIRROR: mirrors.aliyun.com
   NDK_DIR: android-ndk-r25b
 
@@ -45,22 +45,11 @@ variables:
 # image provides the intended build/runtime baseline; Ubuntu 20.04 is not supported.
 .gui-job:
   image: $GUI_RUST_IMAGE
-  variables:
-    RUSTUP_HOME: $CI_PROJECT_DIR/.rustup-ci
-    RUSTUP_DIST_SERVER: https://mirrors.ustc.edu.cn/rust-static
-    RUSTUP_UPDATE_ROOT: https://mirrors.ustc.edu.cn/rust-static/rustup
   before_script:
-    - export PATH="$CARGO_HOME/bin:$PATH"
-    - export HOME="$CI_PROJECT_DIR/.home"
-    - mkdir -p "$HOME"
     - sed -i "s|deb.debian.org|$APT_MIRROR|g; s|security.debian.org|$APT_MIRROR|g" /etc/apt/sources.list
     - apt-get update -qq
     - apt-get install -y -qq pkg-config libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev libxdo-dev libssl-dev librsvg2-dev patchelf curl ca-certificates file build-essential
     - pkg-config --modversion webkit2gtk-4.1
-    - curl -fsSL -o /tmp/rustup-init https://mirrors.ustc.edu.cn/rust-static/rustup/dist/x86_64-unknown-linux-gnu/rustup-init
-    - chmod +x /tmp/rustup-init
-    - /tmp/rustup-init -y --default-toolchain 1.93.0 --profile minimal
-    - . "$CARGO_HOME/env"
     - rustc --version
     - cargo --version
     - mkdir -p "$CARGO_HOME"
