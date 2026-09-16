@@ -11,3 +11,5 @@ __pycache__/
 
 # 发布打包脚本（scripts/release-macos.sh）的本地构建产物
 artifacts/
+.worktrees/
+
