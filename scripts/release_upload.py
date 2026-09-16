@@ -13,7 +13,6 @@ package registry 同版本同名文件会追加新文件（旧文件仍在，链
     CI_JOB_TOKEN         无 GITLAB_TOKEN 时启用（CI 内自动，JOB-TOKEN 认证）
     GITLAB_API           选填，默认 https://gitlab.chehejia.com/api/v4（CI 内用 CI_API_V4_URL）
     GITLAB_PROJECT_ID    选填，默认 39859（ligraphic/xtools；CI 内用 CI_PROJECT_ID）
-    GITLAB_PROJECT_URL   选填，项目 web 地址，默认 https://gitlab.chehejia.com/ligraphic/xtools
 """
 
 from __future__ import annotations
@@ -28,7 +27,6 @@ from pathlib import Path
 
 DEFAULT_API = "https://gitlab.chehejia.com/api/v4"
 DEFAULT_PROJECT_ID = "39859"  # ligraphic/xtools
-DEFAULT_PROJECT_URL = "https://gitlab.chehejia.com/ligraphic/xtools"
 
 
 def env(*names: str, default: str = "") -> str:
@@ -60,7 +58,6 @@ def main() -> None:
     file_path, link_name = Path(sys.argv[1]), sys.argv[2]
     tag = env("RELEASE_TAG", "CI_COMMIT_TAG")
     project_id = env("GITLAB_PROJECT_ID", "CI_PROJECT_ID", default=DEFAULT_PROJECT_ID)
-    project_url = env("GITLAB_PROJECT_URL", "CI_PROJECT_URL", default=DEFAULT_PROJECT_URL)
     if not tag:
         sys.exit("缺少 RELEASE_TAG（或 CI_COMMIT_TAG）")
     if not file_path.is_file():
@@ -84,26 +81,10 @@ def main() -> None:
     if status not in (200, 201):
         sys.exit(f"上传 {file_path.name} 失败: HTTP {status} {json.dumps(resp, ensure_ascii=False)}")
 
-    # 2) 查询包（同版本重传会产生多条记录，取 id 最大=最新的包/文件）
-    status, pkgs = api("GET",
-                       f"/projects/{project_id}/packages?package_name=xtools&per_page=100",
-                       auth=auth)
-    if status != 200:
-        sys.exit(f"查询 package 列表失败: HTTP {status} {json.dumps(pkgs, ensure_ascii=False)}")
-    pkgs = [p for p in pkgs if p["version"] == tag]
-    if not pkgs:
-        sys.exit(f"上传后未找到 xtools/{tag} 包")
-    pkg_id = max(pkgs, key=lambda p: p["id"])["id"]
-    status, files = api("GET",
-                        f"/projects/{project_id}/packages/{pkg_id}/package_files?per_page=100",
-                        auth=auth)
-    if status != 200:
-        sys.exit(f"查询 package files 失败: HTTP {status} {json.dumps(files, ensure_ascii=False)}")
-    matches = [f for f in files if f["file_name"] == file_path.name]
-    if not matches:
-        sys.exit(f"包 {pkg_id} 内未找到 {file_path.name}")
-    file_id = max(matches, key=lambda f: f["id"])["id"]
-    file_url = f"{project_url}/-/package_files/{file_id}"
+    # 资产链接指向 package registry 的 API 下载路径——浏览器（登录态）实测可直接
+    # 下载；/-/package_files/<id> web 路径在本实例 404 不可用
+    api_base = env("GITLAB_API", "CI_API_V4_URL", default=DEFAULT_API)
+    file_url = f"{api_base}/projects/{project_id}/packages/generic/xtools/{tag}/{quoted}"
     print(f"uploaded {file_path.name} -> {file_url}")
 
     # 2) 挂资产链接（同名先删，幂等重跑）
