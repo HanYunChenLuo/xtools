@@ -577,6 +577,8 @@ pub fn deploy_agent(local: &Path, serial: Option<&str>) -> Result<()> {
 /// 启动采样会话：确保 daemon 在跑（版本不符重推重启）→ 连接 → 下发 start，返回事件流。
 /// platform: 平台提示（如 "ss3"），传入时 agent 跳过对应探测
 /// `serial`：目标设备（多设备并行会话用，`None` 回退全局选择）。
+///
+/// CLI 使用此入口；本机缺少 agent 时会按开发模式自动交叉编译。
 pub fn spawn_agent(
     package: Option<&str>,
     interval_ms: u64,
@@ -584,8 +586,37 @@ pub fn spawn_agent(
     platform: Option<&dyn Platform>,
     serial: Option<&str>,
 ) -> Result<AgentStream> {
+    spawn_agent_inner(package, interval_ms, flags, platform, serial, None)
+}
+
+/// 使用指定的预编译 agent 启动采样会话。
+///
+/// GUI 发布包使用此入口，`local_bin` 必须是随应用分发的 Android agent；整个采样
+/// 和 daemon 重连路径都不会调用 Cargo 或 Android NDK 编译。
+pub fn spawn_agent_with_binary(
+    package: Option<&str>,
+    interval_ms: u64,
+    flags: MetricFlags,
+    platform: Option<&dyn Platform>,
+    serial: Option<&str>,
+    local_bin: &Path,
+) -> Result<AgentStream> {
+    if !local_bin.is_file() {
+        anyhow::bail!("预编译 xperf-agent 不存在: {}", local_bin.display());
+    }
+    spawn_agent_inner(package, interval_ms, flags, platform, serial, Some(local_bin))
+}
+
+fn spawn_agent_inner(
+    package: Option<&str>,
+    interval_ms: u64,
+    flags: MetricFlags,
+    platform: Option<&dyn Platform>,
+    serial: Option<&str>,
+    local_bin: Option<&Path>,
+) -> Result<AgentStream> {
     use std::io::Write as _;
-    let port = ensure_daemon(serial)?;
+    let port = ensure_daemon(serial, local_bin)?;
     let tcp = std::net::TcpStream::connect(("127.0.0.1", port))?;
     let _ = tcp.set_nodelay(true);
     let writer = std::sync::Arc::new(std::sync::Mutex::new(tcp.try_clone()?));
@@ -647,7 +678,7 @@ pub fn spawn_agent(
 /// - `Ssh`：forward 监听在**远端** server（本机直连必 refused），经 hop#2
 ///   （[`crate::transport::SshTunnel::add_forward`]）映射回本机端口。
 ///   映射表按 remote_port 复用：重连/重试不产生重复转发。
-fn ensure_daemon(serial: Option<&str>) -> Result<u16> {
+fn ensure_daemon(serial: Option<&str>, local_bin: Option<&Path>) -> Result<u16> {
     let mut last_err = String::new();
     for _ in 0..2 {
         let remote_port = ensure_forward(serial)?;
@@ -670,7 +701,7 @@ fn ensure_daemon(serial: Option<&str>) -> Result<u16> {
                 }
                 std::thread::sleep(std::time::Duration::from_millis(500));
                 kill_device_agent(serial);
-                deploy_fresh(serial)?;
+                deploy_fresh_with_binary(serial, local_bin)?;
                 start_daemon(serial)?;
                 if let Err(e) = wait_probe(port) {
                     last_err = e.to_string();
@@ -680,7 +711,7 @@ fn ensure_daemon(serial: Option<&str>) -> Result<u16> {
             Err(e) => {
                 last_err = e.to_string();
                 kill_device_agent(serial); // 残留一律清（老版 stdout agent 不监听 socket）
-                deploy_fresh(serial)?;
+                deploy_fresh_with_binary(serial, local_bin)?;
                 start_daemon(serial)?;
                 if let Err(e) = wait_probe(port) {
                     last_err = e.to_string();
@@ -692,9 +723,12 @@ fn ensure_daemon(serial: Option<&str>) -> Result<u16> {
     anyhow::bail!("xperf-agent daemon 启动失败：{}", last_err)
 }
 
-/// 部署（强制重推）并启动 daemon（探活失败/版本不符路径共用）
-fn deploy_fresh(serial: Option<&str>) -> Result<()> {
-    let bin = ensure_agent_built()?;
+/// 部署（强制重推）并启动 daemon（探活失败/版本不符路径共用）。
+fn deploy_fresh_with_binary(serial: Option<&str>, local_bin: Option<&Path>) -> Result<()> {
+    let bin = match local_bin {
+        Some(path) => path.to_path_buf(),
+        None => ensure_agent_built()?,
+    };
     push_agent_binary(&bin, serial)
 }
 
@@ -892,6 +926,31 @@ pub fn reconnect_agent(
     is_running: &dyn Fn() -> bool,
     serial: Option<&str>,
 ) -> Option<AgentStream> {
+    reconnect_agent_inner(package, interval_ms, flags, platform, is_running, serial, None)
+}
+
+/// 使用预编译 agent 重连采样会话；GUI 发布包路径不会触发本地编译。
+pub fn reconnect_agent_with_binary(
+    package: Option<&str>,
+    interval_ms: u64,
+    flags: MetricFlags,
+    platform: Option<&dyn Platform>,
+    is_running: &dyn Fn() -> bool,
+    serial: Option<&str>,
+    local_bin: &Path,
+) -> Option<AgentStream> {
+    reconnect_agent_inner(package, interval_ms, flags, platform, is_running, serial, Some(local_bin))
+}
+
+fn reconnect_agent_inner(
+    package: Option<&str>,
+    interval_ms: u64,
+    flags: MetricFlags,
+    platform: Option<&dyn Platform>,
+    is_running: &dyn Fn() -> bool,
+    serial: Option<&str>,
+    local_bin: Option<&Path>,
+) -> Option<AgentStream> {
     let mut rebuild_backoff = std::time::Duration::from_secs(1);
     loop {
         if !is_running() {
@@ -915,10 +974,14 @@ pub fn reconnect_agent(
             continue;
         }
         if device_online(serial) {
-            match ensure_agent_built()
-                .and_then(|bin| deploy_agent(&bin, serial))
-                .and_then(|_| spawn_agent(package, interval_ms, flags, platform, serial))
-            {
+            let result = match local_bin {
+                Some(bin) => deploy_agent(bin, serial)
+                    .and_then(|_| spawn_agent_with_binary(package, interval_ms, flags, platform, serial, bin)),
+                None => ensure_agent_built()
+                    .and_then(|bin| deploy_agent(&bin, serial))
+                    .and_then(|_| spawn_agent(package, interval_ms, flags, platform, serial)),
+            };
+            match result {
                 Ok(s) => return Some(s),
                 Err(e) => eprintln!("agent 重连失败: {}，继续等待…", e),
             }

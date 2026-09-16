@@ -152,11 +152,11 @@ fn spawn_sampling(app: tauri::AppHandle, serial: String, package: String, interv
         let debug_events = std::env::var_os("XPERF_DEBUG").is_some();
         let platform = xperf_core::detect_platform_live(Some(&serial));
         eprintln!("[sampling] 平台: {} ({})", platform.name(), platform.description());
-        let bin = match agent::ensure_agent_built() {
+        let bin = match bundled_agent_path(&app) {
             Ok(b) => b,
             Err(e) => {
-                eprintln!("[sampling] agent 构建失败: {}", e);
-                emit_error(format!("agent 构建失败: {}", e));
+                eprintln!("[sampling] agent 资源不可用: {}", e);
+                emit_error(e);
                 let mut running = running.lock().unwrap();
                 *running = false;
                 return;
@@ -169,7 +169,7 @@ fn spawn_sampling(app: tauri::AppHandle, serial: String, package: String, interv
             *running = false;
             return;
         }
-        let mut stream = match agent::spawn_agent(Some(&package), interval, flags, Some(&*platform), Some(&serial)) {
+        let mut stream = match agent::spawn_agent_with_binary(Some(&package), interval, flags, Some(&*platform), Some(&serial), &bin) {
             Ok(s) => s,
             Err(e) => {
                 eprintln!("[sampling] agent 启动失败: {}", e);
@@ -217,10 +217,11 @@ fn spawn_sampling(app: tauri::AppHandle, serial: String, package: String, interv
                 Ok(None) | Err(_) => {
                     eprintln!("[sampling] 连接断开，等待设备恢复…");
                     let running2 = running.clone();
-                    match agent::reconnect_agent(
+                    match agent::reconnect_agent_with_binary(
                         Some(&package), interval, flags, Some(&*platform),
                         &move || *running2.lock().unwrap(),
                         Some(&serial),
+                        &bin,
                     ) {
                         Some(s) => {
                             stream = s;
@@ -458,6 +459,24 @@ fn ensure_device_online(serial: &str) -> Result<(), String> {
 /// 定义避免跨 crate 公共依赖改动——两处实现一致）
 fn gui_data_root() -> std::path::PathBuf {
     std::env::temp_dir().join("xperf")
+}
+
+/// 返回 GUI 发布包内随附的 Android agent。
+/// 开发构建允许从 workspace 的 `target` 目录回退，发布构建不允许触发编译。
+fn bundled_agent_path(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
+    if let Ok(resource_dir) = app.path().resource_dir() {
+        let bundled = resource_dir.join("agent").join("xperf-agent");
+        if bundled.is_file() {
+            return Ok(bundled);
+        }
+    }
+    if cfg!(debug_assertions) {
+        let dev = xperf_core::agent::agent_binary_path();
+        if dev.is_file() {
+            return Ok(dev);
+        }
+    }
+    Err("GUI 发布包缺少预编译 agent/ xperf-agent；请重新安装完整 GUI 包".to_string())
 }
 
 #[tauri::command]

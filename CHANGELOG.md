@@ -41,5 +41,6 @@ CPU（单核口径，与 `adb top` 一致）、内存（App Summary 分类明细
 ### 分发
 
 - 首次提供预编译发布包：Linux x86_64（CLI + 预编译 Android agent）与 macOS（arm64 / x86_64，本机构建上传），tag 触发 GitLab CI 自动出包挂 Release。
+- GUI 发布形态：Linux x86_64 AppImage（Ubuntu 22.04+，WebKitGTK 4.1）与 macOS arm64/x86_64 DMG；GUI 资源内置预编译 Android agent，运行时不调用 Cargo/NDK。
 
 [v0.2.0]: https://gitlab.chehejia.com/ligraphic/xtools/-/releases/v0.2.0

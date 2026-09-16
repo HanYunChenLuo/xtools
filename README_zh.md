@@ -68,8 +68,8 @@ Android 开发工具集合。
 - `--thread`：监控线程活动（需配合 --cpu）
 - `--interval, -i`：采样间隔，**毫秒**（默认 1000）
 
-设备端 agent 会在首次运行时自动编译（如缺失）并推送到
-`/data/local/tmp/xperf-agent`。
+使用 CLI 时，设备端 agent 如缺失会在首次运行时自动编译并推送到
+`/data/local/tmp/xperf-agent`；发布版 GUI 随包携带预编译 agent，运行时不会编译。
 
 示例：
 ```bash
@@ -107,10 +107,12 @@ Android 开发工具集合。
 
 预编译发布包在内部 GitLab：[Releases](https://gitlab.chehejia.com/ligraphic/xtools/-/releases)。
 
-- `xtools-vX.Y.Z-linux-x86_64.tar.gz`——Ubuntu 20.04+（glibc 2.31）
-- `xtools-vX.Y.Z-macos-arm64.tar.gz` / `xtools-vX.Y.Z-macos-x86_64.tar.gz`
+- `xtools-vX.Y.Z-linux-x86_64.tar.gz`——Ubuntu 20.04+（glibc 2.31，CLI + agent）
+- `xtools-vX.Y.Z-linux-x86_64-gui.AppImage`——Ubuntu 22.04+（Tauri 2 GUI + 内置 agent）
+- `xtools-vX.Y.Z-macos-arm64.tar.gz` / `xtools-vX.Y.Z-macos-x86_64.tar.gz`——CLI + agent
+- `xtools-vX.Y.Z-macos-arm64-gui.dmg` / `xtools-vX.Y.Z-macos-x86_64-gui.dmg`——GUI + 内置 agent
 
-每个包内含 `xperf-cli`、`agent/xperf-agent`（预编译 Android 采样器，无需本地 NDK）与文档。
+CLI tar 包内含 `xperf-cli`、`agent/xperf-agent`；GUI AppImage/DMG 内含应用资源 `agent/xperf-agent`，运行时不编译 agent。
 版本变更说明见 [CHANGELOG.md](CHANGELOG.md)。
 
 ## 构建

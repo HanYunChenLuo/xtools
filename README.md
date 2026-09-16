@@ -73,7 +73,8 @@ Options:
 - `--interval, -i`: Sampling interval in **milliseconds** (default: 1000)
 
 The device-side agent is built (if missing) and pushed to
-`/data/local/tmp/xperf-agent` automatically on first run.
+`/data/local/tmp/xperf-agent` automatically on first run when using the CLI.
+The released GUI bundles a prebuilt agent resource and never compiles it at runtime.
 
 Examples:
 ```bash
@@ -111,11 +112,14 @@ CPU/memory charts and per-layer FPS charts on a live canvas.
 
 Prebuilt packages are published on the internal GitLab: [Releases](https://gitlab.chehejia.com/ligraphic/xtools/-/releases).
 
-- `xtools-vX.Y.Z-linux-x86_64.tar.gz` — Ubuntu 20.04+ (glibc 2.31)
-- `xtools-vX.Y.Z-macos-arm64.tar.gz` / `xtools-vX.Y.Z-macos-x86_64.tar.gz`
+- `xtools-vX.Y.Z-linux-x86_64.tar.gz` — Ubuntu 20.04+ (glibc 2.31, CLI + agent)
+- `xtools-vX.Y.Z-linux-x86_64-gui.AppImage` — Ubuntu 22.04+ (Tauri 2 GUI + bundled agent)
+- `xtools-vX.Y.Z-macos-arm64.tar.gz` / `xtools-vX.Y.Z-macos-x86_64.tar.gz` — CLI + agent
+- `xtools-vX.Y.Z-macos-arm64-gui.dmg` / `xtools-vX.Y.Z-macos-x86_64-gui.dmg` — GUI + bundled agent
 
-Each tarball contains `xperf-cli`, `agent/xperf-agent` (prebuilt Android sampler —
-no local NDK needed) and docs. Release notes live in [CHANGELOG.md](CHANGELOG.md).
+CLI archives contain `xperf-cli` and `agent/xperf-agent`. GUI AppImage/DMG bundles
+`agent/xperf-agent` as an application resource and never compiles it at runtime.
+Release notes live in [CHANGELOG.md](CHANGELOG.md).
 
 ## Building
 
