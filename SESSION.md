@@ -6,6 +6,19 @@
 > 新会话开始时可先读本文件了解近期上下文。
 
 ---
+## 2026-09-16 — GUI AppImage/DMG 发布与内置 agent（分支 `feature/gui-release-packaging`）
+
+**任务**：用户要求 GUI 发布包内置预编译 `xperf-agent`，Linux 使用 AppImage，macOS 使用 DMG；运行时禁止再编译 agent。
+
+**实现**：`xperf-core/src/agent.rs` 新增 `spawn_agent_with_binary` / `reconnect_agent_with_binary`，GUI 从 Tauri `resource_dir()/agent/xperf-agent` 取资源；仅 debug 构建允许回退 workspace target，release 缺资源直接报错。新增 `xperf-gui/tauri.release.json` 作为发布覆盖配置，资源源为 `release-resources/agent/xperf-agent`，目标为应用资源 `agent/xperf-agent`。`.gitlab-ci.yml` 新增 `gui:linux`：Ubuntu 22.04-class/WebKitGTK 4.1、先从 build artifact 注入 agent、`ARCH=x86_64` 构建 AppImage；release job 挂 Linux CLI + AppImage。`scripts/release-macos.sh` 构建 arm64/x86_64 DMG，`CI=true` 跳过无界面 Finder AppleScript，DMG 内置 agent；CLI tar 保持原有双架构。
+
+**验证**：Linux GUI job 1407346 全绿：Rust/Tauri/WebKitGTK 编译、linuxdeploy、104MB AppImage artifact；解包确认 `usr/lib/xperf-gui/agent/xperf-agent` 为 Android aarch64 ELF。失败过的中间原因均已修复：Ubuntu 镜像 apt 源路径、bookworm `debian.sources`、linuxdeploy FUSE/CI 模式、AppDir 同时含 host x86_64 与 Android agent 架构需 `ARCH=x86_64`。本机 macOS arm64/x86_64 DMG 均构建成功（约 3.8/4.0MB），`.app/Contents/Resources/agent/xperf-agent` 架构正确。core/GUI 测试全绿（123+8 ignored / 10）。
+
+**发布策略**：GUI 代码已完成并推送分支及 GitLab；当前 `v0.2.0` Release 不改写，GUI 资产在合并主线后新 tag 发布。Linux GUI 最低 Ubuntu 22.04，CLI 仍 Ubuntu 20.04+；DMG 未签名/公证，正式分发前需补 Apple Developer 签名/公证配置。
+
+---
+
+
 ## 2026-09-15 — 软件发布打包落地（v0.2.0）
 
 **任务**：实现 Linux + macOS 发布包、GitLab CI tag Release、CHANGELOG 驱动发布说明；用户选择 CLI + Android agent，不含 aarch64 Linux/GUI，macOS 由本机补传。
@@ -16,7 +29,7 @@
 
 **关键修复**：本 GitLab CE 的 generic package PUT 响应只有 `{"message":"201 Created"}`，不含官方文档中的 `package_files`，`release_upload.py` 改为不依赖 PUT 响应；后续资产 URL 改用 API 下载路径。NDK/rust-std 不再依赖 runner 外网大文件下载。
 
-**遗留**：无阻塞项。命令行输入仍是 WORKSPACE I 节候补。
+**遗留**：CLI/agent 原 v0.2.0 发布链路无阻塞；本分支新增 GUI AppImage/DMG 仍需合并主线并在新 tag 发布。命令行输入仍是 WORKSPACE I 节候补。
 
 ---
 
