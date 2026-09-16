@@ -180,7 +180,7 @@ gui:linux:
     - cp artifacts/xtools-v$VER-linux-x86_64/agent/xperf-agent xperf-gui/release-resources/agent/xperf-agent
     - chmod 755 xperf-gui/release-resources/agent/xperf-agent
     - if ! cargo tauri --version >/dev/null 2>&1; then cargo install tauri-cli --version 2.4.1 --locked; fi
-    - cd xperf-gui && CI=true cargo tauri build --config tauri.release.json --bundles appimage && cd ..
+    - cd xperf-gui && CI=true cargo tauri build --verbose --config tauri.release.json --bundles appimage && cd ..
     - find target/release/bundle -type f -name '*.AppImage' -exec cp {} artifacts/xtools-v$VER-linux-x86_64-gui.AppImage \;
     - test -s artifacts/xtools-v$VER-linux-x86_64-gui.AppImage
   artifacts:
