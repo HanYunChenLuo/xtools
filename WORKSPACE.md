@@ -2,7 +2,7 @@
 
 > 本文件记录跨会话的待办事项（backlog）。每次会话的历史总结见 `SESSION.md`。
 > 完成一项就把状态改为 ✅ 并注明完成的 commit；新增想法随时追加。
-> 最后更新：2026-09-16：① I 节新增「问题反馈」需求（1h 日志采集 + GitLab issue）；② A 节新增 AppImage 22.04 启动失败 bug（libpango/harfbuzz 符号断裂）。两者均文档立项，新会话实施
+> 最后更新：2026-09-16 晚：① DMG 远程连接慢根因修复合 main（单次 SSH 握手 + mux 预检，449c472/9f441d8）；② 全仓改名 xtools→xperf（GitLab 仓库 ligraphic/xperf，b612ff7；本机与 hppc 仓库目录同步改名，git worktree repair 已做）；③ v0.2.1 删除重发完成（Release 6 资产全在 `generic/xperf/v0.2.1/`，发布版 DMG 安装实测通过）
 
 ## 当前状态速览
 

@@ -5,6 +5,26 @@
 > 待办事项（backlog）在 `WORKSPACE.md` 维护，本文件只做历史追溯。
 > 新会话开始时可先读本文件了解近期上下文。
 
+## 2026-09-16（晚）：DMG 远程连接慢根因修复 + v0.2.1 重发 + 全仓改名 xperf
+
+**任务**：用户实测 fix/gui-dmg-ssh 的 DMG 远程可用但连接间歇 30~80s；随后要求删除 v0.2.1 tag/产物重发；中途 GitLab 仓库改名 `ligraphic/xtools` → `ligraphic/xperf`，全 workspace 同步改名。
+
+**commit**（均已推 hppc + li）：
+- `449c472` perf(ssh-remote)：establish 收敛为单次 SSH 握手 + `utils::diag` 阶段计时（fix/gui-dmg-ssh）
+- `9f441d8` merge 入 main；`0cf8be7` WORKSPACE 核销；`4f04872` CHANGELOG 补记
+- `b612ff7` rename：仓库/脚本/CI/文档 xtools→xperf（含 `tauri.conf.json` identifier → `com.xperf.xperf-gui`、package registry 路径 `generic/xperf`）
+
+**关键结论**：
+- "DMG 慢/本机快"是巧合——`utils::diag` 实锤 init_remote 旧实现顺序 5 次 SSH 握手 × 网络波动（单次握手 2.5~10s）→ 28s+。修复后全程 1 次握手（远端预检走 ControlMaster mux），健康网络 <1s（connect_remote 实测 841ms），DMG Finder 环境用户确认。
+- DMG 一直是 release 构建（sha256 与 target/release 产物一致）。
+- 改名后 `target/` 增量缓存引用旧绝对路径致 tauri 构建失败——`rm -rf target/*/release/{build,.fingerprint,incremental}` 后恢复。
+- 目录改名：本机 `~/workspaces/tools/xtools`→`xperf`（`git worktree repair <wt>` 修复 3 个 worktree），hppc `~/code/tools/xtools`→`xperf`（li URL 改 `ligraphic/xperf.git`，本机 hppc remote 同步）。
+- v0.2.1 重发：删旧 tag/Release/package（30095）→ 重打 b612ff7 → CI 1408481 成功（Linux CLI+AppImage）→ `release-macos.sh v0.2.1` 成功（macOS CLI 双架构 tar + DMG 双架构），Release 6 资产全在 `generic/xperf/v0.2.1/`；发布版 arm64 DMG 下载→签名验证→安装→启动实测通过。
+- GitLab API token：hppc `~/.git-credentials` 的 oauth2 token 可作 PRIVATE-TOKEN（删 Release/包/tag、查流水线均验证）。
+
+**遗留**：无（问题反馈功能、AppImage 22.04 启动失败仍在 WORKSPACE 待办）。
+
+
 ## 2026-09-16 — Linux AppImage 在某台 Ubuntu 22.04 启动失败（bug 立项，新会话修复）
 
 **现象**（用户报错原文）：`xperf-gui: symbol lookup error: /tmp/.mount_xtoolsZA1ucA/usr/lib/libpango-1.0.so.0: undefined symbol: hb_ot_layout_get_horizontal_baseline_tag_for_script`
