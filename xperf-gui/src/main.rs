@@ -1,4 +1,4 @@
-//! xperf-gui：xtools 的 Tauri 桌面 GUI——与 CLI 共用 xperf-core 的采样/深挖能力。
+//! xperf-gui：xperf 的 Tauri 桌面 GUI——与 CLI 共用 xperf-core 的采样/深挖能力。
 //! 多设备并行：每台在线设备一个独立会话（顶栏设备 tab），各自持有采样/Perfetto/
 //! simpleperf 三路控制与状态，事件 payload 均带 `serial` 供前端分发。
 //! 支持命令行自动启动：`--package <pkg> [--device <serial>] [--interval N] [--cpu …] [--trace N] [--stack N]`。

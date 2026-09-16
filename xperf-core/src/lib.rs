@@ -1,4 +1,4 @@
-//! xperf-core：xtools 性能监控工具的核心库。
+//! xperf-core：xperf 性能监控工具的核心库。
 //!
 //! 职责：设备端 agent 传输层（NDJSON over `adb exec-out`）、采样协议类型、
 //! 平台抽象（SS2/SS3/SS4/Android 自动检测）、时间轴打点、perfetto 深挖

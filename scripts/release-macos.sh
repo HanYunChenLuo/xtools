@@ -71,14 +71,14 @@ build_gui() {  # build_gui <Apple target> <DMG architecture>
     dmg=$(find "target/$target/release/bundle/dmg" -type f -name '*.dmg' -print -quit)
     test -n "$dmg" && test -s "$dmg"
     validate_dmg "$dmg"
-    cp "$dmg" "artifacts/xtools-v$VER-macos-$arch-gui.dmg"
+    cp "$dmg" "artifacts/xperf-v$VER-macos-$arch-gui.dmg"
 }
 
 build() {  # build <apple 三元组> <包架构名>
     local target="$1" arch="$2"
     echo "==> cargo build --release -p xperf-cli --target $target"
     cargo build --release -p xperf-cli --target "$target"
-    local pkg="xtools-$TAG-macos-$arch"
+    local pkg="xperf-$TAG-macos-$arch"
     rm -rf "artifacts/$pkg" "artifacts/$pkg.tar.gz"
     mkdir -p "artifacts/$pkg/agent"
     cp "target/$target/release/xperf-cli" "artifacts/$pkg/"
@@ -97,8 +97,8 @@ build x86_64-apple-darwin x86_64
 build_gui aarch64-apple-darwin arm64
 build_gui x86_64-apple-darwin x86_64
 
-python3 scripts/release_upload.py "artifacts/xtools-$TAG-macos-arm64.tar.gz"  "macOS ARM64 (CLI + agent)"
-python3 scripts/release_upload.py "artifacts/xtools-$TAG-macos-x86_64.tar.gz" "macOS x86_64 (CLI + agent)"
-python3 scripts/release_upload.py "artifacts/xtools-v$VER-macos-arm64-gui.dmg"  "macOS ARM64 GUI (DMG + agent)"
-python3 scripts/release_upload.py "artifacts/xtools-v$VER-macos-x86_64-gui.dmg" "macOS x86_64 GUI (DMG + agent)"
+python3 scripts/release_upload.py "artifacts/xperf-$TAG-macos-arm64.tar.gz"  "macOS ARM64 (CLI + agent)"
+python3 scripts/release_upload.py "artifacts/xperf-$TAG-macos-x86_64.tar.gz" "macOS x86_64 (CLI + agent)"
+python3 scripts/release_upload.py "artifacts/xperf-v$VER-macos-arm64-gui.dmg"  "macOS ARM64 GUI (DMG + agent)"
+python3 scripts/release_upload.py "artifacts/xperf-v$VER-macos-x86_64-gui.dmg" "macOS x86_64 GUI (DMG + agent)"
 echo "==> 完成：macOS CLI 双架构 + GUI 双架构 DMG 已挂到 Release $TAG"

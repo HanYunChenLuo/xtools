@@ -12,7 +12,7 @@ package registry 同版本同名文件会追加新文件（旧文件仍在，链
     GITLAB_TOKEN         Personal Access Token（api 权限，PRIVATE-TOKEN 认证）
     CI_JOB_TOKEN         无 GITLAB_TOKEN 时启用（CI 内自动，JOB-TOKEN 认证）
     GITLAB_API           选填，默认 https://gitlab.chehejia.com/api/v4（CI 内用 CI_API_V4_URL）
-    GITLAB_PROJECT_ID    选填，默认 39859（ligraphic/xtools；CI 内用 CI_PROJECT_ID）
+    GITLAB_PROJECT_ID    选填，默认 39859（ligraphic/xperf；CI 内用 CI_PROJECT_ID）
 """
 
 from __future__ import annotations
@@ -26,7 +26,7 @@ import urllib.request
 from pathlib import Path
 
 DEFAULT_API = "https://gitlab.chehejia.com/api/v4"
-DEFAULT_PROJECT_ID = "39859"  # ligraphic/xtools
+DEFAULT_PROJECT_ID = "39859"  # ligraphic/xperf
 
 
 def env(*names: str, default: str = "") -> str:
@@ -69,13 +69,13 @@ def main() -> None:
     else:
         sys.exit("缺少认证：GITLAB_TOKEN 或 CI_JOB_TOKEN")
 
-    # 1) 上传 package registry（generic 仓库 xtools/<tag>/<file>）。
+    # 1) 上传 package registry（generic 仓库 xperf/<tag>/<file>）。
     #    注意：本实例（GitLab CE）的 PUT 响应体只有 {"message":"201 Created"}，
     #    不含官方文档描述的 package 对象，因此资产链接直接使用 API 下载路径。
     quoted = urllib.parse.quote(file_path.name, safe="")
     status, resp = api(
         "PUT",
-        f"/projects/{project_id}/packages/generic/xtools/{tag}/{quoted}",
+        f"/projects/{project_id}/packages/generic/xperf/{tag}/{quoted}",
         raw=file_path.read_bytes(), auth=auth,
     )
     if status not in (200, 201):
@@ -84,7 +84,7 @@ def main() -> None:
     # 资产链接指向 package registry 的 API 下载路径——浏览器（登录态）实测可直接
     # 下载；/-/package_files/<id> web 路径在本实例 404 不可用
     api_base = env("GITLAB_API", "CI_API_V4_URL", default=DEFAULT_API)
-    file_url = f"{api_base}/projects/{project_id}/packages/generic/xtools/{tag}/{quoted}"
+    file_url = f"{api_base}/projects/{project_id}/packages/generic/xperf/{tag}/{quoted}"
     print(f"uploaded {file_path.name} -> {file_url}")
 
     # 2) 挂资产链接（同名先删，幂等重跑）

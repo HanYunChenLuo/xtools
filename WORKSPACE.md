@@ -1,4 +1,4 @@
-# WORKSPACE.md — xtools 工作区待办与状态
+# WORKSPACE.md — xperf 工作区待办与状态
 
 > 本文件记录跨会话的待办事项（backlog）。每次会话的历史总结见 `SESSION.md`。
 > 完成一项就把状态改为 ✅ 并注明完成的 commit；新增想法随时追加。
@@ -117,7 +117,7 @@
 - [ ] **命令行输入**：GUI 提供设备 shell 命令输入能力（交互式 shell or 单条执行，形态待定）。SSH 远程注意：命令通道同 adb 走 hop#1；若做成交互式长连接 shell 则类似 agent 流需 hop#2 式映射。
 - [x] ~~**软件发布打包（Linux + macOS，结合 GitLab CI）**~~（CLI/agent + GUI 已完成实现，2026-09-16，分支 `feature/gui-release-packaging` 待合并）：CLI/agent 的 v0.2.0 Release 链路已验证；GUI 发布专用 `tauri.release.json` 注入 `agent/xperf-agent` 资源，运行时不调用 Cargo/NDK；Linux AppImage 基于 WebKitGTK 4.1/Ubuntu 22.04+，macOS arm64/x86_64 DMG。Linux GUI 流水线 1407346 已验证编译、linuxdeploy、AppImage artifact 和内置 Android agent（约 104MB）；macOS 双架构 DMG 已本机验证（约 3.8/4.0MB）。GUI 资产将在 `v0.2.1` tag 发布。
 - [x] ~~**logcat 文本过滤**~~（**已完成**，2026-09-15，`feature/logcat-text-filter` 合 main）：设备端 `logcat -e <regex>` 消息体正则下沉（吞吐敏感不把无关行拉过 adb 通道），与级别/按包过滤叠加。core config/restart/build_args 全链路（空白串忽略，标记行带 `text=`）；CLI `--logcat-regex`（requires --logcat；秒死 Error 经事件回调透传 stderr）；GUI 日志 tab「过滤」输入框（start/restart 命令加 text 参数，变更走热切换同文件续写）。**非法正则三平台（A11/A12/A16）实测均立即 rc=134 regex_error abort** → 连续秒死 Error 路径（CLI 可见 ❌）。真机回归（--remote hppc）：SS3 uid+`-e` 叠加命中正确 / SS2MAX A11 `-e` 可用 / SS4 多用户 uid+`-e` / 热切换集成测试（标记行 text=FATAL）/ GUI AX 全链（开始带 text=filament → 热切 SurfaceFlinger respawn 标记 → ANR 再切 → 停止）。AX 新教训入 CLAUDE.md（set value 异步生效、blur 派发 change、缓存引用失效、AppleScript 保留字）
-- [ ] **问题反馈（一键收集日志 → GitLab issue）**（2026-09-16 用户需求，待新会话实施）。目标：用户遇到问题时一键收集最近 **1 小时**内的全部相关证据，在内部 GitLab 仓库（project `39859`，`gitlab.chehejia.com/ligraphic/xtools`）创建 issue 并上传日志包，保证「从 log 能分析问题」。**日志覆盖率达标 = 打包前逐项自检清单全部满足（存在且非空），缺失项在 issue 中如实标注并给出原因**，不许静默缺数据。实施要点：
+- [ ] **问题反馈（一键收集日志 → GitLab issue）**（2026-09-16 用户需求，待新会话实施）。目标：用户遇到问题时一键收集最近 **1 小时**内的全部相关证据，在内部 GitLab 仓库（project `39859`，`gitlab.chehejia.com/ligraphic/xperf`）创建 issue 并上传日志包，保证「从 log 能分析问题」。**日志覆盖率达标 = 打包前逐项自检清单全部满足（存在且非空），缺失项在 issue 中如实标注并给出原因**，不许静默缺数据。实施要点：
   - **入口**：GUI 侧栏「数据管理」区新增「问题反馈」按钮（形态细节实施会话确认；CLI 是否加 `--feedback` 同步评估）。要求 SSH 远程可用（数据源均落本机，天然满足）。
   - **采集范围（时间窗 = 最近 1h，按文件 mtime 过滤）**：① 本机会话数据 `/tmp/xperf/<pkg>/<ts>-<serial>/` 下采样 CSV（cpu/memory/fps/thread/freq/thermal/gpu/io/net）、`trace_analysis.txt`/`trace_queries.sql`、`simpleperf_report.txt`/`.data`、`capture/`、`logcat/`；② GUI 诊断日志 `/tmp/xperf_gui_diag.log`（尾段截取）；③ 设备端 daemon 日志 `/data/local/tmp/xperf-agent.log`（经 adb/hop#1 pull）；④ 设备 logcat 最近 1h 窗口（注意当前抓取是 `-T 0` 无历史——issue 采集需 `logcat -d -t "<time>"` 式回放拉取，A11/A16 兼容性实施会话实测）；⑤ 环境信息：工具版本、平台检测结果、设备列表快照、传输模式（local/ssh host 名，不含密钥）。
   - **打包与上传**：收集物打成一个带时间戳的归档（tar.gz），`POST /projects/39859/uploads` 上传为 issue 附件（大文件走 package registry 同 release_upload 路径亦可，实施会话定）；`POST /projects/39859/issues` 创建议题，标题 `[feedback] <场景摘要> <日期时间>`，正文模板 = 时间窗/设备 serial/包名/传输模式/数据清单（含缺失项）+ 附件链接。认证复用 `GITLAB_TOKEN`（PRIVATE-TOKEN，与 `scripts/release_upload.py` 同源）；GUI 用户侧 token 的提供方式（环境变量/配置文件）实施会话确认。

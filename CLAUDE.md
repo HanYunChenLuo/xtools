@@ -10,7 +10,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **代码规则（强制）**：写代码必须同时考虑 `cargo doc`——新增/修改的所有 pub 项（crate/mod/struct/enum/fn/字段/变体）都要有规范完整的 doc 注释（含单位/语义/无值字段要写明），路径/参数/日志样例包反引号或 code block；交付前必须跑完整 `cargo doc` 并做到**零 warning 零 error**（默认 lint 集 + missing_docs，命令见 Commands 节）。
 - **git 拓扑**：本机（Mac）→ `hppc`（Linux 机中转远端）→ **内部 GitLab（hppc 默认远端）**。
   本机 `git push` 推 hppc（main 的 upstream 已设 hppc/main）；**对外 push 统一在 hppc 上
-  执行**——默认 `git push` = 内部 GitLab（remote `li` = `git@gitlab.chehejia.com:ligraphic/xtools.git`，
+  执行**——默认 `git push` = 内部 GitLab（remote `li` = `git@gitlab.chehejia.com:ligraphic/xperf.git`，
   main 的 upstream 已设 li/main，2026-09-15 起）；GitHub 为 `origin`，需显式
   `git push origin main`。LFS 对象随 push 经 SSH 直传（locksverify 已关）。拉取：GitLab
   变更先在 hppc `git pull`，本机再 pull hppc。
@@ -382,7 +382,7 @@ hop#2: 本机 P_loc → 远端 adb forward 分配端口（agent 事件流，每�
 
 ### 软件发布（GitLab CI + tag Release，2026-09-15）
 
-**发版流程**：四 crate bump 同版本 → `xperf-gui/tauri.conf.json` 同步版本 → `CHANGELOG.md` 加 `## [vX.Y.Z]` 章节 → 合 main → `git tag -a vX.Y.Z` → 推 hppc 且 hppc 推 li（tag 同样两跳）→ CI 流水线（validate→test→build:linux→gui:linux→release）出 CLI/AppImage 挂 Release → Mac 上 `GITLAB_TOKEN=<api 权限 PAT> scripts/release-macos.sh vX.Y.Z` 构建 CLI 双架构 + GUI DMG 双架构上传挂同一 Release。`validate:tag` 校验 tag 格式/crate 版本一致/CHANGELOG 章节，任一不符 tag 流水线在 validate 阶段拦截。资产链接统一指向 **package registry API 下载路径**（`.../api/v4/projects/39859/packages/generic/xtools/<tag>/<file>`，登录态浏览器可直接下载）；**`/-/package_files/<id>` web 路径在本实例 404 不可用**（用户实测）。
+**发版流程**：四 crate bump 同版本 → `xperf-gui/tauri.conf.json` 同步版本 → `CHANGELOG.md` 加 `## [vX.Y.Z]` 章节 → 合 main → `git tag -a vX.Y.Z` → 推 hppc 且 hppc 推 li（tag 同样两跳）→ CI 流水线（validate→test→build:linux→gui:linux→release）出 CLI/AppImage 挂 Release → Mac 上 `GITLAB_TOKEN=<api 权限 PAT> scripts/release-macos.sh vX.Y.Z` 构建 CLI 双架构 + GUI DMG 双架构上传挂同一 Release。`validate:tag` 校验 tag 格式/crate 版本一致/CHANGELOG 章节，任一不符 tag 流水线在 validate 阶段拦截。资产链接统一指向 **package registry API 下载路径**（`.../api/v4/projects/39859/packages/generic/xperf/<tag>/<file>`，登录态浏览器可直接下载）；**`/-/package_files/<id>` web 路径在本实例 404 不可用**（用户实测）。
 
 **流水线结构**（`.gitlab-ci.yml`；触发=main push / tag / web·api 手动）：`test:linux`（core+cli）→ `build:linux`（CLI release + NDK agent 交叉 + tar.gz，内含 `xperf-cli` + `agent/xperf-agent`）→ `gui:linux`（Ubuntu 22.04 + WebKitGTK 4.1，先注入同一预编译 agent，再出 x86_64 AppImage；`ARCH=x86_64` 避免 AppDir 中 Android ELF 触发 appimagetool 多架构拒绝）→ `release`（`scripts/release_create.py` 建 Release 描述取 CHANGELOG 章节 + `release_upload.py` 上传 Linux CLI/AppImage，幂等可重跑）。macOS 无 runner，`scripts/release-macos.sh` 本地补 CLI tar + arm64/x86_64 DMG；默认通过 `tauri.release.json` 使用完整 ad-hoc bundle 签名，脚本挂载 DMG 后执行 `codesign --verify --deep --strict`；有 Developer ID 时用 `APPLE_SIGNING_IDENTITY` 覆盖并配置 Apple 公证。DMG 构建设 `CI=true` 跳过无界面 Finder AppleScript，`COPYFILE_DISABLE=1` 去 AppleDouble。GUI 的 `tauri.release.json` 只在发布构建注入 `release-resources/agent/xperf-agent`，运行时通过 Tauri `resource_dir()` 找 agent，不调用 Cargo/NDK。
 

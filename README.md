@@ -114,12 +114,12 @@ CPU/memory charts and per-layer FPS charts on a live canvas.
 
 ## Download
 
-Prebuilt packages are published on the internal GitLab: [Releases](https://gitlab.chehejia.com/ligraphic/xtools/-/releases).
+Prebuilt packages are published on the internal GitLab: [Releases](https://gitlab.chehejia.com/ligraphic/xperf/-/releases).
 
-- `xtools-vX.Y.Z-linux-x86_64.tar.gz` — Ubuntu 20.04+ (glibc 2.31, CLI + agent)
-- `xtools-vX.Y.Z-linux-x86_64-gui.AppImage` — Ubuntu 22.04+ (Tauri 2 GUI + bundled agent)
-- `xtools-vX.Y.Z-macos-arm64.tar.gz` / `xtools-vX.Y.Z-macos-x86_64.tar.gz` — CLI + agent
-- `xtools-vX.Y.Z-macos-arm64-gui.dmg` / `xtools-vX.Y.Z-macos-x86_64-gui.dmg` — GUI + bundled agent
+- `xperf-vX.Y.Z-linux-x86_64.tar.gz` — Ubuntu 20.04+ (glibc 2.31, CLI + agent)
+- `xperf-vX.Y.Z-linux-x86_64-gui.AppImage` — Ubuntu 22.04+ (Tauri 2 GUI + bundled agent)
+- `xperf-vX.Y.Z-macos-arm64.tar.gz` / `xperf-vX.Y.Z-macos-x86_64.tar.gz` — CLI + agent
+- `xperf-vX.Y.Z-macos-arm64-gui.dmg` / `xperf-vX.Y.Z-macos-x86_64-gui.dmg` — GUI + bundled agent
 
 CLI archives contain `xperf-cli` and `agent/xperf-agent`. GUI AppImage/DMG bundles
 `agent/xperf-agent` as an application resource and never compiles it at runtime.

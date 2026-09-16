@@ -1,4 +1,4 @@
-# xtools 发布流水线（内部 GitLab CE 17 + yz1 instance runner，docker executor）
+# xperf 发布流水线（内部 GitLab CE 17 + yz1 instance runner，docker executor）
 #
 # 触发：main push / tag（vX.Y.Z）/ Run Pipeline（web、api 手动触发）
 # 产物：Linux x86_64 tar.gz（xperf-cli + 预编译 Android agent）；tag 时自动创建
@@ -143,7 +143,7 @@ build:linux:
       ls "$TC/lib/rustlib/aarch64-linux-android/lib"/*.rlib | wc -l
     - cargo build --locked -p xperf-agent --target aarch64-linux-android --release
     - VER=$(sed -n 's/^version = "\(.*\)"$/\1/p' xperf-cli/Cargo.toml | head -1)
-    - PKG="xtools-v$VER-linux-x86_64"
+    - PKG="xperf-v$VER-linux-x86_64"
     - mkdir -p "artifacts/$PKG/agent"
     - cp target/release/xperf-cli "artifacts/$PKG/"
     - cp "target/aarch64-linux-android/release/xperf-agent" "artifacts/$PKG/agent/"
@@ -175,14 +175,14 @@ gui:linux:
         - .cargo-ci/
   script:
     - VER=$(sed -n 's/^version = "\(.*\)"$/\1/p' xperf-cli/Cargo.toml | head -1)
-    - test -x artifacts/xtools-v$VER-linux-x86_64/agent/xperf-agent
+    - test -x artifacts/xperf-v$VER-linux-x86_64/agent/xperf-agent
     - mkdir -p xperf-gui/release-resources/agent
-    - cp artifacts/xtools-v$VER-linux-x86_64/agent/xperf-agent xperf-gui/release-resources/agent/xperf-agent
+    - cp artifacts/xperf-v$VER-linux-x86_64/agent/xperf-agent xperf-gui/release-resources/agent/xperf-agent
     - chmod 755 xperf-gui/release-resources/agent/xperf-agent
     - if ! cargo tauri --version >/dev/null 2>&1; then cargo install tauri-cli --version 2.4.1 --locked; fi
     - cd xperf-gui && ARCH=x86_64 CI=true cargo tauri build --verbose --config tauri.release.json --bundles appimage && cd ..
-    - find target/release/bundle -type f -name '*.AppImage' -exec cp {} artifacts/xtools-v$VER-linux-x86_64-gui.AppImage \;
-    - test -s artifacts/xtools-v$VER-linux-x86_64-gui.AppImage
+    - find target/release/bundle -type f -name '*.AppImage' -exec cp {} artifacts/xperf-v$VER-linux-x86_64-gui.AppImage \;
+    - test -s artifacts/xperf-v$VER-linux-x86_64-gui.AppImage
   artifacts:
     paths:
       - artifacts/*-gui.AppImage
@@ -205,5 +205,5 @@ release:
   script:
     - VER=$(sed -n 's/^version = "\(.*\)"$/\1/p' xperf-cli/Cargo.toml | head -1)
     - python3 scripts/release_create.py
-    - python3 scripts/release_upload.py "artifacts/xtools-v$VER-linux-x86_64.tar.gz" "Linux x86_64 (CLI + agent)"
-    - python3 scripts/release_upload.py "artifacts/xtools-v$VER-linux-x86_64-gui.AppImage" "Linux x86_64 GUI (AppImage + agent)"
+    - python3 scripts/release_upload.py "artifacts/xperf-v$VER-linux-x86_64.tar.gz" "Linux x86_64 (CLI + agent)"
+    - python3 scripts/release_upload.py "artifacts/xperf-v$VER-linux-x86_64-gui.AppImage" "Linux x86_64 GUI (AppImage + agent)"

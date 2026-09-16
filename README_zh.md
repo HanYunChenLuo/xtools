@@ -109,12 +109,12 @@ Android 开发工具集合。
 
 ## 下载
 
-预编译发布包在内部 GitLab：[Releases](https://gitlab.chehejia.com/ligraphic/xtools/-/releases)。
+预编译发布包在内部 GitLab：[Releases](https://gitlab.chehejia.com/ligraphic/xperf/-/releases)。
 
-- `xtools-vX.Y.Z-linux-x86_64.tar.gz`——Ubuntu 20.04+（glibc 2.31，CLI + agent）
-- `xtools-vX.Y.Z-linux-x86_64-gui.AppImage`——Ubuntu 22.04+（Tauri 2 GUI + 内置 agent）
-- `xtools-vX.Y.Z-macos-arm64.tar.gz` / `xtools-vX.Y.Z-macos-x86_64.tar.gz`——CLI + agent
-- `xtools-vX.Y.Z-macos-arm64-gui.dmg` / `xtools-vX.Y.Z-macos-x86_64-gui.dmg`——GUI + 内置 agent
+- `xperf-vX.Y.Z-linux-x86_64.tar.gz`——Ubuntu 20.04+（glibc 2.31，CLI + agent）
+- `xperf-vX.Y.Z-linux-x86_64-gui.AppImage`——Ubuntu 22.04+（Tauri 2 GUI + 内置 agent）
+- `xperf-vX.Y.Z-macos-arm64.tar.gz` / `xperf-vX.Y.Z-macos-x86_64.tar.gz`——CLI + agent
+- `xperf-vX.Y.Z-macos-arm64-gui.dmg` / `xperf-vX.Y.Z-macos-x86_64-gui.dmg`——GUI + 内置 agent
 
 CLI tar 包内含 `xperf-cli`、`agent/xperf-agent`；GUI AppImage/DMG 内含应用资源 `agent/xperf-agent`，运行时不编译 agent。
 macOS DMG 默认使用完整 ad-hoc bundle 签名以封印应用资源；正式对外分发仍需 Developer ID 签名并完成 Apple 公证，否则 Gatekeeper 可能阻止启动。

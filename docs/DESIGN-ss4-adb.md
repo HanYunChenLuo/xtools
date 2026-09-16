@@ -1,6 +1,6 @@
 # SS4（SA8797P）adb 桥接架构设计
 
-> **目标**：SS4 真机（接 hppc）上，xtools 的设备枚举/agent 部署/采样/深挖全链路
+> **目标**：SS4 真机（接 hppc）上，xperf 的设备枚举/agent 部署/采样/深挖全链路
 > 无感支持 SS4 的「MindRT（Linux 主控）+ Android（GVM）」双系统拓扑。
 >
 > **状态**：设计稿 v1.2（2026-09-10）。自 review 修正（冷却语义统一 /
@@ -63,7 +63,7 @@ push 文件到 Android：root+remount 后经 `localhost:5559` push（推 `/syste
 
 网络调试路径（算力盒子）：Linux `172.31.2.52`、Android `172.31.2.51` 直连
 （`adb connect 172.31.2.51:<port>`，⚠ 端口文档截图未给文字）。此路径无 MindRT
-网关，Android 直接以 `172.31.2.51:*` serial 出现——xtools 天然可用（见 §7）。
+网关，Android 直接以 `172.31.2.51:*` serial 出现——xperf 天然可用（见 §7）。
 
 **真机 `adb devices -l` 预期形态**（`platform/mod.rs` 现有单测 `test_detect_ss4`
 已编码，⚠ 待真机核对）：
@@ -105,7 +105,7 @@ SS4 打破它的点及影响面：
 
 否决的替代方案：
 
-- **B. 用户手动连接**（零代码）：按文档手工 forward+connect 后 xtools 才能工作。
+- **B. 用户手动连接**（零代码）：按文档手工 forward+connect 后 xperf 才能工作。
   否决理由：UX 差（每次 HU 上电都要人肉）、易错（端口/顺序）、GUI 无法自动发现、
   与「SS4 接 hppc 远程调试」的工作流不匹配。
 - **C. MindRT 内中转执行**：所有命令改写为 `adb -s <mindrt> shell adb -s 172.31.101.51:5555 …`
@@ -217,7 +217,7 @@ pub struct AdbDevice {
 ### 4.5 状态与生命周期
 
 - `BridgeState` 进程内静态；**跨会话持久化靠 adb server 侧事实**
-  （forward 规则 + connect 存活状态），重启 xtools/GUI 后 refresh 从
+  （forward 规则 + connect 存活状态），重启 xperf/GUI 后 refresh 从
   `forward --list` 恢复映射——与 SSH 远程设计 R10「规则由 server 持有」同源。
 - 不做退出清理（disconnect/forward --remove）：连接与规则常驻 adb server
   无害且可复用；`shutdown_remote` 亦不触碰（只管自己注册的 hop#2 映射）。

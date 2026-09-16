@@ -1,4 +1,4 @@
-//! xperf-cli：xtools 的 CLI 工具——对指定 Android 包名做 CPU/内存/FPS/频率/温度/GPU/
+//! xperf-cli：xperf 的 CLI 工具——对指定 Android 包名做 CPU/内存/FPS/频率/温度/GPU/
 //! IO/网络采样（设备端 agent 采集，流式 CSV + 退出图表），附带验证能力：阈值告警、
 //! 冷启动测量、时间轴打点、perfetto 深挖（--trace N 录制 + trace_processor SQL 归因）、
 //! simpleperf 函数热点（--stack N 调用栈采样，定位 CPU 热点函数）。
