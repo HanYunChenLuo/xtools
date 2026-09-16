@@ -3,7 +3,7 @@
 > **目标**：真机连在远端 Linux 机（`hppc`）上，本机（Mac）跑 GUI/CLI，
 > 经 SSH 完成采样、perfetto、simpleperf 全部功能。
 >
-> **状态**：设计稿 v2（2026-09-09），待实现。
+> **状态**：设计稿 v2（2026-09-09），实现已合入主线；本文保留架构与实测基线。
 > **文中所有机制结论均为 Mac↔hppc 真实拓扑实测**（设备物理接在 hppc），记录见附录 A。
 >
 > v1 曾据反向隧道误判「`forward` 端口在客户端侧监听」，导致 agent 通道设计错误；
@@ -55,6 +55,20 @@
 ## 2. 方案选型
 
 **采用**：adb server 前移 + SSH 隧道（本机 adb 客户端连 hppc 的 adb server）。
+
+### 2.1 桌面应用启动环境
+
+DMG/Finder 启动的 GUI 不会加载用户 shell profile，不能假设 `PATH` 包含 Android SDK 或
+Homebrew。host 工具路径按以下顺序解析：
+
+- `adb`：`XPERF_ADB` → `PATH` → `ANDROID_HOME/platform-tools/adb` →
+  `ANDROID_SDK_ROOT/platform-tools/adb` → `$HOME/Library/Android/sdk/platform-tools/adb` →
+  `$HOME/Android/Sdk/platform-tools/adb` → `/opt/homebrew/bin/adb` → `/usr/local/bin/adb`。
+- `ssh`：`XPERF_SSH` → `PATH` → `/usr/bin/ssh` → `/opt/homebrew/bin/ssh` →
+  `/usr/local/bin/ssh`。
+
+所有 adb 命令和 SSH ControlMaster/forward/check/exit 操作均使用上述解析结果，避免 GUI
+安装版与终端开发版行为不一致。
 
 三条替代方案已评估否决，完整论证见 [附录 B](#附录-b已否决方案)：
 
@@ -430,7 +444,9 @@ xperf-cli --remote hppc --device d1f39648c1f --cpu --trace 10
 
 - 默认「本机」，行为与现在一致；
 - 「＋」弹配置（host / adb 路径 / 端口），存 `~/.config/xperf/remotes.json`；
+- Finder/DMG 启动不加载 shell profile：本机 `adb`/`ssh` 使用 host 工具解析兜底（`XPERF_ADB`/`XPERF_SSH`、PATH、SDK/系统路径）；
 - 切换连接 = 停全部会话 → `shutdown_remote()` → `init_remote()` → 重建设备 tab；
+- 远程连接失败只刷新本机设备列表并保留原始错误，不再二次调用 `connect_remote(null)` 覆盖诊断；
 - 隧道状态进 status 栏（连接中 / 已连接 / 断开重连中）。
 
 新增 Tauri 命令（与既有 18 个并列，注册于 `xperf-gui/src/main.rs:1257`）：

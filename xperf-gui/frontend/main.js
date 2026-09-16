@@ -1659,13 +1659,14 @@ const remoteUI = {
       this.setGlobalStatus(host ? '已连接远程: ' + host : '本机');
     } catch (e) {
       const msg = (e && e.toString()) || '连接失败';
-      this.setGlobalStatus('连接失败: ' + msg);
-      // 连接失败：后端已回落本机，下拉复位并重建本机设备 tab
+      // init_remote 失败时 core 已保持本机传输；不要再次调用 connect_remote(null)，
+      // 否则真实错误会被“已切回本机”覆盖，DMG/Finder 启动时尤其难以诊断。
       sel.value = '';
       try {
-        const r = await invoke('connect_remote', { host: null });
+        const r = await invoke('list_devices');
         this.rebuildDevices(r.devices || []);
-      } catch (e2) { _diag('fallback local ERROR: ' + JSON.stringify(e2)); }
+      } catch (e2) { _diag('list local devices ERROR: ' + JSON.stringify(e2)); }
+      this.setGlobalStatus('远程连接失败（当前仍为本机）: ' + msg);
     } finally {
       sel.disabled = false;
     }

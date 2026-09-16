@@ -30,17 +30,58 @@ fn run_command_inner(cmd: &mut Command, label: &str) -> Result<ProcOutput> {
     })
 }
 
-/// 构造 adb 命令。本机恒为 adb **客户端**；远程模式经环境变量指向远端 server
-/// （`ADB_SERVER_SOCKET`，见 `crate::transport`；环境变量不参与 argv 顺序，
-/// 不与调用方追加的 `-s`/子命令位置冲突——这是不用 `-H/-P` 参数的原因）。
+/// Resolve the host-side adb executable when a desktop app was launched outside a shell.
+///
+/// Finder-launched Tauri applications do not load the shell profile, so `PATH` may not
+/// contain Android SDK platform-tools even when the terminal does. `XPERF_ADB` is an
+/// explicit override for nonstandard SDK installations.
+fn host_adb_path() -> std::path::PathBuf {
+    let mut candidates = Vec::new();
+    if let Some(path) = std::env::var_os("XPERF_ADB") {
+        candidates.push(std::path::PathBuf::from(path));
+    }
+    if let Some(path) = std::env::var_os("PATH") {
+        candidates.extend(std::env::split_paths(&path).map(|dir| dir.join("adb")));
+    }
+    for base in ["ANDROID_HOME", "ANDROID_SDK_ROOT"] {
+        if let Some(root) = std::env::var_os(base) {
+            candidates.push(std::path::PathBuf::from(root).join("platform-tools/adb"));
+        }
+    }
+    if let Some(home) = std::env::var_os("HOME") {
+        let home = std::path::PathBuf::from(home);
+        candidates.push(home.join("Library/Android/sdk/platform-tools/adb"));
+        candidates.push(home.join("Android/Sdk/platform-tools/adb"));
+    }
+    candidates.extend([
+        std::path::PathBuf::from("/opt/homebrew/bin/adb"),
+        std::path::PathBuf::from("/usr/local/bin/adb"),
+        std::path::PathBuf::from("/usr/bin/adb"),
+    ]);
+    candidates
+        .into_iter()
+        .find(|path| path.is_file())
+        .unwrap_or_else(|| std::path::PathBuf::from("adb"))
+}
+
+/// Build the host-side adb command, including the SSH server socket in remote mode.
 fn adb_command() -> Command {
-    let mut c = Command::new("adb"); // 恒本机 adb 二进制
+    let mut c = Command::new(host_adb_path());
     if matches!(crate::transport::transport(), crate::transport::Transport::Ssh(_)) {
         if let Some(p) = crate::transport::tunnel_server_port() {
             c.env("ADB_SERVER_SOCKET", format!("tcp:127.0.0.1:{p}"));
         }
     }
     c
+}
+
+/// Execute the resolved host-side adb with the supplied arguments.
+pub fn run_adb_version() -> Result<ProcOutput> {
+    let path = host_adb_path();
+    run_command_inner(
+        Command::new(&path).arg("version"),
+        &format!("本机 adb ({})", path.display()),
+    )
 }
 
 /// 执行 adb 命令（经 `adb_command` 构造：远程模式自动指向远端 server，

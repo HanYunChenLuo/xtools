@@ -45,7 +45,11 @@ down to ~50 ms are practical.
   (`--cold-start`), baseline save/compare (`--save-baseline` /
   `--compare-baseline`)
 - **SSH remote backend** (`--remote HOST`): device attached to a remote Linux
-  machine — sampling, deep-dive and capture all work through an SSH tunnel
+  machine — sampling, deep-dive and capture all work through an SSH tunnel.
+  Finder/DMG launches resolve host `adb` from `XPERF_ADB`, Android SDK environment variables,
+  the current `PATH`, and standard macOS SDK locations; `ssh` uses the same fallback strategy.
+  GUI errors remain visible as `Remote connection failed (still local): ...`; the UI no longer
+  replaces the original error with a second silent local fallback.
 - **Multi-device**: `--device SERIAL` (per-device sessions in the GUI)
 - **Data export**
   - Streaming CSV + charts under `/tmp/xperf/<package>/<timestamp>/{cpu,memory,fps,thread,...}/`

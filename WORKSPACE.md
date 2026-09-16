@@ -2,7 +2,7 @@
 
 > 本文件记录跨会话的待办事项（backlog）。每次会话的历史总结见 `SESSION.md`。
 > 完成一项就把状态改为 ✅ 并注明完成的 commit；新增想法随时追加。
-> 最后更新：2026-09-15：软件发布打包完成；v0.2.0 Release 已发布，三平台资产可下载
+> 最后更新：2026-09-16：新增 DMG/Finder 启动下 SSH 远程连接修复，待发布新 GUI DMG
 
 ## 当前状态速览
 
@@ -18,9 +18,11 @@
 - GUI：10 张折线图（GPU 显存独立图/独立开关，SS2MAX 平台禁用勾选）+ 实时数值面板 + Top 线程 + 峰值 + 冷启动面板 + 间隔档位下拉 + 实际周期标注 + 勾选即时生效（自动重启会话；默认勾选 CPU/内存/FPS）+ Perfetto 分析（独立 tab 报告 + 浏览器自动加载 + 每秒录制进度）+ **函数热点**（独立 tab + 每秒录制进度 + 浏览器火焰图）+ 暗/亮双主题
 - agent 部署：自动尝试 adb root（**仅车机平台**，XPERF_NO_AUTO_ROOT=1 旁路；hello 带 root 标志，非 root 按能力降级——WORKSPACE G 节矩阵）；src 树内任一 .rs mtime 变化自动重建
 - 测试：**全量全绿**（core 123+8 ignored（含 hppc 集成：隧道×2/init+acquire_root/logcat restart）：协议/流合并/hostchan/transport/trace/simpleperf/baseline/coldstart/设备 diff/auto-root 守卫/logcat（含文本过滤与秒死诊断差集）；xperf-cli 5：alerts；GUI 10：export_csv×2 + 基线×2 + 多会话隔离 + 远程配置等），clippy 零警告，**cargo doc 零 warning**（默认 lint 集 + missing_docs 三 crate）。**xrm 已于 2026-09-15 移出本仓库**（历史条目见 SESSION.md）
-- **SSH 远程后端（feature/ssh-remote 已合 main）**：`--remote hppc` 经 SSH 隧道连远端 adb server（hop#1 承载 adb 协议 + hop#2 每设备一条承载 agent 流），采样/trace/simpleperf/断连重连/GUI 连接切换全通；详见 CLAUDE.md「SSH 远程后端」与 `docs/DESIGN-ssh-remote.md`
+- **SSH 远程后端（feature/ssh-remote 已合 main）**：`--remote hppc` 经 SSH 隧道连远端 adb server（hop#1 承载 adb 协议 + hop#2 每设备一条承载 agent 流），采样/trace/simpleperf/断连重连/GUI 连接切换全通；DMG/Finder 启动补齐本机 adb/ssh 绝对路径解析，远程失败不再用二次本机切换覆盖原始错误；详见 CLAUDE.md「SSH 远程后端」与 `docs/DESIGN-ssh-remote.md`
 - 设备：SS3 6eb792dfb0f（adbd root，QNX GPU 通道 + 多设备并行已真机回归）；SS2MAX d1f39648c1f（adb root 可用；**多设备并行 + 冷启动 COLD 874ms 已真机验证**）；SS4 经 hppc 桥接为 localhost:5559（MindRT `42087266b1f` 中继；桥接/指标双适配完成，H 节）
 - **测试对象（555ffab 起统一）**：`example/apk/filament-gltf-viewer-v1.76.0-android.apk`（git-lfs 管理，包名 `com.google.android.filament.gltf`，入口 `.MainActivity`）——真机测试一律用它，不再用 svm。已装 SS3 + SS2MAX + SS4
+
+- [ ] **DMG 安装版 GUI SSH 远程连接修复发布**（实现待合并）：修复 Finder 启动 PATH 不含本机 `adb`/`ssh` 导致的远程初始化失败，以及前端二次 `connect_remote(null)` 覆盖原始错误；代码与文档已在 `fix/gui-dmg-ssh`，待用修复版 DMG 做 Finder 最小环境 + `--remote hppc` 实测后发布。
 
 ---
 
