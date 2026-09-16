@@ -22,7 +22,7 @@
 - 设备：SS3 6eb792dfb0f（adbd root，QNX GPU 通道 + 多设备并行已真机回归）；SS2MAX d1f39648c1f（adb root 可用；**多设备并行 + 冷启动 COLD 874ms 已真机验证**）；SS4 经 hppc 桥接为 localhost:5559（MindRT `42087266b1f` 中继；桥接/指标双适配完成，H 节）
 - **测试对象（555ffab 起统一）**：`example/apk/filament-gltf-viewer-v1.76.0-android.apk`（git-lfs 管理，包名 `com.google.android.filament.gltf`，入口 `.MainActivity`）——真机测试一律用它，不再用 svm。已装 SS3 + SS2MAX + SS4
 
-- [ ] **DMG 安装版 GUI SSH 远程连接修复发布**（实现待合并）：修复 Finder 启动 PATH 不含本机 `adb`/`ssh` 导致的远程初始化失败，以及前端二次 `connect_remote(null)` 覆盖原始错误；代码与文档已在 `fix/gui-dmg-ssh`。用户实测（c2032af DMG）远程可用但**连接间歇 30~80s**——449c472 定位并修复：根因非 DMG 产物而是 init_remote 旧实现顺序 5 次 SSH 握手 × 网络波动（单次握手 2.5~10s），establish 收敛为单次握手（远端预检走 mux，详见 DESIGN-ssh-remote §4.2a）+ 全链路 `utils::diag` 阶段计时；CLI 实测 3.5s→0.98s。待用 `artifacts/xtools-v0.2.1-macos-arm64-gui-sshfix2.dmg` 做 Finder 复测后合并发布。
+- [x] **DMG 安装版 GUI SSH 远程连接修复**（**已完成**，2026-09-16 合 main 9f441d8）：修复 Finder 启动 PATH 不含本机 `adb`/`ssh` 导致的远程初始化失败（c2032af），以及前端二次 `connect_remote(null)` 覆盖原始错误。用户实测首版 DMG 远程可用但**连接间歇 30~80s**——449c472 定位并修复：根因非 DMG 产物而是 init_remote 旧实现顺序 5 次 SSH 握手 × 网络波动（单次握手 2.5~10s），establish 收敛为单次握手（远端预检走 mux，详见 DESIGN-ssh-remote §4.2a）+ 全链路 `utils::diag` 阶段计时；CLI 实测 3.5s→0.98s，DMG（sshfix2）Finder 环境 connect_remote 841ms 用户确认。随下次版本 tag 发布。
 
 ---
 
