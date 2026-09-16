@@ -113,6 +113,7 @@ Android 开发工具集合。
 - `xtools-vX.Y.Z-macos-arm64-gui.dmg` / `xtools-vX.Y.Z-macos-x86_64-gui.dmg`——GUI + 内置 agent
 
 CLI tar 包内含 `xperf-cli`、`agent/xperf-agent`；GUI AppImage/DMG 内含应用资源 `agent/xperf-agent`，运行时不编译 agent。
+macOS DMG 默认使用完整 ad-hoc bundle 签名以封印应用资源；正式对外分发仍需 Developer ID 签名并完成 Apple 公证，否则 Gatekeeper 可能阻止启动。
 版本变更说明见 [CHANGELOG.md](CHANGELOG.md)。
 
 ## 构建

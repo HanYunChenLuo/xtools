@@ -2,6 +2,9 @@
   "bundle": {
     "resources": {
       "release-resources/agent/xperf-agent": "agent/xperf-agent"
+    },
+    "macOS": {
+      "signingIdentity": "-"
     }
   }
 }

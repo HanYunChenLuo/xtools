@@ -119,6 +119,7 @@ Prebuilt packages are published on the internal GitLab: [Releases](https://gitla
 
 CLI archives contain `xperf-cli` and `agent/xperf-agent`. GUI AppImage/DMG bundles
 `agent/xperf-agent` as an application resource and never compiles it at runtime.
+macOS DMGs use a complete ad-hoc bundle signature by default to seal application resources. Public distribution still requires a Developer ID signature and Apple notarization; otherwise Gatekeeper may block launch.
 Release notes live in [CHANGELOG.md](CHANGELOG.md).
 
 ## Building
