@@ -1394,8 +1394,6 @@ class DeviceSession {
         _diag('cleanBtn ERROR: ' + JSON.stringify(err));
       }
     });
-    // 问题反馈：唤起全局浮层（收集范围为全部设备最近 1h，与本设备页无绑定关系）
-    this.el('feedback-btn').addEventListener('click', () => feedbackUI.show());
   }
 }
 
@@ -1761,6 +1759,8 @@ const feedbackUI = {
   init() {
     const submitBtn = document.getElementById('fbSubmit');
     const loginBtn = document.getElementById('fbLoginBtn');
+    // 顶栏「问题反馈」按钮（全局入口，收集范围不随设备页变化）
+    document.getElementById('feedbackTopBtn').addEventListener('click', () => this.show());
     document.getElementById('fbCancel').addEventListener('click', () => this.hide());
     // 点击遮罩空白处关闭（点在表单内不关）
     document.getElementById('feedbackMask').addEventListener('click', (e) => {
