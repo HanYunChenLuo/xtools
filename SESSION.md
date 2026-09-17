@@ -5,6 +5,25 @@
 > 待办事项（backlog）在 `WORKSPACE.md` 维护，本文件只做历史追溯。
 > 新会话开始时可先读本文件了解近期上下文。
 
+## 2026-09-17：问题反馈（一键收集日志 → GitLab issue）
+
+**任务**：WORKSPACE I 节「问题反馈」——一键收集最近 1h xperf 证据打包上传内部 GitLab issue（project 39859）。
+
+**commit**（feature/feedback）：`ddba464`（core feedback.rs 收集+打包+上传+9 单测）→ `48783c4`（CLI --feedback）→ `7bc71e5`（GUI 按钮+浮层+submit_feedback 命令）→ `30818f9`（真机回归修复×2）。
+
+**实施期用户拍板**（相对 WORKSPACE 原方案的变更）：
+- **采集范围收敛为 xperf 自身证据**：设备 logcat 不自动采集（非工具日志），issue 正文模板引导用户手动 `adb logcat -d` 附加；排除了原方案的 logcat -t 回放与 A11/A16 兼容性验证负担
+- **打包/上传禁系统命令依赖**（跨平台稳定）：tar+flate2 纯 Rust 打包、reqwest::blocking+rustls（webpki 内置证书链，CI 免装 libssl-dev）上传；未引入系统 tar/curl 调用
+
+**关键结论**：
+- token 解析：`GITLAB_TOKEN` env > `~/.config/xperf/gitlab-token`（0600 建议）；**hppc `~/.git-credentials` 的 oauth2 token 实测可直接作 PRIVATE-TOKEN 完成 uploads+issues API**（本会话真实上传即走此路径）
+- GitLab `POST /projects/:id/issues` 带 `labels: "feedback"` 会自动创建不存在的 label；上传附件返回 `markdown` 字段直接嵌正文；413（实例 max_attachment_size 默认 10MB）回退 package registry PUT
+- 真机回归（--remote hppc）：本地无设备收集 ✅ / SSH 远程 3 设备 agent 日志（网关正确排除）✅ / SS3 gltf 采样后会话产物收集 ✅ / token 缺失 exit 1 + 归档路径提示 ✅ / **真实上传 issue #1 + 附件回下载可解包** ✅
+- **AX 新教训（重要）**：本机 WKWebView 实例的 AX 子树**冻结在启动早期快照**——递归 `UI elements of` 遍历也只能拿到快照（新插入的设备页/浮层不暴露，`AXEnhancedUserInterface` 设置被拒），但主题按钮点击后的 label 变化又可见（交互过的分支才活化）。**替代验证法：`keystroke`/`key code` 走 DOM 焦点链**——textarea `focus()` 后直接键入、Tab 序遍历按钮、Space 点击，反馈浮层全链路以此实测通过（diag 日志佐证：submit→收集→token 错误路径）。AppleScript 另一坑：`repeat with c in UI elements of el` 在 `tell System Events` 块外编译不过（"UI elements" 是其术语），须包进 tell 或用 tell 包裹的 handler
+- 真机回归顺带修复：无会话产物时 diag 日志暂存父目录未创建（报「读取失败」而非「不存在」）；CLI 归档大小恒显 MB 致小包显示 0.0
+
+**遗留**：GUI 侧栏「问题反馈」按钮的物理点击未目验（AX 树冻结所致；按钮存在与事件绑定由 DeviceSession 构造器完成佐证——三设备 packages loaded），留给用户一眼确认；issue #1 为自测件，用户查阅后可关闭。
+
 ## 2026-09-16（深夜）：AppImage Ubuntu 22.04 harfbuzz 符号崩溃修复
 
 **任务**：修复 WORKSPACE A 节「Linux AppImage 在某台 Ubuntu 22.04 启动失败」（libpango symbol lookup error）。
