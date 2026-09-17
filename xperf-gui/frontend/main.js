@@ -1649,12 +1649,12 @@ const remoteUI = {
     }
   },
 
-  async switchTo(host) {
+  async switchTo(host, password) {
     const sel = document.getElementById('remoteSelect');
     sel.disabled = true;
     this.setGlobalStatus(host ? '正在连接 ' + host + '…' : '正在切回本机…');
     try {
-      const r = await invoke('connect_remote', { host: host || null });
+      const r = await invoke('connect_remote', { host: host || null, password: password || null });
       this.rebuildDevices(r.devices || []);
       this.setGlobalStatus(host ? '已连接远程: ' + host : '本机');
     } catch (e) {
@@ -1695,14 +1695,23 @@ const remoteUI = {
     document.getElementById('rfSave').addEventListener('click', async () => {
       const name = document.getElementById('rfName').value.trim();
       const host = document.getElementById('rfHost').value.trim();
+      const user = document.getElementById('rfUser').value.trim();
+      const sshPort = parseInt(document.getElementById('rfSshPort').value, 10) || null;
+      const password = document.getElementById('rfPassword').value; // 不落盘，仅随连接走内存
+      const saveCfg = document.getElementById('rfSaveCfg').checked;
       const adb = document.getElementById('rfAdb').value.trim() || 'adb';
       const port = parseInt(document.getElementById('rfPort').value, 10) || 5037;
-      if (!name || !host) { this.setGlobalStatus('远程配置：名称与 ssh 目标不能为空'); return; }
+      if (!name || !host) { this.setGlobalStatus('远程配置：名称与主机不能为空'); return; }
       try {
-        await invoke('save_remote', { cfg: { name, host, adb_path: adb, remote_port: port } });
+        // 保存（可选写 ssh config）→ 立即连接（密码随行，仅内存驻留）
+        const effective = await invoke('add_ssh_host', {
+          cfg: { name, host, user: user || null, ssh_port: sshPort,
+                 adb_path: adb, remote_port: port, save_to_ssh_config: saveCfg },
+        });
         form.classList.add('hidden');
+        document.getElementById('rfPassword').value = '';
         await this.populate(null);
-        this.setGlobalStatus('已保存远程: ' + name);
+        await this.switchTo(effective, password || null);
       } catch (e) {
         this.setGlobalStatus('保存失败: ' + e);
       }

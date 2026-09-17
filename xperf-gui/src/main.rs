@@ -1413,6 +1413,65 @@ fn save_remote(cfg: RemoteConfig) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
+/// 「添加主机」表单参数（密码只用于本次连接的内存驻留，**永不落盘**——
+/// 不落 remotes.json、不落 ssh config、不进 diag/日志）。
+#[derive(serde::Deserialize)]
+pub struct NewSshHost {
+    /// 别名（勾保存时成为 ssh config 的 `Host` 行；同时是 remotes.json 的 name）
+    name: String,
+    /// 主机名或 IP
+    host: String,
+    /// 登录用户名（空 = 当前用户/ssh config 默认）
+    user: Option<String>,
+    /// SSH 端口（None/22 = 默认，省略 Port 行）
+    ssh_port: Option<u16>,
+    /// 远端 adb 路径（空 = 自动探测）
+    adb_path: Option<String>,
+    /// 远端 adb server 端口（None = 5037）
+    remote_port: Option<u16>,
+    /// 是否把 Host 条目追加到 ~/.ssh/config（无秘密——密码与密钥永不写入）
+    save_to_ssh_config: bool,
+}
+
+/// 添加 SSH 主机：校验 → 可选写 ssh config → 落 remotes.json。
+/// 返回前端应使用的连接目标（写了 config 用别名，否则 `user@host` 形式）。
+/// 密码不在此处理——连接密码由 `connect_remote` 的 password 参数走内存通道。
+#[tauri::command]
+fn add_ssh_host(cfg: NewSshHost) -> Result<String, String> {
+    let name = cfg.name.trim();
+    let host = cfg.host.trim();
+    if name.is_empty() || host.is_empty() {
+        return Err("名称与主机不能为空".into());
+    }
+    // 写了 ssh config 后连接目标用别名（Host 条目生效）；否则用 user@host 直写形式
+    let effective_host = if cfg.save_to_ssh_config {
+        xperf_core::save_ssh_config_host(
+            name,
+            host,
+            cfg.user.as_deref(),
+            cfg.ssh_port,
+        )
+        .map(|_| name.to_string())
+        .map_err(|e| format!("{e:#}"))?
+    } else {
+        match cfg.user.as_deref().map(str::trim).filter(|u| !u.is_empty()) {
+            Some(u) => format!("{u}@{host}"),
+            None => host.to_string(),
+        }
+    };
+    save_remote(RemoteConfig {
+        name: name.to_string(),
+        host: effective_host.clone(),
+        adb_path: cfg
+            .adb_path
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "adb".into()),
+        remote_port: cfg.remote_port.unwrap_or(xperf_core::SshTarget::DEFAULT_ADB_PORT),
+    })?;
+    Ok(effective_host)
+}
+
 /// 当前远程状态：`{mode: "local"|"ssh", host, alive}`（顶栏状态/启动回填用）
 #[tauri::command]
 fn remote_status() -> serde_json::Value {
@@ -1437,6 +1496,7 @@ async fn connect_remote(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
     host: Option<String>,
+    password: Option<String>,
 ) -> Result<serde_json::Value, String> {
     let emit = |state_s: &str, host: Option<&str>, message: String| {
         let _ = app.emit(
@@ -1451,6 +1511,9 @@ async fn connect_remote(
         }
     }
     xperf_core::shutdown_remote();
+    // 密码在 shutdown_remote（会清密码）之后设置；仅进程内存驻留，会话结束即清。
+    // None = 该主机走免密（ssh config/密钥/agent），同时清掉上一个主机的残留密码。
+    xperf_core::set_ssh_password(password);
 
     let Some(host) = host else {
         emit("local", None, "已切回本机".to_string());
@@ -1965,6 +2028,7 @@ fn main() {
             list_remotes,
             list_ssh_hosts,
             save_remote,
+            add_ssh_host,
             connect_remote,
             remote_status,
             resize_default
