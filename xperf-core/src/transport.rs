@@ -1030,12 +1030,25 @@ mod tests {
 
     #[test]
     fn test_pick_free_port() {
+        // p1 持有监听再取 p2——两次裸取时 OS 可能复用同一临时端口（实测偶发 flake）
         let p1 = pick_free_port().unwrap();
+        let _hold = TcpListener::bind(("127.0.0.1", p1)).unwrap();
         let p2 = pick_free_port().unwrap();
         assert!(p1 > 0 && p2 > 0);
         assert_ne!(p1, p2);
-        // 取出后可重新绑定（TOCTOU 窗口内无占用者时）
-        TcpListener::bind(("127.0.0.1", p1)).unwrap();
+    }
+
+    #[test]
+    fn test_master_ssh_args_ssh_port() {
+        let target = SshTarget::new("box").with_ssh_port(2222);
+        let args = master_ssh_args(std::path::Path::new("/tmp/ctl"), 51234, &target, false);
+        let s = args.join(" ");
+        assert!(s.contains("-p 2222"), "自定义 SSH 端口应产 -p: {s}");
+        assert_eq!(args.last().unwrap(), "box", "-p 后 host 仍须在末位: {s}");
+        // 无 ssh_port 时无 -p（默认 22 交给 ssh/config）
+        let t22 = SshTarget::new("box");
+        let a22 = master_ssh_args(std::path::Path::new("/tmp/ctl"), 1, &t22, false);
+        assert!(!a22.iter().any(|a| a == "-p"), "{a22:?}");
     }
 
     #[test]
