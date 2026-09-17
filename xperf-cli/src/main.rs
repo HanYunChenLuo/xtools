@@ -25,7 +25,7 @@ use xperf_core::simpleperf;
 #[command(version, about = "XPerformance Monitor - Android process CPU/memory monitor", long_about = None)]
 struct Args {
     /// Package name to monitor
-    #[arg(short, long, required_unless_present_any = ["clean_cache", "update_simpleperf_scripts", "mirror", "screenshot", "record", "logcat", "feedback"])]
+    #[arg(short, long, required_unless_present_any = ["clean_cache", "update_simpleperf_scripts", "mirror", "screenshot", "record", "logcat", "feedback", "gitlab_login", "gitlab_logout"])]
     package: Option<String>,
 
     /// 目标设备 serial（多台设备同连时必须指定，如 `adb devices` 列出的 6eb792dfb0f；
@@ -167,9 +167,18 @@ struct Args {
     /// 问题反馈：收集最近 1 小时 xperf 相关日志与产物（采样 CSV/trace 与 simpleperf
     /// 报告/截屏/GUI 诊断日志/各设备 agent 日志/环境信息），逐项自检后打包 tar.gz
     /// 上传内部 GitLab issue 并打印链接。DESC 为一句话场景摘要（可空串）。
-    /// token：GITLAB_TOKEN 环境变量或 ~/.config/xperf/gitlab-token 文件（api 权限）
+    /// 凭证：GITLAB_TOKEN env > ~/.config/xperf/gitlab-token（PAT）> OAuth 登录态
     #[arg(long, value_name = "DESC")]
     feedback: Option<String>,
+
+    /// GitLab OAuth 登录（浏览器授权码 + PKCE，一次授权长期有效，token 自动刷新）。
+    /// 登录后 --feedback 以本人身份创建 issue；无头环境请用 PAT（见 --feedback 说明）
+    #[arg(long)]
+    gitlab_login: bool,
+
+    /// GitLab 退出登录（删除本地 token 文件）
+    #[arg(long)]
+    gitlab_logout: bool,
 }
 
 /// 问题反馈（--feedback）：收集 → 打印自检清单 → 上传。返回 issue URL；
@@ -1686,6 +1695,32 @@ async fn main() -> Result<()> {
         eprintln!();
         println!("{msg}");
         return Ok(());
+    }
+    // --gitlab-login / --gitlab-logout：OAuth 登录态管理（纯 GitLab API，与设备/远程无关）
+    if args.gitlab_logout {
+        match xperf_core::oauth::logout()? {
+            true => println!("已退出 GitLab 登录（本地 token 已删除）"),
+            false => println!("当前无 OAuth 登录态"),
+        }
+        return Ok(());
+    }
+    if args.gitlab_login {
+        println!("即将打开浏览器完成 GitLab 授权（10 分钟内）…");
+        let r = tokio::task::spawn_blocking(xperf_core::oauth::login).await;
+        return match r {
+            Ok(Ok(who)) => {
+                println!("✅ 已登录: {who}（后续 --feedback 将以本人身份创建 issue）");
+                Ok(())
+            }
+            Ok(Err(e)) => {
+                eprintln!("❌ 登录失败: {e:#}");
+                std::process::exit(1);
+            }
+            Err(e) => {
+                eprintln!("❌ 登录线程异常: {e}");
+                std::process::exit(1);
+            }
+        };
     }
     // 监控流程必带 --package（clap required_unless_present 已保证；--mirror/--screenshot/
     // --record 单独使用时除外）

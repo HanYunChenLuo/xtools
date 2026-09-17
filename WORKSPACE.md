@@ -2,7 +2,7 @@
 
 > 本文件记录跨会话的待办事项（backlog）。每次会话的历史总结见 `SESSION.md`。
 > 完成一项就把状态改为 ✅ 并注明完成的 commit；新增想法随时追加。
-> 最后更新：2026-09-17：问题反馈功能完成（feature/feedback：core 收集打包上传 + CLI --feedback + GUI 按钮浮层，真机含真实上传 issue #1 全通；前序：AppImage harfbuzz 修复 d75108f）
+> 最后更新：2026-09-17 午：问题反馈完成 + GitLab OAuth 登录（feature/gitlab-oauth：issue 作者=操作者本人，浏览器授权码+PKCE，真机全链含刷新验证；前序：反馈主体 feature/feedback 合 main ed2dc0e）
 
 ## 当前状态速览
 

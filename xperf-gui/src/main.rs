@@ -775,6 +775,46 @@ async fn submit_feedback(description: String) -> Result<String, String> {
     Ok(url)
 }
 
+/// 反馈浮层身份行：`{kind: "none"|"pat"|"oauth", name?, username?}`。
+/// PAT 不联网预检（身份即 PAT 属主，提交时自然体现）；OAuth 显示登录时缓存的身份。
+#[tauri::command]
+fn gitlab_auth_status() -> serde_json::Value {
+    if std::env::var("GITLAB_TOKEN").ok().filter(|t| !t.trim().is_empty()).is_some() {
+        return serde_json::json!({"kind": "pat", "source": "GITLAB_TOKEN 环境变量"});
+    }
+    let token_file = std::env::var_os("HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join(".config/xperf/gitlab-token");
+    if std::fs::read_to_string(&token_file).ok().filter(|s| !s.trim().is_empty()).is_some() {
+        return serde_json::json!({"kind": "pat", "source": "PAT 文件"});
+    }
+    if let Some(id) = xperf_core::oauth::status() {
+        return serde_json::json!({"kind": "oauth", "name": id.name, "username": id.username});
+    }
+    serde_json::json!({"kind": "none"})
+}
+
+/// GitLab OAuth 登录（浮层「登录 GitLab」按钮）：打开浏览器授权，阻塞至回调/超时，
+/// 返回身份显示串。须在阻塞线程跑（core login 内含回环监听 + reqwest::blocking）。
+#[tauri::command]
+async fn gitlab_login() -> Result<String, String> {
+    tokio::task::spawn_blocking(xperf_core::oauth::login)
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| format!("{e:#}"))
+}
+
+/// GitLab 退出登录（删除本地 OAuth token 文件；PAT 不受影响）
+#[tauri::command]
+fn gitlab_logout() -> Result<String, String> {
+    match xperf_core::oauth::logout() {
+        Ok(true) => Ok("已退出登录".to_string()),
+        Ok(false) => Ok("当前无 OAuth 登录态".to_string()),
+        Err(e) => Err(format!("{e:#}")),
+    }
+}
+
 /// 更新 simpleperf 火焰图脚本与双平台 report 库（从 AOSP 强制重新拉取，覆盖
 /// `xperf-core/simpleperf_scripts/` 的 vendor 文件；git 提交后同步到其他机器）。
 /// 逐 MB 进度经 `scripts-update` 事件推给前端（stage: progress/done；percent 为
@@ -1898,6 +1938,9 @@ fn main() {
             open_stack_html,
             clean_cache,
             submit_feedback,
+            gitlab_auth_status,
+            gitlab_login,
+            gitlab_logout,
             update_simpleperf_scripts,
             diag_log,
             list_packages,

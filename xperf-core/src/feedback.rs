@@ -117,16 +117,16 @@ pub fn collect(description: &str) -> Result<FeedbackBundle> {
 /// 失败返回 Err（错误信息含归档路径提示）；归档文件不删除。
 /// 须在非 tokio runtime 线程调用（`reqwest::blocking`）。
 pub fn submit(bundle: &FeedbackBundle) -> Result<String> {
-    let token = resolve_token()?;
+    let auth = resolve_auth()?;
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(180))
         .build()
         .context("构建 HTTP client 失败")?;
 
-    let attachment = upload_attachment(&client, &token, &bundle.archive)
+    let attachment = upload_attachment(&client, &auth, &bundle.archive)
         .context("上传归档失败（本地归档保留，可手动附加到 issue）")?;
     let body = format!("{}\n\n## 附件\n\n{}\n", bundle.body, attachment);
-    create_issue(&client, &token, &bundle.title, &body).context("创建 issue 失败（本地归档保留，可手动建 issue 附加）")
+    create_issue(&client, &auth, &bundle.title, &body).context("创建 issue 失败（本地归档保留，可手动建 issue 附加）")
 }
 
 // ==================== 收集 ====================
@@ -498,12 +498,24 @@ fn gitlab_project_id() -> String {
         .unwrap_or_else(|| DEFAULT_PROJECT_ID.into())
 }
 
-/// 解析 GitLab token：`GITLAB_TOKEN` 环境变量 > `~/.config/xperf/gitlab-token` 文件。
-pub fn resolve_token() -> Result<String> {
-    resolve_token_from(
+/// 解析 GitLab 凭证（优先级：`GITLAB_TOKEN` env > `~/.config/xperf/gitlab-token` PAT 文件
+/// > OAuth 已登录 token——临期自动刷新）。三者皆无时报错并指引三条路径。
+pub fn resolve_auth() -> Result<crate::oauth::GitlabAuth> {
+    if let Some(t) = resolve_token_from(
         std::env::var("GITLAB_TOKEN").ok().as_deref(),
         &token_file_path(),
-    )
+    ) {
+        return Ok(crate::oauth::GitlabAuth::Pat(t));
+    }
+    if let Some(t) = crate::oauth::current_access_token()? {
+        return Ok(crate::oauth::GitlabAuth::OAuth(t));
+    }
+    Err(anyhow!(
+        "未找到 GitLab 凭证，三条路径任选：① GITLAB_TOKEN 环境变量（api 权限 PAT）；\
+         ② 将 PAT 写入 {}（建议 chmod 600）；③ OAuth 登录（GUI 反馈浮层「登录 GitLab」\
+         或 CLI `xperf-cli --gitlab-login`）",
+        token_file_path().display()
+    ))
 }
 
 /// token 文件路径（`~/.config/xperf/gitlab-token`，与 remotes.json 同目录约定）
@@ -514,31 +526,28 @@ fn token_file_path() -> PathBuf {
         .join(".config/xperf/gitlab-token")
 }
 
-/// [`resolve_token`] 的纯函数内核（单测可注入）
-fn resolve_token_from(env: Option<&str>, token_file: &Path) -> Result<String> {
+/// PAT 解析的纯函数内核（单测可注入）：env > 文件
+fn resolve_token_from(env: Option<&str>, token_file: &Path) -> Option<String> {
     if let Some(t) = env.map(str::trim).filter(|t| !t.is_empty()) {
-        return Ok(t.to_string());
+        return Some(t.to_string());
     }
     if let Ok(content) = fs::read_to_string(token_file) {
         let t = content.trim();
         if !t.is_empty() {
-            return Ok(t.to_string());
+            return Some(t.to_string());
         }
     }
-    Err(anyhow!(
-        "未找到 GitLab token（api 权限 PAT）：请设置 GITLAB_TOKEN 环境变量，\
-         或将 token 写入 {}（建议 chmod 600）",
-        token_file.display()
-    ))
+    None
 }
 
 /// 上传归档为 issue 附件；超过 `max_attachment_size`（413）时回退 package registry。
 /// 返回可嵌入 issue 正文的 markdown 链接。
 fn upload_attachment(
     client: &reqwest::blocking::Client,
-    token: &str,
+    auth: &crate::oauth::GitlabAuth,
     archive: &Path,
 ) -> Result<String> {
+    let (hname, hval) = auth.header();
     let fname = archive
         .file_name()
         .and_then(|s| s.to_str())
@@ -549,7 +558,7 @@ fn upload_attachment(
     let part = reqwest::blocking::multipart::Part::bytes(bytes.clone()).file_name(fname.clone());
     let resp = client
         .post(&url)
-        .header("PRIVATE-TOKEN", token)
+        .header(hname, &hval)
         .multipart(reqwest::blocking::multipart::Form::new().part("file", part))
         .send()
         .context("uploads 请求发送失败")?;
@@ -565,7 +574,7 @@ fn upload_attachment(
         );
         let r2 = client
             .put(&reg_url)
-            .header("PRIVATE-TOKEN", token)
+            .header(hname, &hval)
             .body(bytes)
             .send()
             .context("package registry 请求发送失败")?;
@@ -589,11 +598,12 @@ fn upload_attachment(
 /// 创建 issue（labels 不被实例接受时去 labels 重试一次），返回 issue web URL。
 fn create_issue(
     client: &reqwest::blocking::Client,
-    token: &str,
+    auth: &crate::oauth::GitlabAuth,
     title: &str,
     body: &str,
 ) -> Result<String> {
     let url = format!("{}/projects/{}/issues", gitlab_api(), gitlab_project_id());
+    let (hname, hval) = auth.header();
     for labels in ["feedback", ""] {
         let mut payload = serde_json::json!({ "title": title, "description": body });
         if !labels.is_empty() {
@@ -601,7 +611,7 @@ fn create_issue(
         }
         let resp = client
             .post(&url)
-            .header("PRIVATE-TOKEN", token)
+            .header(hname, &hval)
             .json(&payload)
             .send()
             .context("issues 请求发送失败")?;
@@ -856,13 +866,12 @@ mod tests {
         let token_file = dir.join("gitlab-token");
         // env 优先
         write_file(&token_file, b"file-token\n");
-        assert_eq!(resolve_token_from(Some(" env-token "), &token_file).unwrap(), "env-token");
+        assert_eq!(resolve_token_from(Some(" env-token "), &token_file).as_deref(), Some("env-token"));
         // 文件兜底（去空白）
-        assert_eq!(resolve_token_from(None, &token_file).unwrap(), "file-token");
-        assert_eq!(resolve_token_from(Some("  "), &token_file).unwrap(), "file-token");
-        // 均无 → 报错且指引文件路径
-        let err = resolve_token_from(None, &dir.join("nonexist")).unwrap_err().to_string();
-        assert!(err.contains("GITLAB_TOKEN"), "错误应指引环境变量: {err}");
+        assert_eq!(resolve_token_from(None, &token_file).as_deref(), Some("file-token"));
+        assert_eq!(resolve_token_from(Some("  "), &token_file).as_deref(), Some("file-token"));
+        // 均无 → None（由 resolve_auth 统一报错指引）
+        assert!(resolve_token_from(None, &dir.join("nonexist")).is_none());
         let _ = fs::remove_dir_all(&dir);
     }
 

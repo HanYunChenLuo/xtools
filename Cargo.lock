@@ -5946,13 +5946,16 @@ name = "xperf-core"
 version = "0.2.1"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "chrono",
  "colored",
  "flate2",
+ "getrandom 0.2.15",
  "libc",
  "reqwest",
  "serde",
  "serde_json",
+ "sha2",
  "tar",
  "tokio",
 ]

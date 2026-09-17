@@ -36,6 +36,11 @@
   <div id="feedbackMask" class="hidden">
     <div id="feedbackForm">
       <h3>问题反馈</h3>
+      <div class="fb-auth">
+        <span id="fbIdentity">正在查询凭证…</span>
+        <button id="fbLoginBtn" class="small hidden">登录 GitLab</button>
+        <button id="fbLogoutBtn" class="small hidden">退出登录</button>
+      </div>
       <div class="fb-hint">
         将收集最近 1 小时的 xperf 日志与产物（采样 CSV、分析报告、诊断日志、各设备 agent 日志、环境信息），
         打包上传内部 GitLab issue。设备 logcat 不自动采集——如需要，issue 创建后按正文指引手动附加。
