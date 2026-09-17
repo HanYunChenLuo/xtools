@@ -15,6 +15,7 @@
 - 根因：`f4f285d`（GUI 发布打包）把 dev 路径的 `ensure_agent_built()` 换成 `bundled_agent_path()`，回退分支以 `cfg!(debug_assertions)` 判定开发运行——`cargo run --release` 是 release profile 的**开发运行**（无打包资源），被误判为发布包缺资源
 - 修复：开发判定改「编译期 workspace 是否存在」——GUI 资源缺失且构建机 workspace 在 → 回退 `ensure_agent_built`（恢复 f4f285d 之前的自动构建行为，**任意 profile**）；发布包用户机器 workspace 必不存在 → 保持缺资源报错、不触发 Cargo/NDK（发布约束不变）；顺带修文案 typo（`agent/ xperf-agent` 多空格）
 - **真机端到端**（`./target/release/xperf-gui --remote hppc --device 6eb792dfb0f --package com.google.android.filament.gltf --cpu --memory --fps` 自动启动）：agent 启动（8 核 root）+ CPU/内存/FPS 三 CSV 流式落盘（CPU ~25%/PSS 646MB 含 DMA-BUF 533MB）+ 退出后 daemon 空载自杀**零残留**
+- **`cargo install` 场景实测可用**：`cargo install --path xperf-gui`（前端纯静态无 node 步骤，~51s）→ `~/.cargo/bin/xperf-gui` 从 home 目录（非 workspace CWD）`--remote` 自动启动采样全通（固化绝对路径解析 agent，CPU ~26%）→ 退出干净，已卸载复原。边界推演：`--git` 安装会在 cargo checkout 内构建 agent（可用）；registry 安装（无 workspace 根）落到缺资源报错——文案「请重新安装完整 GUI 包」对该场景略不贴切（内部 GitLab 工具本就无 registry 发布，不修）
 - 验证：core 149+8 全绿（含新增 `test_workspace_root_points_at_real_workspace`）、cargo doc 默认 lint 集 + core/gui missing_docs 全零
 - 勘察注意：① `adb shell "pgrep -f xperf-agent"` 会**自匹配 shell 命令行**出假 pid，验证残留用 `ps -A -o PID,NAME | grep xperf`；② macOS 上 CLI/GUI 共用的 `csvstream::data_root()` = `env::temp_dir()/xperf` 落在用户级 `$TMPDIR`（/var/folders/...）而非 /tmp（Linux 才是 /tmp），验证产物别看错目录
 
