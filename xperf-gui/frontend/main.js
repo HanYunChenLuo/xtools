@@ -1650,7 +1650,9 @@ const remoteUI = {
     }
   },
 
-  // 认证失败重试：预填表单（只欠输密码）
+  // 认证失败重试：预填表单（只欠输密码）。target 可能是 remotes.json 的
+  // name/host（可全量预填），也可能是 ssh config 来源的下拉项（无保存配置，
+  // 仅预填目标本身）
   reopenForPassword(target) {
     const form = document.getElementById('remoteForm');
     const r = (this.remotes || []).find(r => r.name === target || r.host === target);
@@ -1660,6 +1662,9 @@ const remoteUI = {
       document.getElementById('rfAdb').value = r.adb_path || '';
       document.getElementById('rfPort').value = r.remote_port || 5037;
       if (r.ssh_port) document.getElementById('rfSshPort').value = r.ssh_port;
+    } else {
+      document.getElementById('rfName').value = target;
+      document.getElementById('rfHost').value = target;
     }
     form.classList.remove('hidden');
     document.getElementById('rfPassword').focus();

@@ -108,7 +108,7 @@ impl SshTunnel {
             crate::utils::diag(&format!(
                 "tunnel establish ② master spawn 端口 {port}: {:?} ok={ok}{}",
                 t_master.elapsed(),
-                if stderr_tail.is_empty() { String::new() } else { format!(" stderr={}", &stderr_tail[..stderr_tail.len().min(200)]) }
+                if stderr_tail.is_empty() { String::new() } else { format!(" stderr={}", stderr_tail.chars().take(200).collect::<String>()) }
             ));
             if !ok {
                 if password_mode && is_auth_failure(&stderr_tail) {
