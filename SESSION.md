@@ -5,6 +5,21 @@
 > 待办事项（backlog）在 `WORKSPACE.md` 维护，本文件只做历史追溯。
 > 新会话开始时可先读本文件了解近期上下文。
 
+## 2026-09-17（傍晚，续）：密码错误即停 + 三轮 review 修复 + 测试覆盖补齐 + 版本号统一唯一出处
+
+**任务**：SSH 密码功能收尾 review 链 + 版本号管理优化（用户提出：一次发版要改多处，能否统一出处）。
+
+**commit**（均直接/分支合 main）：`ed2f353`（密码认证失败立即终止重试循环）→ `02bc095`（review 三修复：stderr 字节切片 panic 隐患/表单预填兜底/文案）→ `2f7ce7a`（ssh_port 补测 + pick_free_port flake）→ `a4977a5`（版本号统一）。
+
+**关键结论**：
+- **密码错误即停**（用户拍板）：`is_auth_failure` 命中即 kill master 返回——不占服务器 MaxAuthTries 配额；网络类失败保持 3 轮重试
+- **review 三修复**：diag stderr 截断 `&s[..200]` 在多字节 UTF-8 边界 panic（错误处理路径最不该崩）→ `chars().take(200)`；ssh config 来源下拉项认证失败重开表单不预填 → 兜底预填目标本身；adb 路径 placeholder 与 NewSshHost 文档矛盾 → 对齐
+- **测试覆盖补齐**：`master_ssh_args` 的 ssh_port `-p` 分支此前零单测（review 发现）；`pick_free_port` 两次裸取 OS 可复用同端口（实测偶发 flake）→ 持有监听再取
+- **版本号统一**：5 出处（4 crate + tauri.conf.json）人肉同步 → 根 `[workspace.package]` 唯一出处。tauri.conf.json 删 version 后 Tauri 回落到 CARGO_PKG_VERSION——**tauri-codegen-2.2.0 context.rs:273-277 源码实锚**；GUI 新测试真调 `generate_context!` 锁整条回落链；validate:tag 加「tauri.conf 手写 version 即拦」防回归；CI/scripts 5 处 sed 收敛读根。发版从改 5 处变 1 处 + CHANGELOG
+- 顺带修正文档偏差：CLAUDE.md 声称 validate:tag 校验「crate 版本一致」，旧实现只查 xperf-cli——workspace 化后物理不可能不一致
+
+**遗留**：OAuth 并发刷新竞态恢复逻辑无单测（需 mock HTTP 层，已记录）；GUI 表单物理点击目验项同前（AX 冻结）；下个 tag 发版时自然实证 DMG productVersion 回落链。
+
 ## 2026-09-17（下午）：SSH 远程支持账号+IP+密码登录 + ssh config 保存
 
 **任务**：GUI 远程登录此前只认 ssh 别名（须预先配免密）——支持 用户名+IP+密码 直连；可选把登录信息存进 ssh config 方便复用。
