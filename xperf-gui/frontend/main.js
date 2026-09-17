@@ -1724,16 +1724,70 @@ const feedbackUI = {
   show() {
     document.getElementById('feedbackMask').classList.remove('hidden');
     document.getElementById('fbDesc').focus();
+    this.refreshAuth();
   },
   hide() {
     document.getElementById('feedbackMask').classList.add('hidden');
   },
+  // 身份行：PAT（env/文件）> OAuth 登录态 > 未配置（红字提示 + 登录按钮）
+  async refreshAuth() {
+    const identity = document.getElementById('fbIdentity');
+    const loginBtn = document.getElementById('fbLoginBtn');
+    const logoutBtn = document.getElementById('fbLogoutBtn');
+    const authRow = document.querySelector('#feedbackForm .fb-auth');
+    try {
+      const st = await invoke('gitlab_auth_status');
+      if (st.kind === 'pat') {
+        identity.textContent = '将以 PAT（' + st.source + '）属主身份创建 issue（优先级高于 OAuth）';
+        authRow.classList.remove('fb-warn');
+        loginBtn.classList.add('hidden');
+        logoutBtn.classList.add('hidden');
+      } else if (st.kind === 'oauth') {
+        identity.textContent = '将以 ' + st.name + '（@' + st.username + '）身份创建 issue';
+        authRow.classList.remove('fb-warn');
+        loginBtn.classList.add('hidden');
+        logoutBtn.classList.remove('hidden');
+      } else {
+        identity.textContent = '未配置 GitLab 凭证——提交会失败；点击右侧「登录 GitLab」（浏览器授权一次）';
+        authRow.classList.add('fb-warn');
+        loginBtn.classList.remove('hidden');
+        logoutBtn.classList.add('hidden');
+      }
+    } catch (e) {
+      identity.textContent = '凭证状态查询失败: ' + e;
+      _diag('gitlab_auth_status ERROR: ' + JSON.stringify(e));
+    }
+  },
   init() {
     const submitBtn = document.getElementById('fbSubmit');
+    const loginBtn = document.getElementById('fbLoginBtn');
     document.getElementById('fbCancel').addEventListener('click', () => this.hide());
     // 点击遮罩空白处关闭（点在表单内不关）
     document.getElementById('feedbackMask').addEventListener('click', (e) => {
       if (e.target.id === 'feedbackMask') this.hide();
+    });
+    // OAuth 登录：后端起回环监听并打开浏览器，promise 挂起至回调/超时
+    loginBtn.addEventListener('click', async () => {
+      loginBtn.disabled = true;
+      document.getElementById('fbIdentity').textContent = '请在浏览器完成授权（180s 内）…';
+      try {
+        const who = await invoke('gitlab_login');
+        _diag('gitlab_login OK: ' + who);
+      } catch (e) {
+        remoteUI.setGlobalStatus('GitLab 登录失败: ' + (e && e.toString()));
+        _diag('gitlab_login ERROR: ' + JSON.stringify(e));
+      } finally {
+        loginBtn.disabled = false;
+        this.refreshAuth();
+      }
+    });
+    document.getElementById('fbLogoutBtn').addEventListener('click', async () => {
+      try {
+        await invoke('gitlab_logout');
+      } catch (e) {
+        remoteUI.setGlobalStatus('退出登录失败: ' + (e && e.toString()));
+      }
+      this.refreshAuth();
     });
     submitBtn.addEventListener('click', async () => {
       const desc = document.getElementById('fbDesc').value.trim();
