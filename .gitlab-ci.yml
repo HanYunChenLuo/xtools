@@ -84,9 +84,14 @@ validate:tag:
       if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
         echo "tag 须为 vX.Y.Z（v 前缀语义化版本），当前: $TAG"; exit 1
       fi
-      CARGO_VER=$(sed -n 's/^version = "\(.*\)"$/\1/p' xperf-cli/Cargo.toml | head -1)
+      # 版本唯一出处 = 根 Cargo.toml [workspace.package]（成员 version.workspace 继承；
+      # tauri.conf.json 不写 version，由 Tauri 回落到 xperf-gui/Cargo.toml）
+      CARGO_VER=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
       if [ "$VER" != "$CARGO_VER" ]; then
-        echo "tag 版本 $VER 与 xperf-cli/Cargo.toml 的 $CARGO_VER 不一致（先 bump 版本再打 tag）"; exit 1
+        echo "tag 版本 $VER 与根 Cargo.toml 的 $CARGO_VER 不一致（先 bump 版本再打 tag）"; exit 1
+      fi
+      if grep -q '"version"' xperf-gui/tauri.conf.json; then
+        echo "tauri.conf.json 不得手写 version——版本唯一出处是根 Cargo.toml（Tauri 自动回落）"; exit 1
       fi
       if ! grep -q "^## \[$TAG\]" CHANGELOG.md; then
         echo "CHANGELOG.md 缺少 $TAG 章节"; exit 1
@@ -142,7 +147,7 @@ build:linux:
       cp -r /tmp/rust-std-1.93.0-aarch64-linux-android/rust-std-aarch64-linux-android/lib/rustlib/aarch64-linux-android "$TC/lib/rustlib/"
       ls "$TC/lib/rustlib/aarch64-linux-android/lib"/*.rlib | wc -l
     - cargo build --locked -p xperf-agent --target aarch64-linux-android --release
-    - VER=$(sed -n 's/^version = "\(.*\)"$/\1/p' xperf-cli/Cargo.toml | head -1)
+    - VER=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
     - PKG="xperf-v$VER-linux-x86_64"
     - mkdir -p "artifacts/$PKG/agent"
     - cp target/release/xperf-cli "artifacts/$PKG/"
@@ -174,7 +179,7 @@ gui:linux:
         - target/
         - .cargo-ci/
   script:
-    - VER=$(sed -n 's/^version = "\(.*\)"$/\1/p' xperf-cli/Cargo.toml | head -1)
+    - VER=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
     - test -x artifacts/xperf-v$VER-linux-x86_64/agent/xperf-agent
     - mkdir -p xperf-gui/release-resources/agent
     - cp artifacts/xperf-v$VER-linux-x86_64/agent/xperf-agent xperf-gui/release-resources/agent/xperf-agent
@@ -226,7 +231,7 @@ release:
   rules:
     - if: $CI_COMMIT_TAG
   script:
-    - VER=$(sed -n 's/^version = "\(.*\)"$/\1/p' xperf-cli/Cargo.toml | head -1)
+    - VER=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
     - python3 scripts/release_create.py
     - python3 scripts/release_upload.py "artifacts/xperf-v$VER-linux-x86_64.tar.gz" "Linux x86_64 (CLI + agent)"
     - python3 scripts/release_upload.py "artifacts/xperf-v$VER-linux-x86_64-gui.AppImage" "Linux x86_64 GUI (AppImage + agent)"

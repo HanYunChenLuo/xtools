@@ -5,3 +5,11 @@ members = ["xperf-core", "xperf-cli", "xperf-gui", "xperf-agent"]
 # agent 只交叉编译：cargo build -p xperf-agent --target aarch64-linux-android --release
 default-members = ["xperf-core", "xperf-cli", "xperf-gui"]
 resolver = "2"
+
+# 全 workspace 唯一版本出处（发版只改这里 + CHANGELOG 章节）：
+# 成员经 `version.workspace = true` 继承；GUI 的 tauri.conf.json 不写 version
+# （Tauri v2 回落到 xperf-gui/Cargo.toml = 此处）；CI/scripts 的 sed 读根文件
+# 行首 version（本文件行首 version 仅此一处）。运行时消费者：CLI --version
+# （clap）、feedback manifest（env!("CARGO_PKG_VERSION")）、DMG productVersion。
+[workspace.package]
+version = "0.2.1"
