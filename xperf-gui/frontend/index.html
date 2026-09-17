@@ -15,11 +15,17 @@
       </select>
       <button id="remoteAddBtn" class="small" title="新增远程连接">＋</button>
       <div id="remoteForm" class="hidden">
-        <input id="rfName" placeholder="名称" autocomplete="off" />
-        <input id="rfHost" placeholder="ssh 目标（别名/user@host）" autocomplete="off" />
+        <input id="rfName" placeholder="名称（如 hppc；保存到 ssh config 时作 Host 别名）" autocomplete="off" />
+        <input id="rfHost" placeholder="主机 IP 或 hostname（也可填已有 ssh 别名）" autocomplete="off" />
+        <div class="rf-row">
+          <input id="rfUser" placeholder="用户名（可空=当前用户）" autocomplete="off" />
+          <input id="rfSshPort" placeholder="SSH 22" type="number" min="1" max="65535" title="SSH 端口（默认 22）" />
+        </div>
+        <input id="rfPassword" type="password" placeholder="密码（空=走已有密钥/ssh config 免密；仅本次连接内存使用，不落盘）" autocomplete="new-password" />
+        <label class="rf-savecfg" title="只写 HostName/用户名/端口，密码与密钥永不写入"><input id="rfSaveCfg" type="checkbox" checked /> 保存到 ~/.ssh/config（零秘密，方便后续直接选用）</label>
         <input id="rfAdb" placeholder="远端 adb 路径（默认 adb）" autocomplete="off" />
-        <input id="rfPort" placeholder="端口 5037" type="number" min="1" max="65535" />
-        <button id="rfSave" class="small">保存</button>
+        <input id="rfPort" placeholder="adb 端口 5037" type="number" min="1" max="65535" title="远端 adb server 端口（默认 5037）" />
+        <button id="rfSave" class="small">保存并连接</button>
       </div>
     </div>
     <nav id="deviceTabs"></nav>

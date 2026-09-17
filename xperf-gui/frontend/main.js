@@ -1631,6 +1631,7 @@ const remoteUI = {
     const sel = document.getElementById('remoteSelect');
     let remotes = [], sshHosts = [];
     try { remotes = await invoke('list_remotes'); } catch (e) { _diag('list_remotes ERROR: ' + JSON.stringify(e)); }
+    this.remotes = remotes; // 供 reopenForPassword 查找回填
     try { sshHosts = await invoke('list_ssh_hosts'); } catch (e) { _diag('list_ssh_hosts ERROR: ' + JSON.stringify(e)); }
     // 已保存配置优先；ssh_config 主机补充（跳过与已保存条目同 host/name 的）
     const savedKeys = new Set(remotes.flatMap(r => [r.host, r.name]));
@@ -1649,16 +1650,33 @@ const remoteUI = {
     }
   },
 
-  async switchTo(host) {
+  // 认证失败重试：预填表单（只欠输密码）
+  reopenForPassword(target) {
+    const form = document.getElementById('remoteForm');
+    const r = (this.remotes || []).find(r => r.name === target || r.host === target);
+    if (r) {
+      document.getElementById('rfName').value = r.name;
+      document.getElementById('rfHost').value = r.host;
+      document.getElementById('rfAdb').value = r.adb_path || '';
+      document.getElementById('rfPort').value = r.remote_port || 5037;
+      if (r.ssh_port) document.getElementById('rfSshPort').value = r.ssh_port;
+    }
+    form.classList.remove('hidden');
+    document.getElementById('rfPassword').focus();
+  },
+
+  async switchTo(host, password) {
     const sel = document.getElementById('remoteSelect');
     sel.disabled = true;
     this.setGlobalStatus(host ? '正在连接 ' + host + '…' : '正在切回本机…');
     try {
-      const r = await invoke('connect_remote', { host: host || null });
+      const r = await invoke('connect_remote', { host: host || null, password: password || null });
       this.rebuildDevices(r.devices || []);
       this.setGlobalStatus(host ? '已连接远程: ' + host : '本机');
     } catch (e) {
       const msg = (e && e.toString()) || '连接失败';
+      // 密码主机重连（密码不落盘 → 每个新会话都要重输一次）：表单预填重开，只欠输密码
+      if (host && msg.includes('密码认证失败')) this.reopenForPassword(host);
       // init_remote 失败时 core 已保持本机传输；不要再次调用 connect_remote(null)，
       // 否则真实错误会被“已切回本机”覆盖，DMG/Finder 启动时尤其难以诊断。
       sel.value = '';
@@ -1695,14 +1713,23 @@ const remoteUI = {
     document.getElementById('rfSave').addEventListener('click', async () => {
       const name = document.getElementById('rfName').value.trim();
       const host = document.getElementById('rfHost').value.trim();
+      const user = document.getElementById('rfUser').value.trim();
+      const sshPort = parseInt(document.getElementById('rfSshPort').value, 10) || null;
+      const password = document.getElementById('rfPassword').value; // 不落盘，仅随连接走内存
+      const saveCfg = document.getElementById('rfSaveCfg').checked;
       const adb = document.getElementById('rfAdb').value.trim() || 'adb';
       const port = parseInt(document.getElementById('rfPort').value, 10) || 5037;
-      if (!name || !host) { this.setGlobalStatus('远程配置：名称与 ssh 目标不能为空'); return; }
+      if (!name || !host) { this.setGlobalStatus('远程配置：名称与主机不能为空'); return; }
       try {
-        await invoke('save_remote', { cfg: { name, host, adb_path: adb, remote_port: port } });
+        // 保存（可选写 ssh config）→ 立即连接（密码随行，仅内存驻留）
+        const effective = await invoke('add_ssh_host', {
+          cfg: { name, host, user: user || null, ssh_port: sshPort,
+                 adb_path: adb, remote_port: port, save_to_ssh_config: saveCfg },
+        });
         form.classList.add('hidden');
+        document.getElementById('rfPassword').value = '';
         await this.populate(null);
-        this.setGlobalStatus('已保存远程: ' + name);
+        await this.switchTo(effective, password || null);
       } catch (e) {
         this.setGlobalStatus('保存失败: ' + e);
       }
