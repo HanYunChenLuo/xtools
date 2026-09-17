@@ -1394,6 +1394,8 @@ class DeviceSession {
         _diag('cleanBtn ERROR: ' + JSON.stringify(err));
       }
     });
+    // 问题反馈：唤起全局浮层（收集范围为全部设备最近 1h，与本设备页无绑定关系）
+    this.el('feedback-btn').addEventListener('click', () => feedbackUI.show());
   }
 }
 
@@ -1717,8 +1719,47 @@ const remoteUI = {
   },
 };
 
+// ---------- 问题反馈：全局浮层（侧栏「问题反馈」按钮唤起，收集+打包+上传 GitLab issue） ----------
+const feedbackUI = {
+  show() {
+    document.getElementById('feedbackMask').classList.remove('hidden');
+    document.getElementById('fbDesc').focus();
+  },
+  hide() {
+    document.getElementById('feedbackMask').classList.add('hidden');
+  },
+  init() {
+    const submitBtn = document.getElementById('fbSubmit');
+    document.getElementById('fbCancel').addEventListener('click', () => this.hide());
+    // 点击遮罩空白处关闭（点在表单内不关）
+    document.getElementById('feedbackMask').addEventListener('click', (e) => {
+      if (e.target.id === 'feedbackMask') this.hide();
+    });
+    submitBtn.addEventListener('click', async () => {
+      const desc = document.getElementById('fbDesc').value.trim();
+      submitBtn.disabled = true;
+      remoteUI.setGlobalStatus('问题反馈：正在收集并上传（最近 1 小时数据）…');
+      _diag('feedback submit: desc=' + (desc || '(empty)'));
+      try {
+        const url = await invoke('submit_feedback', { description: desc });
+        this.hide();
+        document.getElementById('fbDesc').value = '';
+        remoteUI.setGlobalStatus('反馈已提交: ' + url);
+        _diag('feedback OK: ' + url);
+      } catch (e) {
+        const msg = (e && e.toString()) || '未知错误';
+        remoteUI.setGlobalStatus('反馈提交失败: ' + msg);
+        _diag('feedback ERROR: ' + msg);
+      } finally {
+        submitBtn.disabled = false;
+      }
+    });
+  },
+};
+
 // ---------- 初始化：列设备建页 → 回填自动启动会话 → 动态窗口尺寸 ----------
 (async function init() {
+  feedbackUI.init();
   await remoteUI.init();
   try {
     const r = await invoke('list_devices');

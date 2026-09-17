@@ -754,6 +754,27 @@ async fn clean_cache() -> Result<String, String> {
     ))
 }
 
+/// 问题反馈（侧栏「问题反馈」按钮 → 浮层输入描述后提交）：收集最近 1h xperf 证据
+/// 打包上传 GitLab issue，返回 issue URL；上传失败错误信息附本地归档路径（归档不删）。
+/// 成功后自动在浏览器打开 issue（用户可按 issue 正文指引补充设备 logcat）。
+#[tauri::command]
+async fn submit_feedback(description: String) -> Result<String, String> {
+    let url = tokio::task::spawn_blocking(move || -> Result<String, String> {
+        let bundle = xperf_core::feedback::collect(&description).map_err(|e| format!("{e:#}"))?;
+        xperf_core::feedback::submit(&bundle)
+            .map_err(|e| format!("{e:#}\n本地归档: {}", bundle.archive.display()))
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    // 打开 issue 页（便于补充 logcat/截图；失败不影响已提交结果）
+    #[cfg(target_os = "macos")]
+    let opener = "open";
+    #[cfg(not(target_os = "macos"))]
+    let opener = "xdg-open";
+    let _ = std::process::Command::new(opener).arg(&url).spawn();
+    Ok(url)
+}
+
 /// 更新 simpleperf 火焰图脚本与双平台 report 库（从 AOSP 强制重新拉取，覆盖
 /// `xperf-core/simpleperf_scripts/` 的 vendor 文件；git 提交后同步到其他机器）。
 /// 逐 MB 进度经 `scripts-update` 事件推给前端（stage: progress/done；percent 为
@@ -1876,6 +1897,7 @@ fn main() {
             open_perfetto_ui,
             open_stack_html,
             clean_cache,
+            submit_feedback,
             update_simpleperf_scripts,
             diag_log,
             list_packages,
