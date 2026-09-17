@@ -36,6 +36,8 @@ pub mod memory;
 /// scrcpy 屏幕镜像与录屏：外部窗口拉起 / 无窗口 MP4 录制（共享 SSH 远程隧道
 /// hop#2 固定端口生命周期；录屏停止走 SIGINT 优雅封盘）。
 pub mod mirror;
+/// GitLab OAuth2 登录（授权码+PKCE+回环回调）：issue 作者绑定操作者本人。
+pub mod oauth;
 /// 平台抽象：adb product 字段自动检测 + 各平台差异特性。
 pub mod platform;
 /// simpleperf 调用栈采样：函数级 CPU 热点（录制 + 设备端两视图报告解析）。
