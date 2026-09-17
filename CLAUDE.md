@@ -284,6 +284,8 @@ hop#2: 本机 P_loc → 远端 adb forward 分配端口（agent 事件流，每�
 - 远端 adb 路径解析（establish 内 `preflight_remote` 远端脚本）：先试配置值，失败自动退标准 SDK 位置 `~/Android/Sdk/platform-tools/adb`（远端 PATH 常不含 adb，附录 A #12）——ssh_config 来源的主机默认 `adb` 也能直连
 - 多设备并行天然支持：隧道位于 adb client↔server 之间，比「设备」低一层——`-s` 路由/GUI 每设备 tab/深挖并发零改动（每设备 hop#2 一条）；队头阻塞实测不成立（并发 3×47MB 拉取下 200ms 节拍 p50 不退化）
 
+**密码认证（2026-09-17，`feature/ssh-password-bootstrap`）**：表单支持 用户名+IP+密码+SSH 端口（GUI「＋」表单 / CLI `XPERF_SSH_PASSWORD` env）。**密码仅进程内存驻留，永不落盘**（不进 remotes.json/ssh config/日志），`shutdown_remote` 即清；master 建链去 `BatchMode` + `NumberOfPasswordPrompts=1` + `StrictHostKeyChecking=accept-new`（首次连接 host key 确认也走 askpass，不处理会死等——实踩），密码经 `SSH_ASKPASS_REQUIRE=force` + 静态 askpass 脚本（`~/.config/xperf/askpass.sh`，密码走子进程环境变量）注入，stderr 分类「密码认证失败」vs 网络问题。**密码主机每个新会话都要重输**（不装公钥不落盘的代价，用户拍板）；下拉重连认证失败时前端自动重开表单预填。「保存到 ssh config」= 纯 Host 条目（HostName/User/Port 零秘密），别名冲突报错不覆盖；`SshTarget.ssh_port`/`RemoteConfig.ssh_port`（serde default 兼容旧 JSON）支持非 22 端口。真机回归（docker sshd）：错密码报「密码认证失败」、正确密码 master+预检+枚举全链通。
+
 **要点与实测基线**：
 - forward 规则由 **server** 持有、跨会话存活（本机进程死亡也不消失）⇒ `ensure_forward` 查 `--list` 复用同名规则是防泄漏关键（`tcp:0` 每次调用新建，实测连调 3 次得 3 条）
 - 远端 adb 常不在 PATH（hppc 在 `~/Android/Sdk/platform-tools/adb`）⇒ `--remote-adb` 可配

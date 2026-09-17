@@ -5,6 +5,24 @@
 > 待办事项（backlog）在 `WORKSPACE.md` 维护，本文件只做历史追溯。
 > 新会话开始时可先读本文件了解近期上下文。
 
+## 2026-09-17（下午）：SSH 远程支持账号+IP+密码登录 + ssh config 保存
+
+**任务**：GUI 远程登录此前只认 ssh 别名（须预先配免密）——支持 用户名+IP+密码 直连；可选把登录信息存进 ssh config 方便复用。
+
+**用户边界拍板（两次收紧）**：密码不落盘；**xperf 专用公钥也不写入、不动远端**（不侵入主机，安全风险）——「保存到 ssh config」最终形态 = 纯 Host 条目（HostName/User/Port 零秘密），密码主机每个新会话重输一次（表单预填缓解）。
+
+**commit**（feature/ssh-password-bootstrap）：`88e0cb1`（core：SSH_PASSWORD 内存静态 + askpass 注入 master + 认证失败分类 + save_ssh_config_host + 5 单测）→ `cfbbbdd`（GUI 表单 + add_ssh_host + connect_remote password 参数）→ `4b1bc5f`（语义澄清 + 重开表单预填 + ssh_port + accept-new 实踩修复）。
+
+**关键结论**：
+- askpass 机制：`SSH_ASKPASS_REQUIRE=force`（OpenSSH ≥8.4）+ 静态脚本（`printf '%s\n' "$XPERF_SSH_PW"`，密码走子进程环境变量 `/proc/<pid>/environ` 仅本人可读）；**`-f` 后台化与 askpass 兼容**（认证在前台完成后才 daemonize）
+- **accept-new 必须加**：首次连接新主机的 host key 确认也走 askpass 通道，回密码≠yes → ssh 永久死等（真机实踩 180s 超时定位）；accept-new 自动接受新 key，已登记 key 变更仍拒绝（MITM 防护保留）
+- BatchMode 与密码互斥（前者禁掉一切询问）——密码模式单独拼参数
+- linuxserver/openssh-server 镜像坑：sshd 监听 **2222** 非 22；真实配置在 `/config/sshd/sshd_config`（改 `/etc/ssh/sshd_config` 无效——进程 `-f` 指定前者），`AllowTcpForwarding no` 默认关（hop 转发 administratively prohibited）；apk 并发锁残留须 `rm /lib/apk/db/lock`
+- 真机回归（docker sshd @hppc:2299，tester/test12345）：错密码 →「密码认证失败（密码错误或服务器未启用密码登录）」；正确密码 → master 建立 + 预检（装 android-tools 后）+ 设备枚举「远程后端: xperftest（在线 0 台）」全链 ✅；GUI 表单 9 字段 id 注入校验 ✅
+- **worktree LFS 陷阱**：`git add -A` 把 simpleperf_scripts 的 LFS 指针异常状态（checkout 后 smudge 未完成的删除态）一并提交——`reset --soft + restore --staged + checkout --` 剔除后重新提交；教训：worktree 里 stage 前 `git status` 必看
+
+**遗留**：GUI 表单全链点击未目验（同前 AX 冻结，字段 id/命令注册/编译校验 + core 密码链真机全通）；测试容器与 ssh config 测试别名已清理零残留。
+
 ## 2026-09-17（午）：GitLab OAuth 登录（反馈身份绑定操作者本人）
 
 **任务**：问题反馈的 issue 作者须为操作者本人——在 PAT 之外加 OAuth 登录（浏览器授权码+PKCE，兼容 SSO/2FA）。
