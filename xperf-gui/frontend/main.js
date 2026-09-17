@@ -1769,7 +1769,7 @@ const feedbackUI = {
     // OAuth 登录：后端起回环监听并打开浏览器，promise 挂起至回调/超时
     loginBtn.addEventListener('click', async () => {
       loginBtn.disabled = true;
-      document.getElementById('fbIdentity').textContent = '请在浏览器完成授权（180s 内）…';
+      document.getElementById('fbIdentity').textContent = '请在浏览器完成授权（10 分钟内）…';
       try {
         const who = await invoke('gitlab_login');
         _diag('gitlab_login OK: ' + who);

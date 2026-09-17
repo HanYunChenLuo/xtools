@@ -28,8 +28,8 @@ const DEFAULT_CLIENT_ID: &str =
 /// 回环回调候选端口（注册 redirect_uri 须含其一；占用时顺延）
 const CALLBACK_PORTS: &[u16] = &[39859, 39860, 39861];
 
-/// 授权等待超时（用户在浏览器里登录+点授权的时间）
-const LOGIN_TIMEOUT: Duration = Duration::from_secs(180);
+/// 授权等待超时（用户在浏览器里登录+点授权的时间；人工操作留足余量）
+const LOGIN_TIMEOUT: Duration = Duration::from_secs(600);
 
 /// token 过期前提前刷新的余量（秒）
 const REFRESH_MARGIN_SECS: i64 = 60;
@@ -245,8 +245,13 @@ fn wait_for_code(listener: &TcpListener, expect_state: &str, timeout: Duration) 
                         bail!("回调 state 不匹配");
                     }
                     CallbackResult::Denied { error } => {
-                        respond(&mut conn, "200 OK", "你已拒绝授权（本页可关闭）");
-                        bail!("用户在授权页拒绝: {error}");
+                        // 拒绝可能是误点——应答后继续等到超时（用户可回退授权页重点 Authorize）
+                        respond(
+                            &mut conn,
+                            "200 OK",
+                            "你点击了拒绝授权。如属误操作，请回到浏览器授权页重新点「Authorize」；xperf 仍在等待。",
+                        );
+                        crate::utils::diag(&format!("oauth: 收到 access_denied（{error}），继续等待"));
                     }
                     CallbackResult::Unrecognized => {
                         // 浏览器 favicon 等杂项请求：应答后继续等真回调
@@ -348,7 +353,16 @@ fn exchange_code(
         .send()
         .context("token 交换请求失败")?;
     if !resp.status().is_success() {
-        bail!("token 交换被拒: {} {}", resp.status(), resp.text().unwrap_or_default());
+        let status = resp.status();
+        let text = resp.text().unwrap_or_default();
+        // 公共客户端（无 secret）撞上机密应用注册时的典型错误：给出可操作指引
+        if status == reqwest::StatusCode::UNAUTHORIZED && text.contains("invalid_client") {
+            bail!(
+                "token 交换被拒: invalid_client——OAuth 应用注册时「Confidential」须取消勾选\
+                 （桌面工具是公共客户端，无 secret），请到应用设置修改后重试"
+            );
+        }
+        bail!("token 交换被拒: {} {}", status, text);
     }
     parse_token_response(&resp.text().context("读 token 响应失败")?)
 }

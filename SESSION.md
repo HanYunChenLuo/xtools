@@ -5,6 +5,22 @@
 > 待办事项（backlog）在 `WORKSPACE.md` 维护，本文件只做历史追溯。
 > 新会话开始时可先读本文件了解近期上下文。
 
+## 2026-09-17（午）：GitLab OAuth 登录（反馈身份绑定操作者本人）
+
+**任务**：问题反馈的 issue 作者须为操作者本人——在 PAT 之外加 OAuth 登录（浏览器授权码+PKCE，兼容 SSO/2FA）。
+
+**commit**（feature/gitlab-oauth）：core `oauth.rs`（login/logout/status/临期刷新+9 单测）→ feedback 凭证链接入 `GitlabAuth` → CLI `--gitlab-login/--gitlab-logout` → GUI 浮层身份行+登录/退出按钮。
+
+**关键结论**：
+- **GitLab 18.5.4 CE 实测**：`/oauth/authorize` 对未登录用户先 302 到登录页，redirect_uri 校验在其后——注册 URI 无法无登录探测；`scope=api` 是覆盖「建 issue+传附件」的最小 scope（无 issue 级细粒度）；labels 不存在自动创建
+- **OAuth App 必须取消勾选「Confidential」**（默认勾上！）：机密客户端换 token 要 client_secret，公共客户端+PKCE 无 secret → `invalid_client` 401。真机实踩三轮（拒绝误点、Confidential 未改、改后成功），错误路径已加可操作指引
+- **access_denied 不应判死**：授权页「取消」误点后用户可回退重点 Authorize——监听器应答后须继续等到超时（初版直接退出致浏览器拒连，真机实踩修复）
+- 授权等待超时 180s→600s（人工读页+登录操作实测不够）
+- **真机全链**：登录成功（汪尽涵 @wangjinhan，store 0600）→ 无 PAT 环境下 `--feedback` 走 Bearer 建 [issue #2](https://gitlab.chehejia.com/ligraphic/xperf/-/issues/2)（作者本人验证）→ 篡改 `expires_at` 强制过期 → 透明刷新轮换 + [issue #3](https://gitlab.chehejia.com/ligraphic/xperf/-/issues/3) ✅
+- token 交换/刷新用 `application/x-www-form-urlencoded`（`.form()`），`expires_in` 缺省 7200
+
+**遗留**：GUI 登录按钮的全链路点击未目验（同前——AX 树冻结；core 路径已实测、命令注册编译期校验、浮层身份行 invoke 经临时自动展开实测无错误）；issue #1/#2/#3 为自测件可关闭。
+
 ## 2026-09-17：问题反馈（一键收集日志 → GitLab issue）
 
 **任务**：WORKSPACE I 节「问题反馈」——一键收集最近 1h xperf 证据打包上传内部 GitLab issue（project 39859）。

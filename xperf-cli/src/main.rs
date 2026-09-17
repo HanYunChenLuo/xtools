@@ -1705,7 +1705,7 @@ async fn main() -> Result<()> {
         return Ok(());
     }
     if args.gitlab_login {
-        println!("即将打开浏览器完成 GitLab 授权（{}s 内）…", 180);
+        println!("即将打开浏览器完成 GitLab 授权（10 分钟内）…");
         let r = tokio::task::spawn_blocking(xperf_core::oauth::login).await;
         return match r {
             Ok(Ok(who)) => {
