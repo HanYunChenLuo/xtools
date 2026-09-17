@@ -13,7 +13,7 @@
 ### 修复
 
 - 修复 Linux AppImage 在 Ubuntu 22.04 启动失败（`libpango` symbol lookup error）：AppImage 内 pango/WebKitGTK 引用的 libharfbuzz 新符号（3.3.0 / 4.0.0）在 jammy 自带版本（2.7.4）中缺失；现向 AppDir 注入构建侧 libharfbuzz 后重打包（24.04 不受影响）。
-- 文档：README 改为中文主文档 + 英文版 `README_en.md`（互链），标题与资产命名统一为 xperf，功能面与 GUI 章节更新至当前版本。
+- 文档：README 标题与资产命名统一为 xperf，补中文版 `README_zh.md`（与主 README 互链），功能面与 GUI 章节更新至当前版本。
 
 ## [v0.2.1] - 2026-09-16
 
