@@ -25,7 +25,7 @@ use xperf_core::simpleperf;
 #[command(version, about = "XPerformance Monitor - Android process CPU/memory monitor", long_about = None)]
 struct Args {
     /// Package name to monitor
-    #[arg(short, long, required_unless_present_any = ["clean_cache", "update_simpleperf_scripts", "mirror", "screenshot", "record", "logcat"])]
+    #[arg(short, long, required_unless_present_any = ["clean_cache", "update_simpleperf_scripts", "mirror", "screenshot", "record", "logcat", "feedback"])]
     package: Option<String>,
 
     /// 目标设备 serial（多台设备同连时必须指定，如 `adb devices` 列出的 6eb792dfb0f；
@@ -163,6 +163,36 @@ struct Args {
     /// 与按包过滤叠加生效；非法正则设备端拒收（抓取连续秒死后放弃）
     #[arg(long, value_name = "REGEX", requires = "logcat")]
     logcat_regex: Option<String>,
+
+    /// 问题反馈：收集最近 1 小时 xperf 相关日志与产物（采样 CSV/trace 与 simpleperf
+    /// 报告/截屏/GUI 诊断日志/各设备 agent 日志/环境信息），逐项自检后打包 tar.gz
+    /// 上传内部 GitLab issue 并打印链接。DESC 为一句话场景摘要（可空串）。
+    /// token：GITLAB_TOKEN 环境变量或 ~/.config/xperf/gitlab-token 文件（api 权限）
+    #[arg(long, value_name = "DESC")]
+    feedback: Option<String>,
+}
+
+/// 问题反馈（--feedback）：收集 → 打印自检清单 → 上传。返回 issue URL；
+/// 上传失败时错误信息附本地归档路径（归档始终保留供手动附加）。
+/// 须在阻塞线程调用（core submit 用 reqwest::blocking）。
+fn run_feedback(desc: &str) -> Result<String> {
+    println!("正在收集反馈数据（最近 1 小时）…");
+    let bundle = xperf_core::feedback::collect(desc)?;
+    for e in &bundle.checklist {
+        println!(
+            "  {} {}：{}",
+            if e.ok { "✅" } else { "⚠️ " },
+            e.name,
+            e.note
+        );
+    }
+    println!(
+        "已打包: {}（{:.1} MB），正在上传…",
+        bundle.archive.display(),
+        bundle.archive_bytes as f64 / 1e6
+    );
+    xperf_core::feedback::submit(&bundle)
+        .map_err(|e| anyhow::anyhow!("{e:#}\n本地归档: {}", bundle.archive.display()))
 }
 
 /// 设备选择：`--device` 指定 > 单台自动；多台未指定报错并列出清单。
@@ -1699,6 +1729,27 @@ async fn main() -> Result<()> {
                 std::process::exit(1);
             }
         }
+    }
+    // --feedback：问题反馈独立模式（收集+打包+上传后退出，无需选定单台设备——
+    // agent 日志从全部在线设备收集；须在 init_remote 之后，远程模式经隧道拉取）
+    if let Some(desc) = &args.feedback {
+        let desc = desc.clone();
+        let r = tokio::task::spawn_blocking(move || run_feedback(&desc)).await;
+        xperf_core::shutdown_remote();
+        return match r {
+            Ok(Ok(url)) => {
+                println!("✅ 反馈已提交: {url}");
+                Ok(())
+            }
+            Ok(Err(e)) => {
+                eprintln!("❌ {e:#}");
+                std::process::exit(1);
+            }
+            Err(e) => {
+                eprintln!("❌ 反馈线程异常: {e}");
+                std::process::exit(1);
+            }
+        };
     }
     // 设备选择（--device > 单台自动）须在冷启动/采样前完成：后续 adb 调用全部带 -s
     if let Err(e) = select_device(args.device.as_deref()) {
