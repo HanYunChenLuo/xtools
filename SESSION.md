@@ -9,10 +9,10 @@
 
 **任务**：review README.md 等展示文档是否需要修改/优化，并提供对应英文版本。
 
-**commit**（`docs/readme-refresh` 合 main 57c8866）：`136022d`（README 重排 + 内容更新 + 打包引用同步）→ `4caeaa7`（CHANGELOG Unreleased 补记）→ `cd63eb1`（CLI `--remote` help 文案修正）。
+**commit**（`docs/readme-refresh` 合 main 57c8866 + main 直接提交）：`136022d`（README 重排 + 内容更新 + 打包引用同步）→ `4caeaa7`（CHANGELOG Unreleased 补记）→ `cd63eb1`（CLI `--remote` help 文案修正）→ `f6e88d5`（语言角色对调回英文默认）。
 
 **关键结论**：
-- 英文版其实已存在（README.md=英文 / README_zh.md=中文）但**语言角色倒置**——内部中文 GitLab 默认渲染的 README.md 是英文，且两份互不链接 → 重排为 **README.md 中文主文档 + README_en.md 英文版**（互链，README_zh.md 删除）；`.gitlab-ci.yml` 与 `scripts/release-macos.sh` 的打包引用同步（CLI tar 内两份 README 都随包分发）
+- 英文版其实已存在（README.md=英文 / README_zh.md=中文）但两份互不链接、内容落后 → 内容全面更新后**保持 README.md=英文（默认渲染）+ README_zh.md=中文，两份互链**（初版曾重排为中文主文档，用户拍板改回英文默认、中文走链接跳转，f6e88d5 对调）；`.gitlab-ci.yml` 与 `scripts/release-macos.sh` 的打包引用同步（CLI tar 内两份 README 都随包分发）
 - 标题 `XTools` 为改名前残留，统一为 `xperf`
 - 功能面补齐（v0.2.1 后合 main 的）：问题反馈（`--feedback`/`--gitlab-login`）、SSH 密码认证（GUI 表单/`XPERF_SSH_PASSWORD`）、工具命令三件；SSH 段落从修复说明口吻（DMG/Finder 细节）收敛为功能描述；Usage 选项 6 项 → 分组表（30+）+ 示例扩 6 场景；**GUI 章节重写**为实际功能面（多设备并行/四子 tab/应用管理/远程连接/反馈/主题——原文只写了三张图）；输出示例中性化（SVM 为旧测试对象）；新增 MIT License 章节
 - CHANGELOG `[Unreleased]` 补记：问题反馈/OAuth/SSH 密码认证 + **AppImage harfbuzz 修复**（`git merge-base --is-ancestor` 核实 d75108f **不在 v0.2.1 tag 内**，即 v0.2.1 AppImage 在 Ubuntu 22.04 仍有启动 bug，修复随下版发布）
