@@ -13,6 +13,10 @@
 ### 修复
 
 - 修复 Linux AppImage 在 Ubuntu 22.04 启动失败（`libpango` symbol lookup error）：AppImage 内 pango/WebKitGTK 引用的 libharfbuzz 新符号（3.3.0 / 4.0.0）在 jammy 自带版本（2.7.4）中缺失；现向 AppDir 注入构建侧 libharfbuzz 后重打包（24.04 不受影响）。
+- 修复 `cargo run --bin xperf-gui --release` 开发运行误报「GUI 发布包缺少预编译 agent」：agent 解析的开发判定从 `debug_assertions` 改为「编译期 workspace 是否存在」——开发运行（`cargo run`/`cargo install`，任意 profile）回退与 CLI 一致的自动构建，发布包（DMG/AppImage）行为不变（只认包内资源，不触发编译）。
+
+### 变更
+
 - 文档：README 标题与资产命名统一为 xperf，补中文版 `README_zh.md`（与主 README 互链），功能面与 GUI 章节更新至当前版本。
 
 ## [v0.2.1] - 2026-09-16

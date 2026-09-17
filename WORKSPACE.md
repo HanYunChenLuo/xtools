@@ -2,7 +2,7 @@
 
 > 本文件记录跨会话的待办事项（backlog）。每次会话的历史总结见 `SESSION.md`。
 > 完成一项就把状态改为 ✅ 并注明完成的 commit；新增想法随时追加。
-> 最后更新：2026-09-17 下午：SSH 远程支持 用户名+IP+密码（内存驻留不落盘）+ ssh config 零秘密 Host 条目保存（feature/ssh-password-bootstrap，docker sshd 真机全链）；前序：问题反馈+OAuth 登录合 main
+> 最后更新：2026-09-17 晚：README 展示文档重排（英文默认 + 中文版互链）+ GUI `--release`/`cargo install` 开发运行 agent 回退修复；前序：问题反馈+OAuth、SSH 密码登录合 main
 
 ## 当前状态速览
 
@@ -47,6 +47,7 @@
 
 ## D. 结构改进（下轮候补）
 
+- **GUI 开发运行的 agent 构建反馈缺口**（2026-09-17 晚 review 记录，低频边缘）：① 首次自动构建 agent（`ensure_agent_built`，~1-2min）期间 GUI 无任何 UI 反馈——进度只写 stderr，Finder 启动时不可见，用户视角「点了开始没反应」；② Finder/`open` 启动的开发 GUI 里 `Command::new("cargo")` 因 PATH 最小化找不到 cargo（adb/ssh 已有解析链，cargo 没有）。发布包不受影响（不走该路径）。修法候选：emit 一个 building 阶段事件 + cargo 按 `~/.cargo/bin` 兜底解析。
 - [x] ~~内存 Private Other 拆分 DMA-BUF 分类~~（**已完成**，2026-09-11，`feat/dmabuf-split` 合 main，e5071da，协议 v8）：Private Other 是无语义兜底桶（真机根因 = 114 个 `/dmabuf:` VMA 共 614MB PSS；Graphics 桶只按 kgsl/drm 设备节点名匹配，dmabuf 不命中；内核 `/proc/<pid>/dmabuf` 此 GVM 未编译）。落地：agent Full 模式 root 下扫 smaps 按 VMA 名（`/dmabuf`/`[anon:dmabuf`）聚合 Pss 单列 `dmabuf`，other 扣减（稳态 8 分类合计恒等 PSS；分配剧变期两次快照不同步可暂超，如实不钳制——见 CLAUDE.md 内存采样节）；Smaps/DumpsysFallback/非 root dmabuf=0。mem 事件增字段（serde(default) 双向兼容）；CLI 打印/图表、GUI 面板（└ DMA-BUF + Private Other 改「其他」）、CSV（DMA-BUF (MB) 列）全链路。parse_dmabuf_pss 头行按字段解析（弃固定列切片）。真机：SS4 gltf DMA-BUF 615.6MB/Other 9.0MB 稳态合计=PSS；SS3 533.9MB 回归；非 root SS2MAX dmabuf=0 七类合计=PSS；100ms smaps 路径 0 值正常。测试：agent 32（设备）+ host 95+8+5+2 全绿，clippy/doc 零警告
 - ~~SS4 FPS 数据源升级候选：getfps -w~~（**已核销**，2026-09-10 晚）：getfps 逆向发现其底层即 `dumpsys SurfaceFlinger --latency`，价值是揭示了 SS4/A16 的图层名须带 `<hex> ` 别名前缀——agent v5 据此修复查询名，设备端 per-layer 路径恢复（见 E 节 FPS 条目终态）
 - [x] ~~agent 单文件拆分~~（531798a + 99d1b74 review 修复）：main.rs 1848 行 → 10 文件（main 493 + proc/mem/fps/thermal + gpu/{mod,kgsl,qnx,topgpu,ligfx}），三份读线程骨架抽公共 `gpu::spawn_stream_parser`，四段相同的 gpumem 补采臂合并；测试 23 个随模块迁移全绿。真机回归：SS2MAX 新旧 agent 同机对比事件分布/wire 格式/smaps 值一致。附带修复 host 侧 `ensure_agent_built` 只盯 main.rs 的 mtime 检查（改扫 src 树，touch 子模块已验证触发重建）
