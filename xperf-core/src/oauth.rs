@@ -140,6 +140,30 @@ pub fn current_access_token() -> Result<Option<String>> {
             Ok(Some(store.access_token))
         }
         Err(RefreshError::InvalidGrant) => {
+            // 并发刷新竞态：另一进程可能刚完成轮换（refresh_token 已更新）——
+            // 重读文件，若 refresh_token 已变说明登录态其实是新的，直接复用；
+            // 仍是同一个被拒的 refresh_token 才确认授权失效，清登录态
+            if let Some(fresh) = load_store(&path) {
+                if fresh.refresh_token != store.refresh_token {
+                    crate::utils::diag("oauth: invalid_grant 但 store 已被并发刷新，复用新 token");
+                    if now_epoch() + REFRESH_MARGIN_SECS < fresh.expires_at {
+                        return Ok(Some(fresh.access_token));
+                    }
+                    // 新 token 也临期/过期：以新 refresh_token 再刷一次
+                    match refresh_tokens(&client, &fresh.refresh_token) {
+                        Ok(tokens) => {
+                            let mut store2 = fresh;
+                            store2.access_token = tokens.access_token;
+                            store2.refresh_token = tokens.refresh_token;
+                            store2.expires_at = now_epoch() + tokens.expires_in;
+                            save_store(&path, &store2)?;
+                            return Ok(Some(store2.access_token));
+                        }
+                        Err(RefreshError::InvalidGrant) => { /* 落到下面清登录态 */ }
+                        Err(RefreshError::Other(e)) => return Err(e),
+                    }
+                }
+            }
             let _ = std::fs::remove_file(&path);
             crate::utils::diag("oauth: refresh 被拒（授权可能已撤销），已清除本地登录态");
             Ok(None)
@@ -184,7 +208,16 @@ fn store_path() -> PathBuf {
 fn bind_listener() -> Result<(TcpListener, u16)> {
     for &port in CALLBACK_PORTS {
         match TcpListener::bind(("127.0.0.1", port)) {
-            Ok(l) => return Ok((l, port)),
+            Ok(l) => {
+                if port != CALLBACK_PORTS[0] {
+                    // 回退端口须同样注册进应用的 redirect_uri，否则 GitLab 报 mismatch
+                    crate::utils::diag(&format!(
+                        "oauth: 首选端口 {} 被占，回退 {port}（应用注册须含该端口的 redirect_uri）",
+                        CALLBACK_PORTS[0]
+                    ));
+                }
+                return Ok((l, port));
+            }
             Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => continue,
             Err(e) => return Err(e).context("绑定回环端口失败"),
         }
@@ -206,13 +239,15 @@ fn authorize_url(redirect_uri: &str, state: &str, verifier: &str) -> String {
     )
 }
 
-/// 打开浏览器（失败不致命——打印 URL 由用户手动打开）
+/// 打开浏览器（失败不致命——stderr + diag 日志双写 URL 由用户手动打开）
 fn open_browser(url: &str) {
     #[cfg(target_os = "macos")]
     let opener = "open";
     #[cfg(not(target_os = "macos"))]
     let opener = "xdg-open";
     if std::process::Command::new(opener).arg(url).spawn().is_err() {
+        // GUI 从 Finder 启动时无 stderr 可读，diag 日志（/tmp/xperf_gui_diag.log）兜底
+        crate::utils::diag(&format!("oauth: 浏览器打开失败，手动访问: {url}"));
         eprintln!("无法自动打开浏览器，请手动访问:\n{url}");
     }
 }

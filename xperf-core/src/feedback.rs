@@ -490,6 +490,17 @@ fn gitlab_api() -> String {
         .unwrap_or_else(|| DEFAULT_GITLAB_API.into())
 }
 
+/// 401/403 时给错误信息追加凭证失效指引（PAT 过期 / OAuth 需重新登录）
+fn auth_hint(status: reqwest::StatusCode) -> &'static str {
+    match status {
+        reqwest::StatusCode::UNAUTHORIZED => {
+            "（凭证失效：PAT 过期或 OAuth 授权被撤销——重新登录：GUI 浮层「登录 GitLab」/ CLI --gitlab-login）"
+        }
+        reqwest::StatusCode::FORBIDDEN => "（凭证权限不足：需 api scope + 项目 Reporter 及以上角色）",
+        _ => "",
+    }
+}
+
 /// GitLab 项目 ID（`GITLAB_PROJECT_ID` 环境变量可覆盖）
 fn gitlab_project_id() -> String {
     std::env::var("GITLAB_PROJECT_ID")
@@ -579,14 +590,18 @@ fn upload_attachment(
             .send()
             .context("package registry 请求发送失败")?;
         if !r2.status().is_success() {
-            bail!("package registry 上传失败: {} {}", r2.status(), r2.text().unwrap_or_default());
+            let status = r2.status();
+            let text = r2.text().unwrap_or_default();
+            bail!("package registry 上传失败: {} {}{}", status, text, auth_hint(status));
         }
         return Ok(format!(
             "[{fname}]({reg_url})（超过实例附件上限，走 package registry）"
         ));
     }
     if !resp.status().is_success() {
-        bail!("uploads 上传失败: {} {}", resp.status(), resp.text().unwrap_or_default());
+        let status = resp.status();
+        let text = resp.text().unwrap_or_default();
+        bail!("uploads 上传失败: {} {}{}", status, text, auth_hint(status));
     }
     let v: serde_json::Value = resp.json().context("解析 uploads 响应失败")?;
     v.get("markdown")
@@ -625,7 +640,9 @@ fn create_issue(
         }
         // 非 labels 引起的失败直接报错，不再重试
         if labels.is_empty() || resp.status() != reqwest::StatusCode::BAD_REQUEST {
-            bail!("创建 issue 失败: {} {}", resp.status(), resp.text().unwrap_or_default());
+            let status = resp.status();
+            let text = resp.text().unwrap_or_default();
+            bail!("创建 issue 失败: {} {}{}", status, text, auth_hint(status));
         }
     }
     unreachable!("labels 为空时失败已提前返回")
