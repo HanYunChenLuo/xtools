@@ -1332,6 +1332,9 @@ struct RemoteConfig {
     adb_path: String,
     /// 远端 adb server 端口（默认 5037）
     remote_port: u16,
+    /// SSH 端口（None = 22；自定义端口主机经 `ssh -p` 生效，与 ssh config Port 等价）
+    #[serde(default)]
+    ssh_port: Option<u16>,
 }
 
 fn remotes_config_path() -> Option<std::path::PathBuf> {
@@ -1468,6 +1471,7 @@ fn add_ssh_host(cfg: NewSshHost) -> Result<String, String> {
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| "adb".into()),
         remote_port: cfg.remote_port.unwrap_or(xperf_core::SshTarget::DEFAULT_ADB_PORT),
+        ssh_port: cfg.ssh_port.filter(|p| *p != 22),
     })?;
     Ok(effective_host)
 }
@@ -1533,6 +1537,9 @@ async fn connect_remote(
         target = xperf_core::SshTarget::new(&c.host)
             .with_adb_path(&c.adb_path)
             .with_remote_port(c.remote_port);
+        if let Some(p) = c.ssh_port {
+            target = target.with_ssh_port(p);
+        }
     }
     match xperf_core::init_remote(target) {
         Ok(devices) => {
@@ -2131,6 +2138,7 @@ Host hppc          # 重复别名去重
             host: host.into(),
             adb_path: "adb".into(),
             remote_port: 5037,
+            ssh_port: None,
         };
         // 新增两条 + name 相同 upsert（host 更新）
         save_remote(cfg("hppc", "hppc")).unwrap();

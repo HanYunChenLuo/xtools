@@ -1631,6 +1631,7 @@ const remoteUI = {
     const sel = document.getElementById('remoteSelect');
     let remotes = [], sshHosts = [];
     try { remotes = await invoke('list_remotes'); } catch (e) { _diag('list_remotes ERROR: ' + JSON.stringify(e)); }
+    this.remotes = remotes; // 供 reopenForPassword 查找回填
     try { sshHosts = await invoke('list_ssh_hosts'); } catch (e) { _diag('list_ssh_hosts ERROR: ' + JSON.stringify(e)); }
     // 已保存配置优先；ssh_config 主机补充（跳过与已保存条目同 host/name 的）
     const savedKeys = new Set(remotes.flatMap(r => [r.host, r.name]));
@@ -1649,6 +1650,21 @@ const remoteUI = {
     }
   },
 
+  // 认证失败重试：预填表单（只欠输密码）
+  reopenForPassword(target) {
+    const form = document.getElementById('remoteForm');
+    const r = (this.remotes || []).find(r => r.name === target || r.host === target);
+    if (r) {
+      document.getElementById('rfName').value = r.name;
+      document.getElementById('rfHost').value = r.host;
+      document.getElementById('rfAdb').value = r.adb_path || '';
+      document.getElementById('rfPort').value = r.remote_port || 5037;
+      if (r.ssh_port) document.getElementById('rfSshPort').value = r.ssh_port;
+    }
+    form.classList.remove('hidden');
+    document.getElementById('rfPassword').focus();
+  },
+
   async switchTo(host, password) {
     const sel = document.getElementById('remoteSelect');
     sel.disabled = true;
@@ -1659,6 +1675,8 @@ const remoteUI = {
       this.setGlobalStatus(host ? '已连接远程: ' + host : '本机');
     } catch (e) {
       const msg = (e && e.toString()) || '连接失败';
+      // 密码主机重连（密码不落盘 → 每个新会话都要重输一次）：表单预填重开，只欠输密码
+      if (host && msg.includes('密码认证失败')) this.reopenForPassword(host);
       // init_remote 失败时 core 已保持本机传输；不要再次调用 connect_remote(null)，
       // 否则真实错误会被“已切回本机”覆盖，DMG/Finder 启动时尤其难以诊断。
       sel.value = '';

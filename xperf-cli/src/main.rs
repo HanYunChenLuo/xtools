@@ -1746,6 +1746,11 @@ async fn main() -> Result<()> {
     }
     // 远程后端（--remote）须在任何 adb 调用之前建立：设备枚举/选择都指向远端 server
     if let Some(host) = &args.remote {
+        // XPERF_SSH_PASSWORD：密码认证（仅内存驻留，配合 askpass 进 master 建链；
+        // 本机 user 可见性同 shell env 惯例）。密钥/ssh config 免密路径不受影响
+        if let Ok(pw) = std::env::var("XPERF_SSH_PASSWORD") {
+            xperf_core::set_ssh_password(Some(pw));
+        }
         let mut target = xperf_core::SshTarget::new(host);
         if let Some(p) = &args.remote_adb {
             target = target.with_adb_path(p);

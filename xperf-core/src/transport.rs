@@ -500,6 +500,9 @@ fn master_ssh_args(control_path: &std::path::Path, local_port: u16, target: &Ssh
     if password_mode {
         args.extend(["-o".into(), "ConnectTimeout=10".into()]);
         args.extend(["-o".into(), "NumberOfPasswordPrompts=1".into()]);
+        // 首次连接新主机的 host key 确认也会走 askpass（答密码≠yes → 死等）；
+        // accept-new 自动接受新 key，已登记 key 变更仍拒绝（防 MITM 换 key）
+        args.extend(["-o".into(), "StrictHostKeyChecking=accept-new".into()]);
     } else {
         args.extend(ssh_base_opts().into_iter().map(Into::into));
     }
@@ -515,8 +518,11 @@ fn master_ssh_args(control_path: &std::path::Path, local_port: u16, target: &Ssh
         "-o".into(), "ControlPersist=no".into(),
         "-L".into(),
         format!("{}:127.0.0.1:{}", local_port, target.remote_port),
-        target.host.clone(),
     ]);
+    if let Some(p) = target.ssh_port {
+        args.extend(["-p".into(), p.to_string()]);
+    }
+    args.push(target.host.clone());
     args
 }
 
@@ -648,6 +654,9 @@ pub struct SshTarget {
     pub adb_path: String,
     /// 远端 adb server 监听端口，默认 [`SshTarget::DEFAULT_ADB_PORT`]。
     pub remote_port: u16,
+    /// SSH 端口（None = 22；自定义端口主机常见，如容器映射）。与 ssh config 的
+    /// `Port` 行等价；命令行 `-p` 优先于 config。
+    pub ssh_port: Option<u16>,
 }
 
 impl SshTarget {
@@ -660,6 +669,7 @@ impl SshTarget {
             host: host.into(),
             adb_path: "adb".to_string(),
             remote_port: Self::DEFAULT_ADB_PORT,
+            ssh_port: None,
         }
     }
 
@@ -672,6 +682,12 @@ impl SshTarget {
     /// 指定远端 adb server 监听端口
     pub fn with_remote_port(mut self, port: u16) -> Self {
         self.remote_port = port;
+        self
+    }
+
+    /// 指定 SSH 端口（非 22 时）
+    pub fn with_ssh_port(mut self, port: u16) -> Self {
+        self.ssh_port = Some(port);
         self
     }
 }
@@ -938,6 +954,7 @@ mod tests {
         // 密码模式：BatchMode 必须缺席（它会禁掉密码询问），快速失败参数在
         assert!(!s.contains("BatchMode"), "{s}");
         assert!(s.contains("NumberOfPasswordPrompts=1"), "{s}");
+        assert!(s.contains("StrictHostKeyChecking=accept-new"), "{s}");
         assert!(s.contains("ConnectTimeout=10"), "{s}");
         // 其余 master 参数保持
         for needle in ["-M", "-f", "-N", "ExitOnForwardFailure=yes", "Compression=yes"] {
