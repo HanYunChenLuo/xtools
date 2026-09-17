@@ -84,22 +84,38 @@ impl SshTunnel {
 
         // ② 自选端口建 master，失败（ExitOnForwardFailure）换端口重试
         let mut last_err = anyhow::anyhow!("端口自选失败");
+        let password_mode = has_ssh_password();
         for _ in 0..3 {
             let port = pick_free_port()?;
             let t_master = std::time::Instant::now();
-            let ok = Command::new(host_ssh_path())
-                .args(master_ssh_args(&control_path, port, target))
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status()
-                .map(|s| s.success())
-                .unwrap_or(false);
+            let mut cmd = Command::new(host_ssh_path());
+            cmd.args(master_ssh_args(&control_path, port, target, password_mode))
+                .stdout(Stdio::null());
+            // 密码模式：注入 askpass 环境；stderr 收回用于区分认证失败与网络问题
+            if password_mode {
+                inject_password_env(&mut cmd)?;
+            } else {
+                cmd.stderr(Stdio::null());
+            }
+            let spawn = cmd.output();
+            let (ok, stderr_tail) = match &spawn {
+                Ok(o) => (
+                    o.status.success(),
+                    String::from_utf8_lossy(&o.stderr).trim().to_string(),
+                ),
+                Err(e) => (false, format!("ssh 启动失败: {e}")),
+            };
             crate::utils::diag(&format!(
-                "tunnel establish ② master spawn 端口 {port}: {:?} ok={ok}",
-                t_master.elapsed()
+                "tunnel establish ② master spawn 端口 {port}: {:?} ok={ok}{}",
+                t_master.elapsed(),
+                if stderr_tail.is_empty() { String::new() } else { format!(" stderr={}", &stderr_tail[..stderr_tail.len().min(200)]) }
             ));
             if !ok {
-                last_err = anyhow::anyhow!("ssh master 建立失败（端口 {port} 或网络问题）");
+                last_err = if password_mode && is_auth_failure(&stderr_tail) {
+                    anyhow::anyhow!("密码认证失败（密码错误或服务器未启用密码登录）: {stderr_tail}")
+                } else {
+                    anyhow::anyhow!("ssh master 建立失败（端口 {port} 或网络问题）: {stderr_tail}")
+                };
                 continue;
             }
             // ③ 远端预检（mux 复用 master 连接，不产生新握手）：解析 adb 路径 +
@@ -351,6 +367,7 @@ pub fn shutdown_remote() {
     }
     clear_tunnel(); // take → Drop → -O exit（带走 hop#1 与全部 hop#2）
     set_transport(Transport::Local);
+    set_ssh_password(None); // 会话密码随远程会话结束清除（内存驻留，从不落盘）
 }
 
 /// 重建 SSH 隧道（断线重连，S9）：旧隧道丢弃（Drop `-O exit` 尽力清理）→
@@ -468,8 +485,11 @@ fn ssh_base_opts() -> Vec<&'static str> {
     vec!["-o", "BatchMode=yes", "-o", "ConnectTimeout=10"]
 }
 
-/// master 建链参数（每条均有实测依据，见设计 §4.2）
-fn master_ssh_args(control_path: &std::path::Path, local_port: u16, target: &SshTarget) -> Vec<String> {
+/// master 建链参数（每条均有实测依据，见设计 §4.2）。
+/// `password_mode`（会话内存持有密码）时：去 `BatchMode`（它会禁掉密码询问）、
+/// 加 `NumberOfPasswordPrompts=1`（错密码快速失败不连环追问）；认证经
+/// `SSH_ASKPASS_REQUIRE=force` + askpass 脚本完成（见 [`inject_password_env`]）。
+fn master_ssh_args(control_path: &std::path::Path, local_port: u16, target: &SshTarget, password_mode: bool) -> Vec<String> {
     let mut args: Vec<String> = vec![
         "-M".into(), // ControlMaster 模式
         "-S".into(),
@@ -477,7 +497,12 @@ fn master_ssh_args(control_path: &std::path::Path, local_port: u16, target: &Ssh
         "-f".into(), // 认证后转后台
         "-N".into(), // 不执行远程命令（纯转发）
     ];
-    args.extend(ssh_base_opts().into_iter().map(Into::into));
+    if password_mode {
+        args.extend(["-o".into(), "ConnectTimeout=10".into()]);
+        args.extend(["-o".into(), "NumberOfPasswordPrompts=1".into()]);
+    } else {
+        args.extend(ssh_base_opts().into_iter().map(Into::into));
+    }
     args.extend([
         // 网络黑洞 15s×3≈45s 内主动断连（R3）
         "-o".into(), "ServerAliveInterval=15".into(),
@@ -654,6 +679,149 @@ impl SshTarget {
 /// 当前传输后端（进程级全局，与既有 `utils::TARGET_SERIAL` 同款模式）。
 static TRANSPORT: Mutex<Transport> = Mutex::new(Transport::Local);
 
+/// SSH 密码（**仅进程内存驻留，永不落盘**；GUI 表单填入/连接切换时设置，
+/// [`shutdown_remote`] 与切回本机时清除）。仅 master 建链时经 `SSH_ASKPASS`
+/// 使用一次——后续 mux 复用（预检/hop#2 增删）与 QNX 式交互不再验密。
+static SSH_PASSWORD: Mutex<Option<String>> = Mutex::new(None);
+
+/// 设置/清除会话级 SSH 密码（None 清除）。不任何落盘；进程退出即消失。
+pub fn set_ssh_password(pw: Option<String>) {
+    if let Ok(mut g) = SSH_PASSWORD.lock() {
+        *g = pw.filter(|s| !s.is_empty());
+    }
+}
+
+/// 当前是否持有会话密码（GUI 状态展示/诊断用，不回读内容）
+pub fn has_ssh_password() -> bool {
+    SSH_PASSWORD.lock().map(|g| g.is_some()).unwrap_or(false)
+}
+
+/// xperf 的 `SSH_ASKPASS` 脚本：内容恒定、不含秘密——密码经子进程环境变量
+/// `XPERF_SSH_PW` 传入（`/proc/<pid>/environ` 仅本人可读；脚本 0700）。
+fn ensure_askpass_script() -> Result<PathBuf> {
+    let dir = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .ok_or_else(|| anyhow::anyhow!("HOME 未设置"))?
+        .join(".config/xperf");
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join("askpass.sh");
+    let content = "#!/bin/sh\n# xperf SSH_ASKPASS helper：密码只经环境变量传入，不落盘\nprintf '%s\\n' \"$XPERF_SSH_PW\"\n";
+    let need_write = std::fs::read_to_string(&path).ok().as_deref() != Some(content);
+    if need_write {
+        std::fs::write(&path, content)?;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(path)
+}
+
+/// 给 ssh 命令注入密码认证环境（askpass 三件套 + 密码本体）。仅 master 建链调用。
+fn inject_password_env(cmd: &mut Command) -> Result<()> {
+    let Some(pw) = SSH_PASSWORD.lock().ok().and_then(|g| g.clone()) else {
+        return Ok(());
+    };
+    let script = ensure_askpass_script()?;
+    cmd.env("SSH_ASKPASS", script)
+        // force：即使有 TTY 也走 askpass（OpenSSH ≥ 8.4，macOS/现代 Linux 均满足）
+        .env("SSH_ASKPASS_REQUIRE", "force")
+        .env("XPERF_SSH_PW", pw)
+        // 部分平台 askpass 仍需 DISPLAY 存在（值任意）
+        .env("DISPLAY", "xperf");
+    Ok(())
+}
+
+/// 从 stderr 识别密码认证失败（密码错误或服务器未启用密码认证）
+fn is_auth_failure(stderr: &str) -> bool {
+    stderr.contains("Permission denied")
+        || stderr.contains("Authentication failed")
+        || stderr.contains("password authentication")
+}
+
+/// 把 Host 条目追加到 `~/.ssh/config`（别名已存在则报错不覆盖；
+/// 只含 HostName/User/Port——**密码与密钥路径均不写入**，无任何秘密）。
+/// 返回 config 文件路径。
+pub fn save_ssh_config_host(
+    alias: &str,
+    host: &str,
+    user: Option<&str>,
+    port: Option<u16>,
+) -> Result<PathBuf> {
+    let path = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .ok_or_else(|| anyhow::anyhow!("HOME 未设置"))?
+        .join(".ssh/config");
+    save_ssh_config_host_to(&path, alias, host, user, port)?;
+    Ok(path)
+}
+
+/// [`save_ssh_config_host`] 的可测内核：目标文件可注入。
+fn save_ssh_config_host_to(
+    path: &std::path::Path,
+    alias: &str,
+    host: &str,
+    user: Option<&str>,
+    port: Option<u16>,
+) -> Result<()> {
+    let alias = alias.trim();
+    let host = host.trim();
+    // 别名字符集收敛到 ssh config 安全范围（防注入新指令行）
+    if alias.is_empty()
+        || !alias
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+    {
+        bail!("别名只接受字母/数字/. _ -（它会成为 ssh config 的 Host 行）");
+    }
+    if host.is_empty() || host.chars().any(|c| c.is_whitespace()) {
+        bail!("主机名不能为空且不含空白字符");
+    }
+    if let Some(u) = user {
+        if u.chars().any(|c| c.is_whitespace()) {
+            bail!("用户名不含空白字符");
+        }
+    }
+    let existing = std::fs::read_to_string(path).unwrap_or_default();
+    if host_alias_exists(&existing, alias) {
+        bail!("别名 `{alias}` 已存在于 ~/.ssh/config，请换一个名称（不覆盖既有条目）");
+    }
+    let mut block = format!("\n# xperf 远程后端（{} 写入）\nHost {alias}\n    HostName {host}\n", chrono::Local::now().format("%Y-%m-%d"));
+    if let Some(u) = user.filter(|u| !u.trim().is_empty()) {
+        block.push_str(&format!("    User {}\n", u.trim()));
+    }
+    if let Some(p) = port.filter(|p| *p != 22) {
+        block.push_str(&format!("    Port {p}\n"));
+    }
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).ok();
+        }
+    }
+    use std::io::Write as _;
+    let mut f = std::fs::OpenOptions::new().create(true).append(true).open(path)?;
+    f.write_all(block.as_bytes())?;
+    Ok(())
+}
+
+/// ssh config 文本中是否已有该 Host 别名（跳过注释；Host 行可带多个别名/通配符，
+/// 只有精确别名才判冲突——通配符 `Host *` 不算占用）
+fn host_alias_exists(config: &str, alias: &str) -> bool {
+    config.lines().any(|line| {
+        let line = line.split('#').next().unwrap_or("").trim();
+        let mut fields = line.split_whitespace();
+        let Some(kw) = fields.next() else { return false };
+        if !kw.eq_ignore_ascii_case("host") {
+            return false;
+        }
+        fields.any(|a| a == alias)
+    })
+}
+
 /// 传输全局状态（TRANSPORT/TUNNEL）测试串行化锁：所有读写这两个全局的测试
 /// 必须先持有它，防同进程并行测试互踩
 #[cfg(test)]
@@ -745,7 +913,7 @@ mod tests {
     #[test]
     fn test_master_ssh_args() {
         let target = SshTarget::new("hppc").with_remote_port(5037);
-        let args = master_ssh_args(std::path::Path::new("/tmp/ctl"), 51234, &target);
+        let args = master_ssh_args(std::path::Path::new("/tmp/ctl"), 51234, &target, false);
         let s = args.join(" ");
         // 实测依据参数（设计 §4.2）：ControlMaster / 后台 / 压缩 / 快速失败 / 保活 / hop#1 转发
         for needle in [
@@ -760,6 +928,83 @@ mod tests {
         assert_eq!(args.last().unwrap(), "hppc");
         // 安全红线：绝不携带 kill-server（R2）
         assert!(!s.contains("kill-server"));
+    }
+
+    #[test]
+    fn test_master_ssh_args_password_mode() {
+        let target = SshTarget::new("hppc").with_remote_port(5037);
+        let args = master_ssh_args(std::path::Path::new("/tmp/ctl"), 51234, &target, true);
+        let s = args.join(" ");
+        // 密码模式：BatchMode 必须缺席（它会禁掉密码询问），快速失败参数在
+        assert!(!s.contains("BatchMode"), "{s}");
+        assert!(s.contains("NumberOfPasswordPrompts=1"), "{s}");
+        assert!(s.contains("ConnectTimeout=10"), "{s}");
+        // 其余 master 参数保持
+        for needle in ["-M", "-f", "-N", "ExitOnForwardFailure=yes", "Compression=yes"] {
+            assert!(s.contains(needle), "{s}");
+        }
+    }
+
+    #[test]
+    fn test_host_alias_exists() {
+        let cfg = "# 注释\nHost hppc\n    HostName 1.2.3.4\nHost gpu farm\n    User a\nHost * \n    Port 22\n#Host commented\n";
+        assert!(host_alias_exists(cfg, "hppc"));
+        assert!(host_alias_exists(cfg, "farm")); // 一行多别名
+        assert!(!host_alias_exists(cfg, "commented")); // 注释行不算
+        assert!(host_alias_exists(cfg, "*")); // 精确匹配语义：别名恰好是 * 才算占用
+        assert!(!host_alias_exists(cfg, "other")); // Host * 通配行不影响其他别名
+        assert!(!host_alias_exists(cfg, "nonexist"));
+        assert!(!host_alias_exists("", "hppc"));
+    }
+
+    #[test]
+    fn test_save_ssh_config_host_to() {
+        let dir = std::env::temp_dir().join(format!("xperf-sshcfg-{}", std::process::id()));
+        let path = dir.join("config");
+        // 写入新条目
+        save_ssh_config_host_to(&path, "testbox", "192.168.1.10", Some("han"), Some(2222)).unwrap();
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("Host testbox\n"), "{content}");
+        assert!(content.contains("HostName 192.168.1.10\n"));
+        assert!(content.contains("User han\n"));
+        assert!(content.contains("Port 2222\n"));
+        assert!(!content.contains("assword"), "任何秘密都不得入文件: {content}");
+        // 22 端口省略 Port 行；user 留空省略 User 行
+        save_ssh_config_host_to(&path, "b2", "h2", None, Some(22)).unwrap();
+        let c2 = std::fs::read_to_string(&path).unwrap();
+        let block2 = c2.split("Host b2").nth(1).unwrap();
+        assert!(!block2.contains("Port"), "{block2}");
+        assert!(!block2.contains("User"), "{block2}");
+        // 别名冲突报错且不覆盖
+        let err = save_ssh_config_host_to(&path, "testbox", "9.9.9.9", None, None).unwrap_err();
+        assert!(err.to_string().contains("已存在"), "{err}");
+        assert!(std::fs::read_to_string(&path).unwrap().contains("192.168.1.10"));
+        // 非法别名/主机校验
+        assert!(save_ssh_config_host_to(&path, "bad name", "h", None, None).is_err());
+        assert!(save_ssh_config_host_to(&path, "ok", "bad host", None, None).is_err());
+        assert!(save_ssh_config_host_to(&path, "", "h", None, None).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_is_auth_failure() {
+        assert!(is_auth_failure("han@host: Permission denied (publickey,password)."));
+        assert!(is_auth_failure("Authentication failed."));
+        assert!(!is_auth_failure("Connection timed out"));
+        assert!(!is_auth_failure(""));
+    }
+
+    #[test]
+    fn test_ssh_password_session_memory_only() {
+        let _g = TRANSPORT_TEST_LOCK.lock().unwrap();
+        assert!(!has_ssh_password());
+        set_ssh_password(Some("secret".into()));
+        assert!(has_ssh_password());
+        set_ssh_password(Some("".into())); // 空串视同清除
+        assert!(!has_ssh_password());
+        set_ssh_password(Some("secret".into()));
+        set_ssh_password(None);
+        assert!(!has_ssh_password());
     }
 
     #[test]
