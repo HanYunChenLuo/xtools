@@ -323,6 +323,10 @@ hop#2: 本机 P_loc → 远端 adb forward 分配端口（agent 事件流，每�
 - **AX 目验教训（2026-09-14）**：① 流式渲染（尤其全机洪泛 ~190 行/s）期间 webkit AX 树会整体剪枝且**粘性不恢复**——此时 `entire contents` 枚举返回空/死引用，**须改递归 `UI elements of` 逐层遍历**（同一实例上 entire contents 全空但递归遍历完整可达）；② AX `set value` 写文本框须先 `set focused of el to true`，否则值不落 DOM input（曾致按包过滤静默退化为全机抓取——落盘目录是 device-* 而非 pkg 名即为判据）；③（2026-09-15 补）WKWebView 下 `set value` 落 DOM 是**异步生效**（秒级延迟），且合成 `keystroke return` 不一定触发 `change`——可靠触发改用 `click` 另一元素制造 blur（change 随 blur 派发）；缓存的 AX 元素引用在流式渲染后会失效（须重新遍历获取）；AppleScript 保留字坑：`note`/`st` 不可作标识符（BSD sed 不认 `\b`，批量改名用 python）
 
 
+### 问题反馈（`xperf-core/src/feedback.rs`，CLI `--feedback` / GUI 侧栏「问题反馈」按钮，2026-09-17）
+
+一键收集 **xperf 自身**证据打包上传内部 GitLab issue（project 39859）。采集范围（默认最近 1h，按文件 mtime 过滤）：① 会话产物（数据根下 CSV/trace 与 simpleperf 报告+`.data`/截屏/会话 logcat；**排除** `.pftrace`/录屏 `.mp4`/火焰图 `.html` 大文件，issue 正文列本机路径供手动附加）；② GUI 诊断日志（`XPERF_DIAG_LOG`，尾段 512KB）；③ 每台在线设备（网关除外）的 `/data/local/tmp/xperf-agent.log`（adb pull，SSH 远程经 hop#1 天然承载）；④ `manifest.json` 环境信息（版本/OS/传输模式/设备快照/清单）。**设备 logcat 不自动采集**（非工具自身日志），issue 正文模板引导用户手动 `adb logcat -d` 附加。**逐项自检清单**（`ChecklistEntry` ok/note）——缺失项如实标注原因不静默；单文件 >32MB 截尾保留末尾并注明。打包 `tar`+`flate2`、上传 `reqwest::blocking`（rustls 内置证书链，**零系统命令依赖**）；token = `GITLAB_TOKEN` env > `~/.config/xperf/gitlab-token`（API/项目 ID 可被 `GITLAB_API`/`GITLAB_PROJECT_ID` 覆盖）；附件超实例上限（413）回退 package registry；labels 不被接受则去 labels 重试。上传失败归档保留且报错附路径。GUI：数据管理区按钮 → 全局浮层（描述可空）→ `submit_feedback`（spawn_blocking）→ 状态栏出 URL + 自动浏览器打开 issue。AX 目验教训 ④：本实例 WKWebView 子树**冻结在启动早期快照**（新插入的设备页/浮层不暴露，`AXEnhancedUserInterface` 无权设置）——但 `keystroke`/`key code` 走 DOM 焦点链可达（textarea `focus()` 后可直接键入、Tab 序遍历按钮、Space 触发点击），反馈链路以此闭环验证。
+
 ### perfetto 深挖模式（`--trace N`，xperf-core/src/trace.rs，CLI 与 GUI 共用）
 
 「录制-分析」模式，与实时采样互补：采样回答"什么时候高"，trace 回答"为什么高"。CLI 侧可与采样指标并行（`--cpu --trace 10`：后台线程录制 + 采样限时同窗口，到点自动结束）或单独使用（无指标 flag 时只录 trace）；GUI 侧深挖按钮与采样会话并行（采样不限时，窗口对照靠时间戳）。core 模块不打印不建目录：输出目录由调用方传入，报告以文本返回（CLI println / GUI 走 Tauri `trace` 事件 `{stage: recording|progress|recorded|done|error, message}`——progress 为每秒录制进度（elapsed/Ns，core `record` 的 `progress` 回调），done 的 message 即完整报告）。
@@ -410,6 +414,7 @@ hop#2: 本机 P_loc → 远端 adb forward 分配端口（agent 事件流，每�
 | simpleperf 浏览器火焰图（GUI 按钮） | 首次点击时渲染生成（复用不重渲染） | `/tmp/xperf/<pkg>/<ts>/stack/*.html`（同目录同名） |
 | 截屏/录屏（CLI `--screenshot`/`--record N`、GUI 按钮） | 截屏即时落盘；录屏停止封盘后落盘 | `<pkg>/<ts>/capture/{shot,record}_*.png/mp4`（无包名 `device-<serial>/<ts>/capture/`；GUI 采样中随会话目录 `capture/`） |
 | logcat（CLI `--logcat`、GUI「日志」tab） | 抓取期间流式落盘（逐行 flush） | `<pkg>/<ts>/logcat/logcat.log`（无包名 `device-<serial>/<ts>/logcat/`；GUI 采样中随会话目录 `logcat/`，否则 `<ts>-<serial>` 目录） |
+| 问题反馈（CLI `--feedback`、GUI「问题反馈」按钮） | 提交时打包（归档保留，上传失败不删） | `<数据根>/feedback/xperf-feedback-<ts>.tar.gz`（暂存目录打包后即删） |
 
 - 内存中的时序序列只服务退出图表：超过 2×30k 点时每 2 取 1 原地抽稀（`CHART_SERIES_CAP`，保完整时间范围、分辨率随运行时长自适应降级）；CSV 始终全量。
 - `CpuTimeSeriesData.top_threads` 已无读者，CLI agent 路径不再写入（线程明细走 thread_time_series + 流式 CSV）。
