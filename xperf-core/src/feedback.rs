@@ -611,6 +611,7 @@ fn upload_attachment(
 }
 
 /// 创建 issue（labels 不被实例接受时去 labels 重试一次），返回 issue web URL。
+/// 默认指派给 [`default_assignee`]（triage 人）；指派人解析失败不阻塞建 issue。
 fn create_issue(
     client: &reqwest::blocking::Client,
     auth: &crate::oauth::GitlabAuth,
@@ -619,10 +620,16 @@ fn create_issue(
 ) -> Result<String> {
     let url = format!("{}/projects/{}/issues", gitlab_api(), gitlab_project_id());
     let (hname, hval) = auth.header();
+    let assignee = default_assignee().and_then(|name| resolve_user_id(client, auth, &name));
+    let mut payload = serde_json::json!({ "title": title, "description": body });
+    if let Some(id) = assignee {
+        payload["assignee_ids"] = serde_json::json!([id]);
+    }
     for labels in ["feedback", ""] {
-        let mut payload = serde_json::json!({ "title": title, "description": body });
         if !labels.is_empty() {
             payload["labels"] = serde_json::json!(labels);
+        } else {
+            payload.as_object_mut().unwrap().remove("labels");
         }
         let resp = client
             .post(&url)
@@ -646,6 +653,52 @@ fn create_issue(
         }
     }
     unreachable!("labels 为空时失败已提前返回")
+}
+
+/// 反馈 issue 的默认指派人（triage；`XPERF_GITLAB_ASSIGNEE` 可覆盖，空串=不指派）
+fn default_assignee() -> Option<String> {
+    assignee_from_env(std::env::var("XPERF_GITLAB_ASSIGNEE").ok().as_deref())
+}
+
+/// [`default_assignee`] 的纯函数内核（单测可注入）：未设置=wangjinhan，空串=不指派
+fn assignee_from_env(env: Option<&str>) -> Option<String> {
+    match env {
+        Some(s) => {
+            let s = s.trim();
+            if s.is_empty() { None } else { Some(s.to_string()) }
+        }
+        None => Some("wangjinhan".into()),
+    }
+}
+
+/// `GET /users?username=<name>` 解析用户数字 ID（assignee_ids 只收 ID）。
+/// 失败（网络/无此人/权限）返回 None 并记 diag——不阻塞 issue 创建。
+fn resolve_user_id(
+    client: &reqwest::blocking::Client,
+    auth: &crate::oauth::GitlabAuth,
+    username: &str,
+) -> Option<u64> {
+    let (hname, hval) = auth.header();
+    let resp = client
+        .get(format!("{}/users?username={}", gitlab_api(), username))
+        .header(hname, &hval)
+        .send()
+        .map_err(|e| crate::utils::diag(&format!("feedback: 指派人查询失败: {e:#}")))
+        .ok()?;
+    if !resp.status().is_success() {
+        crate::utils::diag(&format!("feedback: 指派人查询被拒: {}", resp.status()));
+        return None;
+    }
+    let users: Vec<serde_json::Value> = resp.json().ok()?;
+    let id = users
+        .iter()
+        .find(|u| u.get("username").and_then(|x| x.as_str()) == Some(username))
+        .and_then(|u| u.get("id"))
+        .and_then(|x| x.as_u64());
+    if id.is_none() {
+        crate::utils::diag(&format!("feedback: 指派人 {username} 不存在"));
+    }
+    id
 }
 
 // ==================== 渲染 ====================
@@ -875,6 +928,14 @@ mod tests {
         assert_eq!(bucket_of(Path::new("p/t/cpu/a.csv")), "采样 CSV");
         assert_eq!(bucket_of(Path::new("p/t/markers.csv")), "采样 CSV");
         assert_eq!(bucket_of(Path::new("p/t/unknown.bin")), "其他产物");
+    }
+
+    #[test]
+    fn test_assignee_from_env() {
+        assert_eq!(assignee_from_env(None).as_deref(), Some("wangjinhan"));
+        assert_eq!(assignee_from_env(Some("  someone ")).as_deref(), Some("someone"));
+        assert_eq!(assignee_from_env(Some("  ")), None);
+        assert_eq!(assignee_from_env(Some("")), None);
     }
 
     #[test]
