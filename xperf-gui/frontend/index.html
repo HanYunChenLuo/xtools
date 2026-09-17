@@ -24,6 +24,7 @@
     </div>
     <nav id="deviceTabs"></nav>
     <div id="status">未开始</div>
+    <button id="feedbackTopBtn" title="问题反馈：收集本机 + 全部在线设备最近 1 小时的 xperf 日志与产物，打包上传内部 GitLab issue">问题反馈</button>
     <button id="themeBtn" title="切换暗色/亮色主题">☾ 亮色</button>
   </header>
   <main id="content">
@@ -32,7 +33,7 @@
     </div>
   </main>
 
-  <!-- 问题反馈浮层（全局唯一；侧栏「问题反馈」按钮唤起，收集范围为全设备最近 1h） -->
+  <!-- 问题反馈浮层（全局唯一；顶栏「问题反馈」按钮唤起，收集范围为本机+全部设备最近 1h） -->
   <div id="feedbackMask" class="hidden">
     <div id="feedbackForm">
       <h3>问题反馈</h3>
@@ -42,8 +43,8 @@
         <button id="fbLogoutBtn" class="small hidden">退出登录</button>
       </div>
       <div class="fb-hint">
-        将收集最近 1 小时的 xperf 日志与产物（采样 CSV、分析报告、诊断日志、各设备 agent 日志、环境信息），
-        打包上传内部 GitLab issue。设备 logcat 不自动采集——如需要，issue 创建后按正文指引手动附加。
+        收集范围：<b>本机 + 全部在线设备</b>最近 1 小时的 xperf 日志与产物（采样 CSV、分析报告、诊断日志、各设备 agent 日志、环境信息），
+        打包上传内部 GitLab issue——不随当前设备页变化。设备 logcat 不自动采集，issue 创建后按正文指引手动附加。
       </div>
       <textarea id="fbDesc" rows="3" placeholder="一句话描述遇到的问题（可留空）"></textarea>
       <div class="fb-actions">
@@ -91,7 +92,6 @@
           <button class="small flex-fill compare-baseline-btn" title="当前会话与已存基线逐指标对比（回归/改善/持平）">对比基线</button>
         </div>
         <button class="small clean-btn">清理缓存与数据</button>
-        <button class="small feedback-btn" title="收集最近 1 小时 xperf 相关日志与产物（采样 CSV/分析报告/诊断日志/各设备 agent 日志/环境信息），打包上传内部 GitLab issue；设备 logcat 不自动采集，可在 issue 中按指引补充">问题反馈</button>
       </aside>
       <section class="main-area">
         <div class="tab-bar">
