@@ -2105,6 +2105,24 @@ fn main() {
 mod tests {
     use super::*;
 
+    /// 版本唯一出处的实证锚点：tauri.conf.json 不写 version（validate:tag 防回归
+    /// 拒绝），Tauri 回落到 CARGO_PKG_VERSION（tauri-codegen context.rs:273-277）
+    /// ——而它来自根 Cargo.toml 的 [workspace.package]。此断言锁住整条回落链：
+    /// 谁 tauri.conf.json 加回 version / workspace 继承断裂，这里先红。
+    #[test]
+    fn test_tauri_version_falls_back_to_workspace() {
+        let ctx: tauri::Context<tauri::Wry> = tauri::generate_context!();
+        let v = ctx.package_info().version.to_string();
+        assert_eq!(v, env!("CARGO_PKG_VERSION"), "tauri context 版本须回落到 crate 版本");
+        let root = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../Cargo.toml"))
+            .expect("workspace 根 Cargo.toml 不可读");
+        let ws_ver = root
+            .lines()
+            .find_map(|l| l.strip_prefix("version = ").map(|s| s.trim().trim_matches('"').to_string()))
+            .expect("根 Cargo.toml 须有 [workspace.package] version");
+        assert_eq!(v, ws_ver, "crate 版本须继承根 Cargo.toml（version.workspace = true 断裂？）");
+    }
+
     // ---- SSH 远程连接配置（save_remote/list_remotes；XDG_CONFIG_HOME 隔离到临时目录） ----
 
     #[test]

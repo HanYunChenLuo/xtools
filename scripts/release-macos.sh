@@ -19,7 +19,7 @@ VER="${TAG#v}"
 ROOT_DIR=$(cd "$(dirname "$0")/.." && pwd)
 cd "$ROOT_DIR"
 
-CARGO_VER=$(sed -n 's/^version = "\(.*\)"$/\1/p' xperf-cli/Cargo.toml | head -1)
+CARGO_VER=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
 if [ "$VER" != "$CARGO_VER" ]; then
     echo "错误: tag 版本 $VER 与 xperf-cli/Cargo.toml 的 $CARGO_VER 不一致"; exit 1
 fi
