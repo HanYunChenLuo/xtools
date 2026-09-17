@@ -28,7 +28,7 @@
 
 ## A. 已知缺陷
 
-- [x] ~~**Linux AppImage 在某台 Ubuntu 22.04 启动失败**~~（**已修复**，2026-09-16，`fix/appimage-harfbuzz` 合 main d75108f）：根因实锤——linuxdeploy excludelist 排除 libharfbuzz（假定目标系统自带），而 bundle 内 bookworm 版 pango 1.50.12/webkit 引用 3 个 harfbuzz 3.3+ 新增符号（`hb_font_set_synthetic_slant`/`hb_ot_layout_get_baseline_with_fallback`/`hb_ot_layout_get_horizontal_baseline_tag_for_script`），目标系统 harfbuzz 过旧（jammy=2.7.4）时启动即 symbol lookup error；24.04（8.3.0）有符号故仅 22.04 中招。修复：gui:linux 打包后向 AppDir 注入构建侧 libharfbuzz 6.0.0（glibc 需求 ≤2.33 兼容 jammy）+ nm 质量门 + 复用 tauri 缓存 linuxdeploy 内嵌的 appimagetool 重打包（构建期 /tmp 解包目录随 linuxdeploy 退出即删，须自行 extract）。bundle 其余系统依赖已全量符号审计无偏移（fribidi 两版一致；fontconfig/freetype jammy 版满足全部引用；glibc 最高 2.36 仅 libcups 打印路径，见 E 节）。**jammy 容器 A/B 验证**：旧包复现用户报错原文，新包 WebKit 进程组完整启动零报错。随下次版本 tag 发布。
+- [x] ~~**Linux AppImage 在某台 Ubuntu 22.04 启动失败**~~（**已修复**，2026-09-16，`fix/appimage-harfbuzz` 合 main d75108f）：根因实锤——linuxdeploy excludelist 排除 libharfbuzz（假定目标系统自带），而 bundle 内 bookworm 版 pango 1.50.12/webkit 引用 3 个 harfbuzz 3.3.0/4.0.0 新增符号（`hb_font_set_synthetic_slant`@3.3.0 / `hb_ot_layout_get_baseline_with_fallback`@4.0.0 / `hb_ot_layout_get_horizontal_baseline_tag_for_script`@4.0.0），目标系统 harfbuzz 过旧（jammy=2.7.4）时启动即 symbol lookup error；24.04（8.3.0）有符号故仅 22.04 中招。修复：gui:linux 打包后向 AppDir 注入构建侧 libharfbuzz 6.0.0（glibc 需求 ≤2.33 兼容 jammy）+ nm 质量门 + 复用 tauri 缓存 linuxdeploy 内嵌的 appimagetool 重打包（构建期 /tmp 解包目录随 linuxdeploy 退出即删，须自行 extract）。bundle 其余系统依赖已全量符号审计无偏移（fribidi 两版一致；fontconfig/freetype jammy 版满足全部引用；glibc 最高 2.36 仅 libcups 打印路径，见 E 节）。**jammy 容器 A/B 验证**：旧包复现用户报错原文，新包 WebKit 进程组完整启动零报错。随下次版本 tag 发布。
 
 ## B. 指标覆盖
 

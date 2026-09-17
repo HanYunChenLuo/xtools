@@ -182,8 +182,8 @@ gui:linux:
     - if ! cargo tauri --version >/dev/null 2>&1; then cargo install tauri-cli --version 2.4.1 --locked; fi
     - cd xperf-gui && ARCH=x86_64 CI=true cargo tauri build --verbose --config tauri.release.json --bundles appimage && cd ..
     # linuxdeploy excludelist 排除 libharfbuzz（假定目标系统自带），但 bundle 内 bookworm 版
-    # pango/webkit 引用了 3 个 harfbuzz 3.3+ 才新增的符号（hb_font_set_synthetic_slant /
-    # hb_ot_layout_get_baseline_with_fallback / hb_ot_layout_get_horizontal_baseline_tag_for_script），
+    # pango/webkit 引用了 3 个 harfbuzz 3.3.0/4.0.0 才新增的符号（hb_font_set_synthetic_slant@3.3.0 /
+    # hb_ot_layout_get_baseline_with_fallback@4.0.0 / hb_ot_layout_get_horizontal_baseline_tag_for_script@4.0.0），
     # 目标系统 harfbuzz 过旧（Ubuntu 22.04 = 2.7.4）时启动即 symbol lookup error。
     # 修复：把构建侧（bookworm 6.0.0，glibc 需求 ≤2.33 兼容 jammy）libharfbuzz 注入
     # AppDir 后重打包，bundle 内字体栈版本自洽。其余排除项已审计无版本偏移
