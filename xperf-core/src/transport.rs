@@ -111,11 +111,15 @@ impl SshTunnel {
                 if stderr_tail.is_empty() { String::new() } else { format!(" stderr={}", &stderr_tail[..stderr_tail.len().min(200)]) }
             ));
             if !ok {
-                last_err = if password_mode && is_auth_failure(&stderr_tail) {
-                    anyhow::anyhow!("密码认证失败（密码错误或服务器未启用密码登录）: {stderr_tail}")
-                } else {
-                    anyhow::anyhow!("ssh master 建立失败（端口 {port} 或网络问题）: {stderr_tail}")
-                };
+                if password_mode && is_auth_failure(&stderr_tail) {
+                    // 密码错误/服务器拒密码：重试只会错得更久且占服务器 MaxAuthTries
+                    // 配额——立即终止，交回用户重输（GUI 重开表单/CLI 改 env）
+                    let _ = kill_master(&control_path, &target.host);
+                    return Err(anyhow::anyhow!(
+                        "密码认证失败（密码错误或服务器未启用密码登录）: {stderr_tail}"
+                    ));
+                }
+                last_err = anyhow::anyhow!("ssh master 建立失败（端口 {port} 或网络问题）: {stderr_tail}");
                 continue;
             }
             // ③ 远端预检（mux 复用 master 连接，不产生新握手）：解析 adb 路径 +
