@@ -5,6 +5,22 @@
 > 待办事项（backlog）在 `WORKSPACE.md` 维护，本文件只做历史追溯。
 > 新会话开始时可先读本文件了解近期上下文。
 
+## 2026-09-17（晚，续2）：README 展示文档 review 与重排（中文主 + 英文版）
+
+**任务**：review README.md 等展示文档是否需要修改/优化，并提供对应英文版本。
+
+**commit**（`docs/readme-refresh` 合 main 57c8866）：`136022d`（README 重排 + 内容更新 + 打包引用同步）→ `4caeaa7`（CHANGELOG Unreleased 补记）→ `cd63eb1`（CLI `--remote` help 文案修正）。
+
+**关键结论**：
+- 英文版其实已存在（README.md=英文 / README_zh.md=中文）但**语言角色倒置**——内部中文 GitLab 默认渲染的 README.md 是英文，且两份互不链接 → 重排为 **README.md 中文主文档 + README_en.md 英文版**（互链，README_zh.md 删除）；`.gitlab-ci.yml` 与 `scripts/release-macos.sh` 的打包引用同步（CLI tar 内两份 README 都随包分发）
+- 标题 `XTools` 为改名前残留，统一为 `xperf`
+- 功能面补齐（v0.2.1 后合 main 的）：问题反馈（`--feedback`/`--gitlab-login`）、SSH 密码认证（GUI 表单/`XPERF_SSH_PASSWORD`）、工具命令三件；SSH 段落从修复说明口吻（DMG/Finder 细节）收敛为功能描述；Usage 选项 6 项 → 分组表（30+）+ 示例扩 6 场景；**GUI 章节重写**为实际功能面（多设备并行/四子 tab/应用管理/远程连接/反馈/主题——原文只写了三张图）；输出示例中性化（SVM 为旧测试对象）；新增 MIT License 章节
+- CHANGELOG `[Unreleased]` 补记：问题反馈/OAuth/SSH 密码认证 + **AppImage harfbuzz 修复**（`git merge-base --is-ancestor` 核实 d75108f **不在 v0.2.1 tag 内**，即 v0.2.1 AppImage 在 Ubuntu 22.04 仍有启动 bug，修复随下版发布）
+- CLI `--remote` help「需 ssh_config 免密配置」已过时 → 更新为密码认证说明
+- 验证：`cargo build -p xperf-cli --release` + `--help` 渲染确认；`cargo doc` 默认 lint 集 + 三 crate missing_docs 全零；`README_zh` 无存活引用残留（仅 SESSION 历史条目，按约定不动）
+
+**遗留**：GitLab 网页端渲染效果留用户一眼确认；README 描述的是 main 当前态（其中问题反馈/SSH 密码未随 v0.2.1 发布，下次 tag 生效）。
+
 ## 2026-09-17（傍晚，续）：密码错误即停 + 三轮 review 修复 + 测试覆盖补齐 + 版本号统一唯一出处
 
 **任务**：SSH 密码功能收尾 review 链 + 版本号管理优化（用户提出：一次发版要改多处，能否统一出处）。
