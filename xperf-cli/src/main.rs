@@ -187,9 +187,9 @@ fn run_feedback(desc: &str) -> Result<String> {
         );
     }
     println!(
-        "已打包: {}（{:.1} MB），正在上传…",
+        "已打包: {}（{}），正在上传…",
         bundle.archive.display(),
-        bundle.archive_bytes as f64 / 1e6
+        xperf_core::feedback::human_bytes(bundle.archive_bytes)
     );
     xperf_core::feedback::submit(&bundle)
         .map_err(|e| anyhow::anyhow!("{e:#}\n本地归档: {}", bundle.archive.display()))

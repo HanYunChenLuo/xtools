@@ -380,6 +380,9 @@ fn stage_diag_log(staging: &Path) -> ChecklistEntry {
         }
     };
     let dst = staging.join("data/gui-diag.log");
+    if let Some(parent) = dst.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
     match copy_tail(src, &dst, DIAG_TAIL_BYTES) {
         Ok(()) => {
             let size = fs::metadata(src).map(|m| m.len()).unwrap_or(0);
@@ -740,8 +743,8 @@ fn render_issue_body(
     b
 }
 
-/// 人类可读字节数（KB/MB 一位小数）
-fn human_bytes(n: u64) -> String {
+/// 人类可读字节数（KB/MB 一位小数；CLI/GUI 展示归档大小复用）
+pub fn human_bytes(n: u64) -> String {
     if n >= 1024 * 1024 {
         format!("{:.1} MB", n as f64 / 1024.0 / 1024.0)
     } else if n >= 1024 {
