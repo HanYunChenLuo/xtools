@@ -21,6 +21,8 @@ pub mod coldstart;
 pub mod cpu;
 /// 流式 CSV 落盘（边采边写，CLI/GUI 共用；GUI 每会话独立目录）。
 pub mod csvstream;
+/// 问题反馈：一键收集 xperf 自身日志/产物打包上传 GitLab issue（CLI/GUI 共用）。
+pub mod feedback;
 /// FPS 采样协议类型（时序数据结构）。
 pub mod fps;
 /// host 侧采样通道（SS4 专属：ligfx GPU busy，合成事件汇入 AgentStream）。
