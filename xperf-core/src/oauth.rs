@@ -6,8 +6,9 @@
 //! 原子写）。access_token 默认 2h 有效，过期前用 refresh_token 静默轮换（GitLab 每次
 //! 刷新换发新 refresh_token，旧的立即作废——落盘失败即丢登录态，故原子写）。
 //!
-//! 认证头与 PAT 不同：OAuth token 用 `Authorization: Bearer`（[`GitlabAuth::header`]
-//! 统一封装，调用方无感）。token 端点不换 JSON 时用 `application/x-www-form-urlencoded`。
+//! 认证头与 PAT 不同：OAuth token 用 `Authorization: Bearer`
+//! （[`GitlabAuth::header`](crate::oauth::GitlabAuth::header) 统一封装，调用方无感）。
+//! token 端点不换 JSON 时用 `application/x-www-form-urlencoded`。
 //!
 //! 无头环境（SSH/CI）无浏览器可用，PAT（env/文件）路径保留——见 [`crate::feedback`]。
 
