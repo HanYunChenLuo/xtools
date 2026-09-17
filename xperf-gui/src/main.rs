@@ -461,8 +461,16 @@ fn gui_data_root() -> std::path::PathBuf {
     std::env::temp_dir().join("xperf")
 }
 
-/// 返回 GUI 发布包内随附的 Android agent。
-/// 开发构建允许从 workspace 的 `target` 目录回退，发布构建不允许触发编译。
+/// 返回 GUI 运行所需的 Android agent 二进制路径。
+///
+/// 优先取发布包内随附的资源（`resource_dir()/agent/xperf-agent`，DMG/AppImage
+/// 构建时注入，运行时不编译）。资源缺失时视为**开发运行**回退到 workspace 的
+/// 交叉构建产物并按需自动构建（与 CLI 的 `ensure_agent_built` 一致）。
+///
+/// 开发运行不能以 `cfg!(debug_assertions)` 判定——`cargo run --release` 同样是
+/// 开发运行（曾因此误报「缺少预编译 agent」）；改用「编译期 workspace 是否
+/// 存在」判定：`workspace_root()` 是编译期固化的绝对路径，只存在于构建机，
+/// 发布包用户机器上必然缺失，落到安装包缺资源的报错（不触发编译）。
 fn bundled_agent_path(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
     if let Ok(resource_dir) = app.path().resource_dir() {
         let bundled = resource_dir.join("agent").join("xperf-agent");
@@ -470,13 +478,10 @@ fn bundled_agent_path(app: &tauri::AppHandle) -> Result<std::path::PathBuf, Stri
             return Ok(bundled);
         }
     }
-    if cfg!(debug_assertions) {
-        let dev = xperf_core::agent::agent_binary_path();
-        if dev.is_file() {
-            return Ok(dev);
-        }
+    if agent::workspace_root().join("Cargo.toml").is_file() {
+        return agent::ensure_agent_built().map_err(|e| e.to_string());
     }
-    Err("GUI 发布包缺少预编译 agent/ xperf-agent；请重新安装完整 GUI 包".to_string())
+    Err("GUI 发布包缺少预编译 agent/xperf-agent；请重新安装完整 GUI 包".to_string())
 }
 
 #[tauri::command]

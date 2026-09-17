@@ -5,6 +5,21 @@
 > 待办事项（backlog）在 `WORKSPACE.md` 维护，本文件只做历史追溯。
 > 新会话开始时可先读本文件了解近期上下文。
 
+## 2026-09-17（晚，续3）：GUI `--release` 开发运行误报「缺少预编译 agent」修复
+
+**任务**：用户报 bug——`cargo run --bin xperf-gui --release` 报「GUI 发布包缺少预编译 agent/xperf-agent；请重新安装完整 GUI 包」。
+
+**commit**（`fix/gui-release-agent-fallback`）：core `agent::workspace_root()`（编译期固化绝对路径，`agent_binary_path` 改由它拼接 + 单测）→ GUI `bundled_agent_path` 回退判定改写 → docs（CLAUDE/WORKSPACE/SESSION）。
+
+**关键结论**：
+- 根因：`f4f285d`（GUI 发布打包）把 dev 路径的 `ensure_agent_built()` 换成 `bundled_agent_path()`，回退分支以 `cfg!(debug_assertions)` 判定开发运行——`cargo run --release` 是 release profile 的**开发运行**（无打包资源），被误判为发布包缺资源
+- 修复：开发判定改「编译期 workspace 是否存在」——GUI 资源缺失且构建机 workspace 在 → 回退 `ensure_agent_built`（恢复 f4f285d 之前的自动构建行为，**任意 profile**）；发布包用户机器 workspace 必不存在 → 保持缺资源报错、不触发 Cargo/NDK（发布约束不变）；顺带修文案 typo（`agent/ xperf-agent` 多空格）
+- **真机端到端**（`./target/release/xperf-gui --remote hppc --device 6eb792dfb0f --package com.google.android.filament.gltf --cpu --memory --fps` 自动启动）：agent 启动（8 核 root）+ CPU/内存/FPS 三 CSV 流式落盘（CPU ~25%/PSS 646MB 含 DMA-BUF 533MB）+ 退出后 daemon 空载自杀**零残留**
+- 验证：core 149+8 全绿（含新增 `test_workspace_root_points_at_real_workspace`）、cargo doc 默认 lint 集 + core/gui missing_docs 全零
+- 勘察注意：① `adb shell "pgrep -f xperf-agent"` 会**自匹配 shell 命令行**出假 pid，验证残留用 `ps -A -o PID,NAME | grep xperf`；② macOS 上 CLI/GUI 共用的 `csvstream::data_root()` = `env::temp_dir()/xperf` 落在用户级 `$TMPDIR`（/var/folders/...）而非 /tmp（Linux 才是 /tmp），验证产物别看错目录
+
+**遗留**：无（发布包行为未动，`validate_dmg`/CI 资源校验仍兜底）。
+
 ## 2026-09-17（晚，续2）：README 展示文档 review 与重排（中文主 + 英文版）
 
 **任务**：review README.md 等展示文档是否需要修改/优化，并提供对应英文版本。

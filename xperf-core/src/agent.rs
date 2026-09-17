@@ -362,13 +362,22 @@ impl Drop for AgentStream {
     }
 }
 
-/// 本机 agent 二进制路径（交叉编译产物）
-pub fn agent_binary_path() -> PathBuf {
-    // xperf-core/Cargo.toml 所在目录的上级 = workspace 根
+/// 编译期 workspace 根目录（`xperf-core/Cargo.toml` 的上级）。
+///
+/// 该路径在编译时以绝对路径固化，因此**只存在于构建机**——发布包
+/// （DMG/AppImage）用户机器上不存在。GUI 用「此目录是否存在」区分
+/// 「开发运行」（回退 workspace 交叉构建产物）与「安装包缺资源」，
+/// 代替 `debug_assertions`（`cargo run --release` 同样是开发运行）。
+pub fn workspace_root() -> std::path::PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .expect("workspace root")
-        .join("target/aarch64-linux-android/release/xperf-agent")
+        .to_path_buf()
+}
+
+/// agent 交叉编译产物路径：`<workspace>/target/aarch64-linux-android/release/xperf-agent`
+pub fn agent_binary_path() -> PathBuf {
+    workspace_root().join("target/aarch64-linux-android/release/xperf-agent")
 }
 
 /// 目录树下最新 .rs 文件的 mtime（递归；目录不可读/为空返回 None）
@@ -993,6 +1002,21 @@ fn reconnect_agent_inner(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `workspace_root` 指向真实 workspace 根（Cargo.toml + 成员 crate 在位）；
+    /// `agent_binary_path` 由它拼接（GUI 回退判定依赖此布局）。
+    /// 注：仅在开发检出内有效——发布包用户机器上该路径不存在，本测试
+    /// 也不会随发布包分发运行。
+    #[test]
+    fn test_workspace_root_points_at_real_workspace() {
+        let root = workspace_root();
+        assert!(root.join("Cargo.toml").is_file());
+        assert!(root.join("xperf-core/Cargo.toml").is_file());
+        assert_eq!(
+            agent_binary_path(),
+            root.join("target/aarch64-linux-android/release/xperf-agent")
+        );
+    }
 
 
 
