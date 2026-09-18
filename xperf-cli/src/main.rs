@@ -1930,8 +1930,11 @@ async fn main() -> Result<()> {
             println!("{}", "基线对比需要采样会话（至少一个 --cpu/--memory/… 指标），本次跳过".yellow());
         }
         // 冷启动独立模式：无指标 flag 时也执行测量（否则静默 no-op——测量自带
-        // 15s 超时，天然有界；结果打印到终端，无采样会话故不进汇总）
-        run_cold_start(&args);
+        // 15s 超时，天然有界；结果打印到终端，无采样会话故不进汇总）。
+        // 独立模式下测量是唯一目的，失败如实置失败码（与其他独立能力一致）
+        if args.cold_start.is_some() && run_cold_start(&args).is_none() {
+            capture_failed = true;
+        }
         if args.mirror {
             println!("镜像持续到 Ctrl-C 或窗口关闭…");
             if let Some(m) = &mirror {

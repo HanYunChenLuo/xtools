@@ -102,7 +102,7 @@ clock — they share the timeline on the device.
 | Code | Meaning |
 |------|---------|
 | 0 | Success. Includes: bounded/Ctrl-C sampling end; threshold alerts triggered; baseline regression found (both are **report-only**, they never fail the run) |
-| 1 | Runtime failure: invalid/missing package name; multi-device without `--device`; `--device` offline; remote init failure; sampling/agent-deploy failure; **standalone** `--trace`/`--stack` recording failure; standalone `--screenshot`/`--record`/`--logcat`/`--mirror` failure; `--force-stop` / `--feedback` / `--gitlab-login` failure |
+| 1 | Runtime failure: invalid/missing package name; multi-device without `--device`; `--device` offline; remote init failure; sampling/agent-deploy failure; **standalone** `--trace`/`--stack` recording failure; standalone `--screenshot`/`--record`/`--logcat`/`--mirror`/`--cold-start` failure; `--force-stop` / `--feedback` / `--gitlab-login` failure |
 | 2 | CLI argument parse error (unknown flag, bad value, `--save-baseline` + `--compare-baseline` together, `--logcat-regex` without `--logcat`) |
 
 Key nuance: in **standalone** mode a failing capability exits 1; when the same
