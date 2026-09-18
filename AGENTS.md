@@ -64,8 +64,9 @@ xperf-cli --remote <ssh-host> --package com.example.app --cpu --duration 10
 ```
 
 The app must be **running** during sampling — if no process matches the
-package the session produces no CSVs (exit code is still 0). Use
-`--cold-start` or `adb shell am start` first when in doubt.
+package the session produces no CSVs (exit code is still 0); `summary.json`
+is still written with `samples: 0` and null metrics. Use `--cold-start` or
+`adb shell am start` first when in doubt.
 
 ## Output layout
 
@@ -91,7 +92,25 @@ on stdout as `Created timestamp directory: ...`; or take the newest dir under
 | `capture/` | `shot_*.png`, `record_*.mp4` |
 | `logcat/logcat.log` | `-v threadtime -v year` lines, same device clock as CSV timestamps |
 | `baseline_report.txt` | verdict per metric (only with `--compare-baseline`) |
+| `summary.json` | structured session summary (always written at sampling exit — see below) |
 | `markers.csv` | timeline markers (only if CLI socket markers were sent) |
+
+### `summary.json` — structured session summary
+
+Written at every sampling session exit (even with zero samples). Top level is
+the exact `SessionSummary` schema of the baseline JSON (`version`, `package`,
+`duration_s`, `samples`, `pids`, `restarts`, `cold_start_ms`, per-metric
+`{avg, max, count}` blocks — same-session values are identical to a baseline
+saved with `--save-baseline`), plus two verdict objects:
+
+- `thresholds` (`null` unless `--threshold` given):
+  `{all_pass, rules: [{rule, pass, triggers, extreme, last_trigger}]}`
+- `baseline` (`null` unless `--save-baseline`/`--compare-baseline` given):
+  `{action, baseline_file, report_file, outcome, error}` — `action` is one of
+  `saved` / `compared` / `skipped_no_data` / `no_baseline` / `failed`; `outcome`
+  (only when `compared`) is `{verdict, regressions, improvements, flat,
+  no_compare, regressed_metrics}` with `verdict` ∈ `no_regression` /
+  `regression` / `no_comparable`.
 
 CSVs are streamed row-by-row with flush; a killed run loses at most the tail.
 Timestamps are local-time with millisecond precision; logcat uses the device
@@ -111,9 +130,10 @@ capability runs **in parallel with sampling** its failure only prints a warning
 simpleperf report rendering) never affect the exit code — the raw data was
 already pulled.
 
-To assert on performance in CI, do not rely on the exit code alone — parse the
-threshold verification report (stdout) or `baseline_report.txt`, or diff the
-CSVs directly.
+To assert on performance in CI, do not rely on the exit code alone — read
+`summary.json` (structured: `.thresholds.all_pass`, `.baseline.outcome.verdict`),
+or parse the threshold verification report (stdout) / `baseline_report.txt`,
+or diff the CSVs directly.
 
 ## Common pitfalls
 
