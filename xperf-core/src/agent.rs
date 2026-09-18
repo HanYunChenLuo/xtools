@@ -467,23 +467,56 @@ fn newest_mtime_under(dir: &Path) -> Option<std::time::SystemTime> {
         .max()
 }
 
-/// 若本机尚未交叉编译 agent 二进制则自动构建；源码变更（mtime 更新）时也自动重建。
-/// （链接器：`.cargo/ndk-clang.sh` 探测——NDK >= 25.1.8937393 中取最相近，
-/// 显式 ANDROID_NDK_HOME 等环境变量优先，Mac/Linux 均可）
+/// 解析宿主机 cargo 可执行文件：桌面应用从 Finder/`open` 启动时 PATH 最小化
+/// （通常不含 `~/.cargo/bin`），裸 `cargo` 会 spawn 失败。顺序：`XPERF_CARGO`
+/// 显式覆盖 → PATH → `~/.cargo/bin/cargo`（rustup 标准位置）→ Homebrew 位置；
+/// 全部落空回退裸 `cargo`（spawn 错误如实上报给调用方）。
+/// （与 utils.rs 的 adb / transport.rs 的 ssh 解析链同套路。）
+fn host_cargo_path() -> PathBuf {
+    let mut candidates = Vec::new();
+    if let Some(path) = std::env::var_os("XPERF_CARGO") {
+        candidates.push(PathBuf::from(path));
+    }
+    if let Some(path) = std::env::var_os("PATH") {
+        candidates.extend(std::env::split_paths(&path).map(|dir| dir.join("cargo")));
+    }
+    if let Some(home) = std::env::var_os("HOME") {
+        candidates.push(PathBuf::from(home).join(".cargo/bin/cargo"));
+    }
+    candidates.extend([
+        PathBuf::from("/opt/homebrew/bin/cargo"),
+        PathBuf::from("/usr/local/bin/cargo"),
+    ]);
+    candidates
+        .into_iter()
+        .find(|path| path.is_file())
+        .unwrap_or_else(|| PathBuf::from("cargo"))
+}
+
+/// agent 二进制是否需要构建/重建：产物不存在，或 `xperf-agent/src` 树内任一
+/// `.rs` 比产物新（agent 已拆多模块，不能只盯 main.rs）。
+/// GUI 据此在可能耗时 1-2 分钟的构建前给出前端提示。
+pub fn agent_binary_needs_build() -> bool {
+    let bin = agent_binary_path();
+    if !bin.exists() {
+        return true;
+    }
+    let src_dir = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap()
+        .join("xperf-agent/src");
+    let bin_mtime = std::fs::metadata(&bin).ok().and_then(|m| m.modified().ok());
+    newest_mtime_under(&src_dir) > bin_mtime
+}
+
+/// 若本机尚未交叉编译 agent 二进制则自动构建；源码变更（mtime 更新）时也自动重建
+/// （判定见 [`agent_binary_needs_build`]。cargo 经 `host_cargo_path` 解析，
+/// 兼容 Finder 启动的最小 PATH；链接器：`.cargo/ndk-clang.sh` 探测——
+/// NDK >= 25.1.8937393 中取最相近，显式 ANDROID_NDK_HOME 等环境变量优先，
+/// Mac/Linux 均可）
 pub fn ensure_agent_built() -> Result<PathBuf> {
     let bin = agent_binary_path();
-    let needs_build = if !bin.exists() {
-        true
-    } else {
-        // 源码变更检测：src 下任一 .rs 比 mtime 新则重建（agent 已拆多模块，不能只盯 main.rs）
-        let src_dir = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap()
-            .join("xperf-agent/src");
-        let bin_mtime = std::fs::metadata(&bin).ok().and_then(|m| m.modified().ok());
-        newest_mtime_under(&src_dir) > bin_mtime
-    };
-    if needs_build {
+    if agent_binary_needs_build() {
         eprintln!("agent 需要构建/重建（aarch64-linux-android）...");
-        let mut cmd = Command::new("cargo");
+        let mut cmd = Command::new(host_cargo_path());
         cmd.args(["build", "-p", "xperf-agent", "--target", "aarch64-linux-android", "--release"])
             .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap());
         // 链接器由 .cargo/config.toml → .cargo/ndk-clang.sh 跨平台探测（版本策略见脚本头注释）
@@ -1200,6 +1233,23 @@ mod tests {
         assert!(err.contains("XPERF_AGENT_BIN"), "错误应指明 env 变量名: {}", err);
         // 移除后回到未设置
         assert_eq!(agent_bin_env(), None);
+    }
+
+    /// cargo 解析链：`XPERF_CARGO` 显式覆盖优先（须指向存在的文件，否则跳过），
+    /// 全部候选落空时回退裸 `cargo`（spawn 错误留给调用方上报）。
+    /// 进程级 env 操作：本测试是唯一改 `XPERF_CARGO` 的用例，串行无竞争。
+    #[test]
+    fn test_host_cargo_path_resolution() {
+        // 显式覆盖指向存在的文件 → 命中
+        let real = std::env::temp_dir().join(format!("xperf-cargo-test-{}", std::process::id()));
+        std::fs::write(&real, b"#!/bin/sh\n").unwrap();
+        std::env::set_var("XPERF_CARGO", &real);
+        assert_eq!(host_cargo_path(), real);
+        // 显式覆盖指向不存在 → 跳过该候选（落回 PATH/HOME 链或裸 cargo）
+        std::env::set_var("XPERF_CARGO", "/nonexistent/cargo");
+        assert_ne!(host_cargo_path(), PathBuf::from("/nonexistent/cargo"));
+        std::env::remove_var("XPERF_CARGO");
+        std::fs::remove_file(&real).ok();
     }
 
 
