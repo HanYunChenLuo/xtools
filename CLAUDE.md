@@ -230,6 +230,8 @@ Platform trait + `adb devices -l` product 字段自动检测（HU_SS3/HU_SS2MAXF
 - **判定口径**：变化须**同时**超过相对 ±10% 与指标绝对地板值才判回归/改善，否则持平（地板值抑制近零噪声：CPU 2pp / PSS 4MB / FPS 2 / Jank 0.5 次每分 / GPU 3pp / IO·网络 50KB/s / 冷启动 150ms；基线为 0 时退化为纯绝对差）；仅一侧采集的指标如实标「⊘ 单侧未采集」不硬判
 - **存放**：`~/.local/share/xperf/baselines/<pkg>.json`（XDG 数据目录，用户数据语义，`--clean-cache` **不**清理）；包名拼路径前校验（与包名校验同字符集）；保存即覆盖
 - **CLI**：两 flag 互斥；退出阶段在验证报告之后执行；对比报告落盘 `<ts>/baseline_report.txt`（与 CSV 同目录）；无采样 flag 时跳过并提示
+- **结构化结论**：`compare_outcome()` 返回 `CompareOutcome`（verdict=regression/no_regression/no_comparable + 计数 + 回归指标名），与 `compare()` 文本报告评估同一份对比行（内部 `build_rows`/`evaluate_rows` 共用）——CLI `summary.json` 消费，GUI 仍用文本报告
+- **summary.json（CLI，2026-09-18）**：采样会话退出时**总是**落 `<ts>/summary.json`——顶层 `serde(flatten)` 平铺 `SessionSummary` 全部字段（与基线 JSON 同 schema、同会话两文件口径一致），附加 `thresholds`（`alerts::report_outcome`：all_pass + 逐规则 pass/triggers/extreme/last_trigger）与 `baseline`（`BaselineVerdict`：action 五态 saved/compared/skipped_no_data/no_baseline/failed + baseline_file/report_file/outcome/error）。写盘失败只告警不改退出码；零样本会话也落盘（samples=0，目录仅含该文件）。CLI 模块 `xperf-cli/src/summary_json.rs`
 - **GUI**：侧栏「数据管理」区「保存基线/对比基线」两按钮（数据源 `collectSessionData()`，与导出 CSV 同一份前端序列）；报告展示在指标页峰值区的「基线对比」面板，新会话自动隐藏清空；后端命令 `save_baseline`/`compare_baseline`（build_summary_from_series 与 CLI 口径一致——restarts 为 None（GUI 路径未统计，如实单侧标注））
 - **真机基线（SS3 svm，2026-09-04）**：空闲态 20s×2 次，CPU 均值 30.3/29.8（持平）、PSS 462MB（持平）、FPS 29.7/30.0、Jank 5.98 次/分（持平）、GPU busy 15.3/15.4（持平）——svm 稳态噪声远小于判定闸门；篡改基线制造回归场景正确触发（⚠ 4 项 + 指标名列表）
 
@@ -425,6 +427,7 @@ hop#2: 本机 P_loc → 远端 adb forward 分配端口（agent 事件流，每�
 | simpleperf 浏览器火焰图（GUI 按钮） | 首次点击时渲染生成（复用不重渲染） | `/tmp/xperf/<pkg>/<ts>/stack/*.html`（同目录同名） |
 | 截屏/录屏（CLI `--screenshot`/`--record N`、GUI 按钮） | 截屏即时落盘；录屏停止封盘后落盘 | `<pkg>/<ts>/capture/{shot,record}_*.png/mp4`（无包名 `device-<serial>/<ts>/capture/`；GUI 采样中随会话目录 `capture/`） |
 | logcat（CLI `--logcat`、GUI「日志」tab） | 抓取期间流式落盘（逐行 flush） | `<pkg>/<ts>/logcat/logcat.log`（无包名 `device-<serial>/<ts>/logcat/`；GUI 采样中随会话目录 `logcat/`，否则 `<ts>-<serial>` 目录） |
+| summary.json（CLI 采样会话） | **采样会话退出时总是落盘**（零样本会话也落，写盘失败只告警） | `<pkg>/<ts>/summary.json`（结构化会话汇总 + thresholds/baseline 结论，见基线对比模式节） |
 | 问题反馈（CLI `--feedback`、GUI「问题反馈」按钮） | 提交时打包（归档保留，上传失败不删） | `<数据根>/feedback/xperf-feedback-<ts>.tar.gz`（暂存目录打包后即删） |
 
 - 内存中的时序序列只服务退出图表：超过 2×30k 点时每 2 取 1 原地抽稀（`CHART_SERIES_CAP`，保完整时间范围、分辨率随运行时长自适应降级）；CSV 始终全量。

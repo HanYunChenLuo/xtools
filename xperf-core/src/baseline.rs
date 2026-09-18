@@ -345,11 +345,29 @@ impl Row {
     }
 }
 
-/// 生成对比报告文本（CLI 直接打印、GUI 展示于面板、两侧同格式）。
+/// 基线对比的结构化结论（与 [`compare`] 文本报告评估同一份对比行，口径保证一致）。
 ///
-/// 判定口径（详见模块文档）：变化同时超过相对容差（±10%）与
-/// 指标绝对地板值才判回归/改善，否则视为持平；仅一侧采集的指标如实标注。
-pub fn compare(base: &SessionSummary, cur: &SessionSummary) -> String {
+/// CLI 退出落盘的 `summary.json` 消费本结构；GUI 面板仍用文本报告。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CompareOutcome {
+    /// 总结论：`regression`（存在回归）/ `no_regression`（无回归）/
+    /// `no_comparable`（两侧采集指标完全不重叠，无法对比）
+    pub verdict: String,
+    /// 回归项数
+    pub regressions: usize,
+    /// 改善项数
+    pub improvements: usize,
+    /// 持平项数
+    pub flat: usize,
+    /// 单侧未采集项数（不参与回归/改善判定）
+    pub no_compare: usize,
+    /// 回归的指标名列表（`regressions` 为 0 时为空）
+    pub regressed_metrics: Vec<String>,
+}
+
+/// 构建对比行（指标名/两侧均值或峰值/格式化/地板值/判定方向），
+/// 为 [`compare`] 与 [`compare_outcome`] 的共用数据源
+fn build_rows(base: &SessionSummary, cur: &SessionSummary) -> Vec<Row> {
     let ms = |m: &Option<MetricSummary>| m.as_ref().map(|x| x.avg);
     let ms_max = |m: &Option<MetricSummary>| m.as_ref().map(|x| x.max);
     let jank_rate = |s: &SessionSummary| -> Option<f64> {
@@ -359,7 +377,7 @@ pub fn compare(base: &SessionSummary, cur: &SessionSummary) -> String {
             _ => None,
         }
     };
-    let rows = vec![
+    vec![
         Row { name: "CPU 均值 (%)".into(), base: ms(&base.cpu), cur: ms(&cur.cpu), fmt: |v| format!("{:.1}", v), floor: 2.0, lower_better: true, pct_relevant: true },
         Row { name: "CPU 峰值 (%)".into(), base: ms_max(&base.cpu), cur: ms_max(&cur.cpu), fmt: |v| format!("{:.1}", v), floor: 2.0, lower_better: true, pct_relevant: true },
         Row { name: "PSS 均值 (MB)".into(), base: ms(&base.mem_pss_kb).map(|kb| kb / 1024.0), cur: ms(&cur.mem_pss_kb).map(|kb| kb / 1024.0), fmt: |v| format!("{:.1}", v), floor: 4.0, lower_better: true, pct_relevant: true },
@@ -374,7 +392,57 @@ pub fn compare(base: &SessionSummary, cur: &SessionSummary) -> String {
         Row { name: "网络 TX 均值 (KB/s)".into(), base: ms(&base.net_tx_kb_s), cur: ms(&cur.net_tx_kb_s), fmt: |v| format!("{:.1}", v), floor: 50.0, lower_better: true, pct_relevant: true },
         Row { name: "进程重启次数".into(), base: base.restarts.map(|v| v as f64), cur: cur.restarts.map(|v| v as f64), fmt: |v| format!("{:.0}", v), floor: 1.0, lower_better: true, pct_relevant: false },
         Row { name: "冷启动 (ms)".into(), base: base.cold_start_ms.map(|v| v as f64), cur: cur.cold_start_ms.map(|v| v as f64), fmt: |v| format!("{:.0}", v), floor: 150.0, lower_better: true, pct_relevant: true },
-    ];
+    ]
+}
+
+/// 汇总逐行判定为结构化结论
+fn evaluate_rows(rows: &[Row]) -> CompareOutcome {
+    let mut regressions = 0;
+    let mut improvements = 0;
+    let mut flat = 0;
+    let mut no_compare = 0;
+    for r in rows {
+        match r.verdict() {
+            Verdict::Regression => regressions += 1,
+            Verdict::Improvement => improvements += 1,
+            Verdict::Flat => flat += 1,
+            Verdict::NoCompare => no_compare += 1,
+        }
+    }
+    let verdict = if regressions > 0 {
+        "regression"
+    } else if no_compare == rows.len() {
+        "no_comparable"
+    } else {
+        "no_regression"
+    };
+    CompareOutcome {
+        verdict: verdict.to_string(),
+        regressions,
+        improvements,
+        flat,
+        no_compare,
+        regressed_metrics: rows
+            .iter()
+            .filter(|r| r.verdict() == Verdict::Regression)
+            .map(|r| r.name.clone())
+            .collect(),
+    }
+}
+
+/// 结构化对比结论（与 [`compare`] 文本报告同口径；不生成文本，
+/// 供 CLI `summary.json` 等结构化消费方使用）
+pub fn compare_outcome(base: &SessionSummary, cur: &SessionSummary) -> CompareOutcome {
+    evaluate_rows(&build_rows(base, cur))
+}
+
+/// 生成对比报告文本（CLI 直接打印、GUI 展示于面板、两侧同格式）。
+///
+/// 判定口径（详见模块文档）：变化同时超过相对容差（±10%）与
+/// 指标绝对地板值才判回归/改善，否则视为持平；仅一侧采集的指标如实标注。
+pub fn compare(base: &SessionSummary, cur: &SessionSummary) -> String {
+    let rows = build_rows(base, cur);
+    let outcome = evaluate_rows(&rows);
 
     let mut lines = vec![
         "========== 基线对比报告 ==========".to_string(),
@@ -394,19 +462,8 @@ pub fn compare(base: &SessionSummary, cur: &SessionSummary) -> String {
         format!("{:<18}{:>12}{:>12}{:>10}  {}", "指标", "基线", "本次", "变化", "结论"),
     ];
 
-    let mut n_reg = 0;
-    let mut n_imp = 0;
-    let mut n_flat = 0;
-    let mut n_nc = 0;
     for r in &rows {
-        let verdict = r.verdict();
-        match verdict {
-            Verdict::Regression => n_reg += 1,
-            Verdict::Improvement => n_imp += 1,
-            Verdict::Flat => n_flat += 1,
-            Verdict::NoCompare => n_nc += 1,
-        }
-        let verdict_str = match verdict {
+        let verdict_str = match r.verdict() {
             Verdict::Regression => "⚠ 回归",
             Verdict::Improvement => "✅ 改善",
             Verdict::Flat => "— 持平",
@@ -421,29 +478,26 @@ pub fn compare(base: &SessionSummary, cur: &SessionSummary) -> String {
     }
 
     lines.push(String::new());
-    if n_reg == 0 {
-        if n_nc == rows.len() {
-            lines.push("总结论: ⊘ 无可对比指标（基线与本次采集的指标完全不重叠）".to_string());
-        } else {
+    match outcome.verdict.as_str() {
+        "regression" => {
             lines.push(format!(
-                "总结论: ✅ 无回归（改善 {} 项，持平 {} 项，单侧未采集 {} 项）",
-                n_imp, n_flat, n_nc
+                "总结论: ⚠ 存在回归 {} 项（{}）；改善 {} 项，持平 {} 项，单侧未采集 {} 项",
+                outcome.regressions,
+                outcome.regressed_metrics.join("、"),
+                outcome.improvements,
+                outcome.flat,
+                outcome.no_compare
             ));
         }
-    } else {
-        let reg_names: Vec<&str> = rows
-            .iter()
-            .filter(|r| r.verdict() == Verdict::Regression)
-            .map(|r| r.name.as_str())
-            .collect();
-        lines.push(format!(
-            "总结论: ⚠ 存在回归 {} 项（{}）；改善 {} 项，持平 {} 项，单侧未采集 {} 项",
-            n_reg,
-            reg_names.join("、"),
-            n_imp,
-            n_flat,
-            n_nc
-        ));
+        "no_comparable" => {
+            lines.push("总结论: ⊘ 无可对比指标（基线与本次采集的指标完全不重叠）".to_string());
+        }
+        _ => {
+            lines.push(format!(
+                "总结论: ✅ 无回归（改善 {} 项，持平 {} 项，单侧未采集 {} 项）",
+                outcome.improvements, outcome.flat, outcome.no_compare
+            ));
+        }
     }
     lines.push("判定口径: 变化须同时超过相对 ±10% 与指标地板值才判回归/改善".to_string());
     lines.push("（地板值抑制近零噪声：CPU 2pp / PSS 4MB / FPS 2 / Jank 0.5 / GPU 3pp / IO·网络 50KB/s / 冷启动 150ms）".to_string());
@@ -670,5 +724,55 @@ mod tests {
         let r = compare(&base, &cur_b.finish());
         assert!(r.contains("⊘ 无可对比指标"), "全不可比应报无可对比，实际:\n{}", r);
         assert!(!r.contains("✅ 无回归"), "全不可比不应报无回归");
+    }
+
+    // ---- compare_outcome：结构化结论与文本报告同口径 ----
+
+    #[test]
+    fn test_compare_outcome_regression() {
+        let base = summary_with_cpu(&[100.0; 10], 10.0);
+        let cur = summary_with_cpu(&[150.0; 10], 10.0);
+        let o = compare_outcome(&base, &cur);
+        assert_eq!(o.verdict, "regression");
+        assert_eq!(o.regressions, 2); // CPU 均值 + CPU 峰值
+        assert_eq!(o.regressed_metrics, vec!["CPU 均值 (%)".to_string(), "CPU 峰值 (%)".to_string()]);
+        // 与文本报告同口径
+        assert!(compare(&base, &cur).contains("⚠ 存在回归 2 项"));
+    }
+
+    #[test]
+    fn test_compare_outcome_no_regression_and_no_comparable() {
+        let base = summary_with_cpu(&[100.0; 10], 10.0);
+        let cur = summary_with_cpu(&[102.0; 10], 10.0);
+        let o = compare_outcome(&base, &cur);
+        assert_eq!(o.verdict, "no_regression");
+        assert_eq!(o.regressions, 0);
+        assert!(o.regressed_metrics.is_empty());
+        assert!(o.flat >= 2); // CPU 均值/峰值持平
+
+        // 全单侧未采集 → no_comparable
+        let mut mem_only = SummaryBuilder::new("p", 1000, 10.0);
+        mem_only.push_mem(300_000.0);
+        let o = compare_outcome(&base, &mem_only.finish());
+        assert_eq!(o.verdict, "no_comparable");
+        assert!(o.no_compare > 0);
+        assert_eq!(o.regressions + o.improvements + o.flat, 0);
+    }
+
+    #[test]
+    fn test_compare_outcome_improvement_direction() {
+        // FPS 40 → 60：改善；verdict 仍为 no_regression
+        let mut base_b = SummaryBuilder::new("p", 1000, 10.0);
+        for _ in 0..10 {
+            base_b.push_fps(40.0, 0);
+        }
+        let mut cur_b = SummaryBuilder::new("p", 1000, 10.0);
+        for _ in 0..10 {
+            cur_b.push_fps(60.0, 0);
+        }
+        let o = compare_outcome(&base_b.finish(), &cur_b.finish());
+        assert_eq!(o.verdict, "no_regression");
+        assert_eq!(o.improvements, 1); // FPS 均值
+        assert_eq!(o.regressions, 0);
     }
 }

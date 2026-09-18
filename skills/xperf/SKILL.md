@@ -75,14 +75,17 @@ printed on stdout as `Created timestamp directory: ...`, else newest dir under
 - `trace/trace_analysis.txt` — thread CPU / wakeup latency / per-core busy /
   frame timeline; `stack/simpleperf_report.txt` — hotspot functions
 - `capture/shot_*.png`, `capture/record_*.mp4`, `logcat/logcat.log`
+- `summary.json` — structured session summary, always written at sampling exit:
+  top level = the baseline `SessionSummary` schema (per-metric `{avg,max,count}`),
+  plus `thresholds.all_pass` and `baseline.outcome.verdict` for assertions.
 - Full table (freq/thermal/gpu/gpumem/io/net/thread CSVs): see repo
   `AGENTS.md` § Output layout.
 
 ## Exit codes (assert correctly)
 
 - **0** = success — *including* triggered thresholds and detected regressions
-  (report-only). Parse `baseline_report.txt` / the threshold report, or the
-  CSVs, to assert.
+  (report-only). Read `summary.json` (or parse `baseline_report.txt` / the
+  threshold report / the CSVs) to assert.
 - **1** = runtime failure (bad package/device/remote, sampling or standalone
   recording/capture/cold-start failure).
 - **2** = CLI argument error.

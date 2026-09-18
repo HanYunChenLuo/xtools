@@ -5,6 +5,7 @@
 //! op: > 或 <
 //! value: 数值
 
+use serde::Serialize;
 use std::collections::HashMap;
 
 /// 一条阈值规则
@@ -82,6 +83,56 @@ pub fn check_value<'a>(thresholds: &'a [Threshold], metric: &str, value: f32, is
             _ => false,
         }
     }).collect()
+}
+
+/// 单条阈值规则的判定结果（`summary.json` 结构化结论用，与文本报告同口径）
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct RuleOutcome {
+    /// 规则原文（如 `cpu>80`）
+    pub rule: String,
+    /// 是否达标（触发次数为 0）
+    pub pass: bool,
+    /// 触发次数
+    pub triggers: u32,
+    /// 极值（`>` 规则为观测峰值，`<` 规则为观测谷值；从未触发时为 0）
+    pub extreme: f32,
+    /// 最近一次触发时刻（`HH:MM:SS`；从未触发为 None）
+    pub last_trigger: Option<String>,
+}
+
+/// 阈值验证的结构化结论（`summary.json` 用，与 [`generate_report`] 文本报告同一份统计）
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct ThresholdOutcome {
+    /// 全部规则达标（所有规则触发次数均为 0）
+    pub all_pass: bool,
+    /// 逐规则判定结果（顺序与命令行给定顺序一致）
+    pub rules: Vec<RuleOutcome>,
+}
+
+/// 由告警统计构建结构化结论（未给 `--threshold` 时调用方不应调用）
+pub fn report_outcome(thresholds: &[Threshold], stats: &AlertStats) -> ThresholdOutcome {
+    let mut all_pass = true;
+    let mut rules = Vec::with_capacity(thresholds.len());
+    for t in thresholds {
+        let (triggers, last) = stats
+            .triggers
+            .get(&t.raw)
+            .map(|(n, last)| (*n, Some(last.clone())))
+            .unwrap_or((0, None));
+        let extreme = stats.extremes.get(&t.raw).copied().unwrap_or(0.0);
+        let pass = triggers == 0;
+        if !pass {
+            all_pass = false;
+        }
+        rules.push(RuleOutcome {
+            rule: t.raw.clone(),
+            pass,
+            triggers,
+            extreme,
+            last_trigger: last,
+        });
+    }
+    ThresholdOutcome { all_pass, rules }
 }
 
 /// 生成退出验证报告
@@ -165,5 +216,30 @@ mod tests {
         let report = generate_report(&t, &stats);
         assert!(report.contains("❌ 超标"));
         assert!(report.contains("谷值 15.0"));
+    }
+
+    #[test]
+    fn test_report_outcome_structure() {
+        // 与文本报告同口径：触发>0 的规则不达标，all_pass 为且仅为全部达标
+        let t = parse_thresholds(&["cpu>80".into(), "fps<30".into()]);
+        let mut stats = AlertStats::default();
+        stats.record("cpu>80", 95.5, "12:00:03", '>');
+        let o = report_outcome(&t, &stats);
+        assert!(!o.all_pass);
+        assert_eq!(o.rules.len(), 2);
+        assert_eq!(o.rules[0].rule, "cpu>80");
+        assert!(!o.rules[0].pass);
+        assert_eq!(o.rules[0].triggers, 1);
+        assert_eq!(o.rules[0].extreme, 95.5);
+        assert_eq!(o.rules[0].last_trigger.as_deref(), Some("12:00:03"));
+        assert!(o.rules[1].pass); // 未触发
+        assert_eq!(o.rules[1].extreme, 0.0);
+        assert_eq!(o.rules[1].last_trigger, None);
+        // 文本报告与结构化结论同判定
+        assert!(generate_report(&t, &stats).contains("❌ 存在超标"));
+
+        let o = report_outcome(&t, &AlertStats::default());
+        assert!(o.all_pass);
+        assert!(o.rules.iter().all(|r| r.pass));
     }
 }
