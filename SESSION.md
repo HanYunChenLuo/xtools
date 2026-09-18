@@ -20,6 +20,8 @@
 
 **遗留**：无新增；backlog 仅剩 I 节命令行输入。
 
+**深夜·四 追记（review follow-up，merge 3669412）**：用户要求对本会话全部改动（98e55db..80b4248：J5 修复 + flaky 修复 + D 节）独立 review——结论 LGTM 无严重，文档-代码逐点一致；2 一般已修（done 文案加 samplingRunning 守卫；agent_building HashSet→HashMap 计数配对防并发构建者错位），4 观察项顺手修，残余 2 项接受（见 WORKSPACE D 节）。**reviewer 质量改进**：本轮在指令中要求 file:line 证据逐字准确并声明会抽查——未见幻觉引用（对比 J5 轮 O6 误引不存在的注释）。
+
 ## 2026-09-18（深夜·二）：J 节会话 5——整体 review + 三机真机回归（J 节收官）
 
 **任务**：WORKSPACE J 节会话 5——会话 1-4 全部改动（bdd345a..98e55db，18 commit）独立 review + SS3/SS2MAX/SS4 三机 tarball 真机回归 + CHANGELOG/README 收尾。
