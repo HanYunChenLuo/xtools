@@ -84,7 +84,7 @@ printed on stdout as `Created timestamp directory: ...`, else newest dir under
   (report-only). Parse `baseline_report.txt` / the threshold report, or the
   CSVs, to assert.
 - **1** = runtime failure (bad package/device/remote, sampling or standalone
-  recording/capture failure).
+  recording/capture/cold-start failure).
 - **2** = CLI argument error.
 
 A capability that fails **alongside** sampling only warns; the same failure
