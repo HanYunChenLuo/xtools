@@ -22,6 +22,8 @@
 
 **遗留**：无（两项原遗留全部闭环；v0.2.2 发版待用户排期）。
 
+**追记（同日）**：用户指出代码不应含个人主机名 hppc——盘点分类后修用户可见面 5 处（README×2 示例/CLI `--remote` help/GUI 表单占位符/`RemoteConfig.name` doc → 通用别名 `myserver`，合 main `29c7cb6`）；保留 `#[ignore]` 集成测试（维护者真机回归资产，他人永不执行）与内部文档（SESSION/WORKSPACE/CLAUDE/DESIGN 工作笔记）；`.claude/settings.local.json` 未被 git 跟踪无泄漏。
+
 ## 2026-09-17（晚，续3）：GUI `--release` 开发运行误报「缺少预编译 agent」修复
 
 **任务**：用户报 bug——`cargo run --bin xperf-gui --release` 报「GUI 发布包缺少预编译 agent/xperf-agent；请重新安装完整 GUI 包」。
