@@ -142,6 +142,26 @@ Android 应用性能分析工具集：CLI + 桌面 GUI + 设备端采样 agent�
 ./target/release/xperf-gui --package <包名> --cpu --memory --fps
 ```
 
+## 面向 AI agent
+
+`xperf-cli` 完全非交互、适合编码 agent 经 shell 驱动：给一个限时窗口，
+消费落盘产物即可。
+
+```bash
+# 限时采样 → 30s 后自动退出（exit 0）；CSV 落 /tmp/xperf/<包名>/<时间戳>/
+xperf-cli --package com.example.app --cpu --memory --fps --duration 30
+
+# 回归断言 —— 判定结论见 <会话目录>/baseline_report.txt
+xperf-cli --package com.example.app --cpu --memory --duration 30 --compare-baseline
+```
+
+退出码：`0` 成功（阈值告警与基线回归判定只出报告、不改变退出码），
+`1` 运行期失败，`2` 参数错误。release tar 包布局要求 `agent/xperf-agent`
+与 `xperf-cli` 并排存放（或用 `XPERF_AGENT_BIN` 显式指定）。
+
+完整命令配方、CSV 列定义与常见坑见 [AGENTS.md](AGENTS.md)（Codex 自动发现）
+与 [skills/xperf/SKILL.md](skills/xperf/SKILL.md)（Claude Code / siada skill 格式）。
+
 ## 下载
 
 预编译发布包在内部 GitLab：[Releases](https://gitlab.chehejia.com/ligraphic/xperf/-/releases)。

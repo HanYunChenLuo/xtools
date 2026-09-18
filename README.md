@@ -154,6 +154,28 @@ Tauri 2 desktop GUI over the same agent transport:
 ./target/release/xperf-gui --package <package_name> --cpu --memory --fps
 ```
 
+## For AI agents
+
+`xperf-cli` is fully non-interactive and agent-friendly: give it a bounded
+window and consume the artifacts.
+
+```bash
+# Bounded sampling → exit 0 after 30 s; CSVs under /tmp/xperf/<pkg>/<ts>/
+xperf-cli --package com.example.app --cpu --memory --fps --duration 30
+
+# Regression assertion — verdict in <session>/baseline_report.txt
+xperf-cli --package com.example.app --cpu --memory --duration 30 --compare-baseline
+```
+
+Exit codes: `0` success (threshold alerts and baseline regressions are
+report-only and never fail the run), `1` runtime failure, `2` argument error.
+Keep `agent/xperf-agent` next to the `xperf-cli` binary (release tarball
+layout) or set `XPERF_AGENT_BIN`.
+
+Full recipes, CSV schemas and pitfalls: [AGENTS.md](AGENTS.md)
+(Codex/auto-discovered) and [skills/xperf/SKILL.md](skills/xperf/SKILL.md)
+(Claude Code / siada skill format).
+
 ## Download
 
 Prebuilt packages are published on the internal GitLab: [Releases](https://gitlab.chehejia.com/ligraphic/xperf/-/releases).
