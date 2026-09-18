@@ -5,6 +5,23 @@
 > 待办事项（backlog）在 `WORKSPACE.md` 维护，本文件只做历史追溯。
 > 新会话开始时可先读本文件了解近期上下文。
 
+## 2026-09-18（上午）：OAuth 竞态单测 + GUI 按钮物理目验闭环
+
+**任务**：两项遗留收口——① OAuth 并发刷新竞态恢复逻辑补单测（原记录「需 mock HTTP 层」）；② GUI 表单/按钮物理点击目验（AX 冻结遗留项）。
+
+**commit**（`test/oauth-refresh-race`）：`0998475`（oauth 刷新动作闭包注入重构 + 8 竞态单测）。
+
+**关键结论**：
+- **① OAuth 竞态单测**：不引 mock HTTP 层——`current_access_token` 抽出 `current_access_token_with(path, refresh: &mut dyn FnMut)`（刷新动作闭包注入、store 路径显式传入并行安全，公共 API 不变）。8 测试锁定：未临期不刷/无态 None/刷新轮换落盘/无竞态 invalid_grant 清态/**竞态三变体**（赢家已轮换未过期→复用；赢家也临期→新 refresh_token 二刷；二刷仍拒→清态）/网络故障不清态。core 157+8 全绿（oauth 17）
+- **② GUI 物理目验（键盘焦点链，全程截图 + diag 佐证，无一处 AX 点击）**：
+  - **SSH 远程表单全链**：Tab×2 到「＋」Space 开表单 → 逐字段填写（name=xperftest/host=10.122.85.252/user=tester/ssh 端口 2299/密码）→ Space 取消勾选「保存到 ssh config」→ Tab×3 回车「保存并连接」→ **连接成功**（状态栏「已连接远程: tester@10.122.85.252」；diag：master spawn 密码 askpass → 远端预检 3.1s → probe → 设备枚举，总 3.29s；remotes.json 精确落盘 user@host 形式 + ssh_port 2299；**ssh config 零污染**）。测试靶机：hppc docker linuxserver/openssh-server @2299（tester/test12345，aliyun 源装 android-tools + AllowTcpForwarding yes——dl-cdn 内网不通）
+  - **问题反馈按钮 → 浮层**：Tab×3 Space 开浮层，登出态（移走 oauth store）显示「未配置凭证」警示 + 「登录 GitLab」按钮可见
+  - **登录 GitLab 按钮**：Shift-Tab Space 点击 → 浏览器打开授权页（xperf → 汪尽涵 @wangjinhan）+ diag `oauth: 等待浏览器回调（39859）`；恢复 store 重开浮层 → 「将以 汪尽涵（@wangjinhan）身份创建 issue」+ 退出登录按钮；取消按钮关闭浮层
+  - 测试残留全清：GUI 退出/docker 容器移除/remotes.json 删除/known_hosts 测试条目 ssh-keygen -R；截图证据 `/tmp/gui_*.png`
+- **AX/键盘目验方法论补充**：① **同名进程劫持**——周三安装的 DMG 版 `/Applications/xperf-gui.app` 还在跑（旧前端），System Events `process "xperf-gui"` 全被它截走（旧表单/副屏窗口/焦点错乱全是它）；目验前必查 `ps` 排除同名实例；② **keystroke 时序**——Tab 后 <0.5s 立即输入会丢步（本次实撞：Tab 丢失 → 相邻两字段串值、Space 落空），0.5~0.6s 延迟 + 每轮区域截图验证（`screencapture -R` 裁表单区，全屏转录噪声大）后全对；③ `click at {x,y}` 负坐标（副屏）行为异常会误击主屏其他应用窗口——先 `set position of window 1` 钉到主屏正坐标；④ Cmd+W 关浏览器标签后 Chrome 仍占前台，后续 keystroke 全进浏览器——每步后显式 `set frontmost`
+
+**遗留**：无（两项原遗留全部闭环；v0.2.2 发版待用户排期）。
+
 ## 2026-09-17（晚，续3）：GUI `--release` 开发运行误报「缺少预编译 agent」修复
 
 **任务**：用户报 bug——`cargo run --bin xperf-gui --release` 报「GUI 发布包缺少预编译 agent/xperf-agent；请重新安装完整 GUI 包」。
