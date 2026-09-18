@@ -5,6 +5,21 @@
 > 待办事项（backlog）在 `WORKSPACE.md` 维护，本文件只做历史追溯。
 > 新会话开始时可先读本文件了解近期上下文。
 
+## 2026-09-18（深夜·三）：D 节勾销——GUI 开发运行 agent 构建反馈缺口
+
+**任务**：用户确认 D 节遗留后拍板「顺手做掉」——① Finder 启动的开发 GUI 构建 agent 期间无任何 UI 反馈（~1-2min「点了没反应」）；② `Command::new("cargo")` 依赖 PATH，Finder 最小 PATH 下找不到 cargo。
+
+**commit**：`fix/gui-dev-agent-build-feedback` 分支（代码 + docs 两提交，--no-ff 合 main）。
+
+**关键结论**：
+- **② cargo 解析链**：core `host_cargo_path()`（`XPERF_CARGO` env → PATH → `~/.cargo/bin/cargo` → Homebrew，adb/ssh 同套路）；`agent_binary_needs_build()` 从 `ensure_agent_built` 拆出供 GUI 预判；单测锁 env 覆盖语义
+- **① 构建反馈**：GUI `bundled_agent_path` 在需构建时 emit `agent-build {serial, stage: building|done}` + `AppState.agent_building` 状态集 + 新命令 `agent_building`。**两个时序坑**：手动开始路径——后端 building 事件与前端乐观 `setStatus('监控中')` 竞争（实测被覆盖），解法 = `agentBuilding` 标志守卫三处「监控中」（start/restartSampling/auto-start 回填），事件先到则守卫跳过、后到则覆盖，两时序都安全；命令行自动启动路径——后端 setup 阶段即 spawn 构建，**早于前端 listener 注册，building 事件必然丢**（实测截图状态栏停在「监控中」），解法 = 前端 `applyStartupArgs` 经 `agent_building` 命令回查补偿
+- **真机验证**：`env -i HOME PATH SSH_AUTH_SOCK`（+XPERF_CARGO=fake-cargo）模拟 Finder 最小环境启动 release GUI，`--remote hppc --device SS3 --package gltf` 自动启动——构建中状态栏「首次构建 Android agent 中（约 1-2 分钟）…」截图实证 → fake-cargo（sleep 45 + exec 真 cargo，顺带验证 env 覆盖生效）→ 构建完成 → done 事件 → 恢复采样图表全链
+- **验证方法坑**：① cargo Fresh 重硬链 deps 旧 inode——只掩蔽最终二进制时「重建」秒过且 mtime 不变（截图窗口太短），须 touch 源码/加 sleep 包装器制造真实构建窗；② run_cmd 后台 GUI 进程在命令退出后可能被 harness 会话清理误杀（pid 4017 之死），`nohup ... & disown` 可靠存活；③ screencapture 前须 osascript frontmost，否则截到遮挡窗口（飞书）
+- **测试**：core +1（host_cargo_path）；全量 166+8/12/11 绿，clippy + cargo doc（missing_docs）零警告（修掉一个 pub 项 doc 链接私项的 private_intra_doc_links warning）
+
+**遗留**：无新增；backlog 仅剩 I 节命令行输入。
+
 ## 2026-09-18（深夜·二）：J 节会话 5——整体 review + 三机真机回归（J 节收官）
 
 **任务**：WORKSPACE J 节会话 5——会话 1-4 全部改动（bdd345a..98e55db，18 commit）独立 review + SS3/SS2MAX/SS4 三机 tarball 真机回归 + CHANGELOG/README 收尾。
