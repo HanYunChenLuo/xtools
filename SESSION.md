@@ -17,6 +17,7 @@
 - **测试**：stop_window 4 单测；全量 core 162+8 / CLI 9 / GUI 11 绿，clippy + cargo doc 零警告
 - **踩坑**：首轮回归被测应用未运行（pidof 空）→ agent 无事件源，到点正常退出但零样本零 CSV（非缺陷，采样语义本就如此）；真机回归前先确认应用在跑
 - macOS 数据根是 `$TMPDIR/xperf` 不是 `/tmp/xperf`（验证落盘别找错地方）
+- **会话内 review**：严重 0；一般 1 已修——断连重连 keep-going 闭包原只查 Ctrl-C，限时窗口内设备断开会使采样无限悬挂（`--duration` 有界承诺失效，trace/stack 限时路径预先存在同样问题）；修复 `13f347c`（merge `57250ff`）：闭包加 deadline 判定，真机 `--duration 12` + 第 5s `adb reconnect offline` 强制离线验证到点退出 exit 0。观察项记录不修：deadline 起点在 spawn_agent 后（部署不计入窗口，正确）；`--duration`+纯深挖不生效（help 已注明）；另清掉测试模块带入的 EOF 尾部空行
 
 **遗留**：J 节会话 3（AGENTS.md + SKILL.md + README agent 节，含会话 1 review 两顺手项）；会话 4（summary.json，待用户拍板）；会话 5（整体 review + 三机回归）。
 
