@@ -139,6 +139,7 @@
 - 验收：`--cpu --memory --duration 10` 到点自动退出、退出码 0、CSV/图表/汇总齐全；与 trace/stack/record/threshold/baseline 组合回归；单测覆盖时长计算
 
 **会话 3 — 文档载体：`AGENTS.md` + `skills/xperf/SKILL.md` + README agent 一节**
+- 顺手项（会话 1 review 观察）：① `XPERF_AGENT_BIN=""` 空串视同未设置（一行 filter + 单测——现状走 Explicit 分支报空白路径，文案怪）；② CLAUDE.md「agent 部署」节补一句三级解析链说明
 - `AGENTS.md`（仓库根，Codex 只认它）：面向「使用 xperf」的精简指引——安装（release tarball/无 NDK 依赖）、核心命令配方、输出布局、退出码语义汇总表（现无文档：独立模式 trace/stack 失败非零、截屏/录屏/logcat/feedback 独立失败 exit 1、采样正常 0 等需先梳理代码确认）、常见坑（多设备必须 `--device`；首跑 agent 自动构建 ~1-2min；非 root 降级矩阵指 WORKSPACE G 节）
 - `skills/xperf/SKILL.md`（Claude Code/siada skill 格式，frontmatter + 触发描述）：何时用（Android 应用性能分析/回归断言）、命令配方（有界采样/threshold 断言/基线对比/trace/stack/截屏录屏/logcat）、输出文件消费方式（CSV 列、报告位置）
 - README（中英双语同步）补「For AI agents」一节：安装 + 有界运行 + 退出码 + 指向 AGENTS.md/SKILL.md

@@ -5,6 +5,21 @@
 > 待办事项（backlog）在 `WORKSPACE.md` 维护，本文件只做历史追溯。
 > 新会话开始时可先读本文件了解近期上下文。
 
+## 2026-09-18（下午）：J 节排期 + 会话 1——tarball CLI agent 解析链修复
+
+**任务**：「向 Claude Code/Codex 等 agent 提供 xperf 能力」的代码与文档 review → WORKSPACE 新增 J 节排期（4 实施会话 + 1 review/真机回归会话）→ 会话 1 实施：修复 release tarball 安装的 xperf-cli 在非构建机找不到捆绑 agent（P0 阻断缺陷）。
+
+**commit**：`64409d4`（fix，`fix/cli-agent-resolution` 合 main `3937993`）、`ead68be`（WORKSPACE J 节会话 1 勾销）。
+
+**关键结论**：
+- **Review 总判**：现状对 agent 不可用——① P0 缺陷：CLI agent 解析仅编译期 `CARGO_MANIFEST_DIR` 路径 + `cargo build`（均只构建机有效；v0.2.0 验证在构建机做被掩盖）；② P0 缺口：采样无 `--duration`（agent 的 shell 调用必须有界）；③ 文档载体缺失（无 AGENTS.md/SKILL.md，CLAUDE.md 是维护者向）。已具备基础：CLI 全非交互、结果全落盘、`--threshold`/基线即断言接口
+- **会话 1 修复**：`resolve_agent_binary()` 三级链——`XPERF_AGENT_BIN` env（显式覆盖，指向不存在报错**不回退**）→ exe 旁 `agent/xperf-agent` sibling（tarball 布局）→ 开发检出 `ensure_agent_built()` 兜底（`workspace_root` 有 Cargo.toml 才走）；全落空报错指引布局。纯函数 `pick_agent_binary` 锁顺序，替换 CLI 预热/`ensure_daemon` 重推/`reconnect` 三处 None 分支，GUI 资源路径不动
+- **真机验证**（--remote hppc SS3）：掩蔽 workspace agent 二进制 A/B——tarball CLI 从 /tmp 采样+trace 全通且**未触发 cargo 重建**（sibling 生效实证）；dev 回归、env 错误路径 exit 1；单测 5 新用例，全量 162+5+11 绿，clippy/doc 零警告
+- **会话 1 review（二次走查）**：无严重问题。观察项 2 个并入会话 3：① `XPERF_AGENT_BIN=""` 空串按 Explicit 报空白路径（应视同未设置，一行 filter + 单测）；② CLAUDE.md「agent 部署」节补解析链一句。残余风险（接受）：开发机 `target/release/agent/` 意外遮蔽（env 可覆盖）；tarball mtime 各机不同首跑必推一次
+- **方法论**：zsh 下 `cmd | tail; echo $?` 取的是 tail 退出码——验退出码必须 `pipestatus[1]` 或直接重定向（本会话初测误判 0，复测更正）
+
+**遗留**：J 节会话 2（`--duration N`）新开会话进行；会话 3/4/5 按排期。
+
 ## 2026-09-18（上午）：OAuth 竞态单测 + GUI 按钮物理目验闭环
 
 **任务**：两项遗留收口——① OAuth 并发刷新竞态恢复逻辑补单测（原记录「需 mock HTTP 层」）；② GUI 表单/按钮物理点击目验（AX 冻结遗留项）。
