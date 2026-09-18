@@ -2,7 +2,7 @@
 
 > 本文件记录跨会话的待办事项（backlog）。每次会话的历史总结见 `SESSION.md`。
 > 完成一项就把状态改为 ✅ 并注明完成的 commit；新增想法随时追加。
-> 最后更新：2026-09-18 傍晚：J 节会话 2 完成（aac08d4 + 75ada1c，merge d7bbf45，CLI `--duration N` 限时采样，真机六场景回归全通）；前序：会话 1（64409d4 tarball CLI agent 解析链）
+> 最后更新：2026-09-18 晚：J 节会话 3 完成（merge 2b2c819，AGENTS.md + SKILL.md + README 双语 agent 节；顺手修复 XPERF_AGENT_BIN 空串 + 独立冷启动静默 no-op 缺陷 08adaad）；前序：会话 1（64409d4 tarball CLI agent 解析链）、会话 2（`--duration N`，merge d7bbf45）
 
 ## 当前状态速览
 
@@ -140,12 +140,12 @@
 - 注意：被测应用未运行时 agent 无事件源（resolve_pids 为空），限时到点正常退出但会话目录无 CSV——首轮回归误撞此情况，非缺陷
 - **会话内 review 修复**（13f347c，merge 57250ff）：断连重连的 keep-going 闭包原只查 Ctrl-C——设备在限时窗口内断开会使采样无限悬挂，`--duration` 有界承诺失效（trace/stack 限时路径同样受影响，预先存在）；闭包加 deadline 判定到点放弃重连走正常退出。真机验证：`--duration 12` 采样 5s 后 `adb reconnect offline` 强制离线，~12s 到点 exit 0 + 汇总照常。其余观察项：deadline 起点在 spawn_agent 之后（部署耗时不计入窗口——**刻意语义**，慢部署不应吃掉采样窗口，维持现状）；`--duration`+无指标（纯深挖）不生效（纯深挖自带边界、无可修对象，help 已注明）；EOF 尾部空行（测试模块带入）**已顺手修复**（随 13f347c 提交，尾字节验证干净）
 
-**会话 3 — 文档载体：`AGENTS.md` + `skills/xperf/SKILL.md` + README agent 一节**
-- 顺手项（会话 1 review 观察）：① `XPERF_AGENT_BIN=""` 空串视同未设置（一行 filter + 单测——现状走 Explicit 分支报空白路径，文案怪）；② CLAUDE.md「agent 部署」节补一句三级解析链说明
-- `AGENTS.md`（仓库根，Codex 只认它）：面向「使用 xperf」的精简指引——安装（release tarball/无 NDK 依赖）、核心命令配方、输出布局、退出码语义汇总表（现无文档：独立模式 trace/stack 失败非零、截屏/录屏/logcat/feedback 独立失败 exit 1、采样正常 0 等需先梳理代码确认）、常见坑（多设备必须 `--device`；首跑 agent 自动构建 ~1-2min；非 root 降级矩阵指 WORKSPACE G 节）
-- `skills/xperf/SKILL.md`（Claude Code/siada skill 格式，frontmatter + 触发描述）：何时用（Android 应用性能分析/回归断言）、命令配方（有界采样/threshold 断言/基线对比/trace/stack/截屏录屏/logcat）、输出文件消费方式（CSV 列、报告位置）
-- README（中英双语同步）补「For AI agents」一节：安装 + 有界运行 + 退出码 + 指向 AGENTS.md/SKILL.md
-- 验收：文档内每条命令真机可执行（抽查）；退出码表与代码实际行为一致（逐条核对 main.rs 退出路径）
+**会话 3 — 文档载体：`AGENTS.md` + `skills/xperf/SKILL.md` + README agent 一节** ✅ **已完成**（2026-09-18，`feature/agent-docs` 合 main，merge 2b2c819；子提交 7cdebd8 + 08adaad + e4a00d4）
+- 顺手项①②均落地：`XPERF_AGENT_BIN=""` 空串视同未设置（`agent_bin_env` 过滤 + 合并单测 `test_agent_bin_env_semantics` 三态覆盖）；CLAUDE.md agent 部署节已补三级解析链说明
+- `AGENTS.md`（仓库根）：tarball 布局/解析链、有界配方、输出布局 + CSV 列全表、退出码语义表（逐条核对 main.rs）、常见坑；`skills/xperf/SKILL.md`（中英触发描述 frontmatter）；README 双语各补「For AI agents / 面向 AI agent」节指向两份文档
+- **文档驱动发现的真缺陷（08adaad 顺手修复）**：独立 `--cold-start`（无指标 flag）走 samplingless 提前返回分支，`run_cold_start` 在其后——纯冷启动静默 no-op exit 0（agent 断言陷阱）。修复：samplingless 分支前置执行冷启动测量（自带 15s 超时天然有界）。真机：SS2MAX 独立冷启动 TotalTime 613ms 正常输出
+- 真机抽查（--remote hppc SS2MAX gltf，全对得上文档）：退出码 0/1/2 各路径（限时采样+阈值告警 exit 0、基线 save→compare 落 `baseline_report.txt`、截屏独立 exit 0、多设备未指定/非法包名/离线设备 exit 1、clap 互斥 exit 2、应用未运行 exit 0 无 CSV、`XPERF_AGENT_BIN=` 空串正常）；CSV 路径/表头逐一比对一致；**文档命令修正**：独立 logcat 无界（配方改为组合采样限时）、独立冷启动自界 15s 超时
+- 全量 162+8/9/11 绿，clippy + cargo doc（含 missing_docs 三 crate）零警告
 
 **会话 4 — 退出落 `summary.json`（可选，用户拍板后做）**
 - 动机：agent 免解析终端文本，直接拿结构化会话汇总（均值/峰值/判定）
