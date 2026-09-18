@@ -405,9 +405,6 @@ async fn monitor_process(args: &Args, cold_start_ms: Option<u64>) -> Result<(), 
     if args.compare_baseline {
         println!("{}", "基线模式: 会话结束后与已存基线对比".cyan());
     }
-    if let Some(d) = args.duration {
-        println!("限时采样: {}s 后自动退出", d);
-    }
 
     let flags = metric_flags(args);
     if !flags.any() {
@@ -458,6 +455,9 @@ async fn monitor_process(args: &Args, cold_start_ms: Option<u64>) -> Result<(), 
     // 统一走设备端 agent 采样（无 adb 轮询路径）；--duration/--trace/--stack/--record
     // 限时采样（多个同给取最长者，采样窗口覆盖所有录制）
     let stop_after = stop_window(args.duration, args.trace, args.stack, args.record);
+    if let Some(d) = stop_after {
+        println!("限时采样: {}s 后自动退出", d.as_secs());
+    }
     monitor_process_agent(args, flags, stop_after, cold_start_ms).await
 }
 
