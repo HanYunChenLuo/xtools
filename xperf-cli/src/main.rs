@@ -14,6 +14,7 @@ use tokio::time::Instant;
 
 mod utils;
 mod alerts;
+mod summary_json;
 use utils as cli_utils;
 use utils::validate_package_name;
 
@@ -1153,43 +1154,103 @@ async fn monitor_process_agent(
         }
     }
     // 验证报告
-    if !thresholds.is_empty() {
+    let threshold_outcome = if !thresholds.is_empty() {
         let stats = alert_stats.lock().unwrap();
         println!("{}", alerts::generate_report(&thresholds, &stats));
-    }
+        Some(alerts::report_outcome(&thresholds, &stats))
+    } else {
+        None
+    };
+    // 会话汇总：基线保存/对比与 summary.json 共用同一份数据体（两产物口径一致）
+    let session_summary =
+        build_session_summary(args, cold_start_ms, &pid_stats, &extra, restart_count);
+    let has_samples = session_summary.samples > 0 || session_summary.gpu_busy.is_some();
     // 基线对比（--save-baseline / --compare-baseline）：会话汇总统计的保存与 diff
+    let mut baseline_verdict: Option<summary_json::BaselineVerdict> = None;
     if args.save_baseline || args.compare_baseline {
-        let summary =
-            build_session_summary(args, cold_start_ms, &pid_stats, &extra, restart_count);
         // 无任何采集指标时跳过（避免保存全空基线/对比全空）
-        if summary.samples == 0 && summary.gpu_busy.is_none() {
+        if !has_samples {
             println!("{}", "基线对比跳过：本次会话无任何采集数据（至少 --cpu/--memory/--fps/--gpu 之一）".yellow());
+            baseline_verdict = Some(summary_json::BaselineVerdict::action_only("skipped_no_data"));
         } else if args.save_baseline {
-            match xperf_core::baseline::save(&package, &summary) {
-                Ok(p) => println!("基线已保存（覆盖旧基线）: {}", p.display()),
-                Err(e) => println!("{}", format!("基线保存失败: {}", e).yellow()),
-            }
+            let v = match xperf_core::baseline::save(&package, &session_summary) {
+                Ok(p) => {
+                    println!("基线已保存（覆盖旧基线）: {}", p.display());
+                    summary_json::BaselineVerdict {
+                        baseline_file: Some(p.display().to_string()),
+                        ..summary_json::BaselineVerdict::action_only("saved")
+                    }
+                }
+                Err(e) => {
+                    println!("{}", format!("基线保存失败: {}", e).yellow());
+                    summary_json::BaselineVerdict {
+                        error: Some(format!("{e:#}")),
+                        ..summary_json::BaselineVerdict::action_only("failed")
+                    }
+                }
+            };
+            baseline_verdict = Some(v);
         } else if args.compare_baseline {
+            let baseline_file =
+                xperf_core::baseline::baseline_dir().join(format!("{}.json", package));
             match xperf_core::baseline::load(&package) {
                 Ok(base) => {
-                    let report = xperf_core::baseline::compare(&base, &summary);
+                    let report = xperf_core::baseline::compare(&base, &session_summary);
                     println!("{}", report);
+                    let mut v = summary_json::BaselineVerdict {
+                        baseline_file: Some(baseline_file.display().to_string()),
+                        outcome: Some(xperf_core::baseline::compare_outcome(&base, &session_summary)),
+                        ..summary_json::BaselineVerdict::action_only("compared")
+                    };
                     if let Ok(dir) = cli_utils::create_timestamp_subdir(&package) {
                         let path = dir.join("baseline_report.txt");
                         match std::fs::write(&path, &report) {
-                            Ok(_) => println!("基线对比报告: {}", path.display()),
+                            Ok(_) => {
+                                println!("基线对比报告: {}", path.display());
+                                v.report_file = Some(path.display().to_string());
+                            }
                             Err(e) => {
                                 println!("{}", format!("基线报告写盘失败: {}", e).yellow())
                             }
                         }
                     }
+                    baseline_verdict = Some(v);
                 }
-                Err(e) => println!(
-                    "{}",
-                    format!("未找到基线（先用 --save-baseline 保存一次）: {}", e).yellow()
-                ),
+                Err(e) => {
+                    println!(
+                        "{}",
+                        format!("未找到基线（先用 --save-baseline 保存一次）: {}", e).yellow()
+                    );
+                    // 文件不存在 = 从未保存（no_baseline）；存在但读失败 = failed
+                    let mut v = if baseline_file.exists() {
+                        summary_json::BaselineVerdict {
+                            error: Some(format!("{e:#}")),
+                            ..summary_json::BaselineVerdict::action_only("failed")
+                        }
+                    } else {
+                        summary_json::BaselineVerdict::action_only("no_baseline")
+                    };
+                    v.baseline_file = Some(baseline_file.display().to_string());
+                    baseline_verdict = Some(v);
+                }
             }
         }
+    }
+    // summary.json：采样会话退出时总是落盘（结构化会话汇总，agent 免解析终端文本）；
+    // 写盘失败只告警——采样产物 CSV 已是主产出，不改变退出码
+    match cli_utils::create_timestamp_subdir(&package) {
+        Ok(dir) => {
+            let file = summary_json::SummaryFile {
+                summary: session_summary,
+                thresholds: threshold_outcome,
+                baseline: baseline_verdict,
+            };
+            match summary_json::write_summary_json(&dir, &file) {
+                Ok(p) => println!("会话汇总: {}", p.display()),
+                Err(e) => println!("{}", format!("{:#}", e).yellow()),
+            }
+        }
+        Err(e) => println!("{}", format!("summary.json 落盘失败: {:#}", e).yellow()),
     }
     // perfetto 深挖 + simpleperf 函数热点：录制与采样同窗口应已完成，join 后做分析
     // （录制失败不影响采样产出；报告按 trace → stack 顺序输出）
