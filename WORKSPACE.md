@@ -2,7 +2,7 @@
 
 > 本文件记录跨会话的待办事项（backlog）。每次会话的历史总结见 `SESSION.md`。
 > 完成一项就把状态改为 ✅ 并注明完成的 commit；新增想法随时追加。
-> 最后更新：2026-09-18 上午：OAuth 竞态单测（闭包注入，8 测试）+ GUI 表单/按钮键盘物理目验闭环（SSH 密码表单全链真机连接成功 + 反馈/登录按钮）；前序：README 重排 + GUI `--release` agent 回退修复
+> 最后更新：2026-09-18 下午：J 节会话 1 完成（64409d4，tarball CLI 找不到捆绑 agent 修复——env/sibling/开发兜底三级解析链，真机 A/B 实证）；前序：新增 J 节「Agent 能力提供」排期
 
 ## 当前状态速览
 
@@ -124,6 +124,36 @@
 - [x] ~~**logcat 文本过滤**~~（**已完成**，2026-09-15，`feature/logcat-text-filter` 合 main）：设备端 `logcat -e <regex>` 消息体正则下沉（吞吐敏感不把无关行拉过 adb 通道），与级别/按包过滤叠加。core config/restart/build_args 全链路（空白串忽略，标记行带 `text=`）；CLI `--logcat-regex`（requires --logcat；秒死 Error 经事件回调透传 stderr）；GUI 日志 tab「过滤」输入框（start/restart 命令加 text 参数，变更走热切换同文件续写）。**非法正则三平台（A11/A12/A16）实测均立即 rc=134 regex_error abort** → 连续秒死 Error 路径（CLI 可见 ❌）。真机回归（--remote hppc）：SS3 uid+`-e` 叠加命中正确 / SS2MAX A11 `-e` 可用 / SS4 多用户 uid+`-e` / 热切换集成测试（标记行 text=FATAL）/ GUI AX 全链（开始带 text=filament → 热切 SurfaceFlinger respawn 标记 → ANR 再切 → 停止）。AX 新教训入 CLAUDE.md（set value 异步生效、blur 派发 change、缓存引用失效、AppleScript 保留字）
 - [x] ~~**问题反馈（一键收集日志 → GitLab issue）**~~（**已完成**，2026-09-17，`feature/feedback`）：core `feedback.rs`（收集+打包+上传纯 Rust——tar/flate2/reqwest rustls，零系统命令依赖）+ CLI `--feedback` + GUI 顶栏「问题反馈」按钮与描述浮层。采集范围按用户拍板收敛为 **xperf 自身证据**（不含设备 logcat，issue 正文引导手动附加）：1h mtime 过滤的会话产物（排除 pftrace/mp4/html 大文件，正文列路径）+ GUI diag 尾段 + 各设备 agent.log（网关除外）+ manifest 环境信息；逐项自检清单缺失如实标注；单文件 >32MB 截尾。token：`GITLAB_TOKEN` env > `~/.config/xperf/gitlab-token`；附件 413 超限回退 package registry；labels 失败去 labels 重试；上传失败归档保留报错附路径。**真机回归全通**：本地无设备/SSH 远程 3 设备 agent 日志/采样后会话产物收集/token 缺失错误路径（exit 1）/GUI 浮层键盘驱动提交全链/**真实上传 issue #1 创建+附件回下载可解包**（测试用 token 取 hppc git-credentials）。**AX 新教训**（已入 CLAUDE.md）：本实例 WKWebView 子树冻结于启动早期快照（递归遍历也拿不到新内容），键盘驱动焦点链是可行替代；侧栏按钮点击本身未目验（走查+构造器完成佐证，留给用户一眼确认）
 - [x] ~~**截屏与录屏**~~（**已完成**，2026-09-12 主体 + 2026-09-14 并存缺陷核销，`feature/screen-capture` 合 main）：截屏=`adb exec-out screencap -p` 直写本机 PNG（PNG 魔数偏移定位剥 stdout 前缀警告——SS4 实踩）；录屏=scrcpy `--no-window --record`（复用镜像隧道双钉同号全链路；停止 SIGINT 优雅封盘 ≤3s 宽限 SIGKILL 兜底；CLI 倒计时从首帧落盘起算；产物核验防假阳性；**启动未建流自动重试一次**——设备端 server 启动偶发中止的自愈，CLI/GUI 同策略，GUI 前端 `retrying` 状态）。CLI `--screenshot`/`--record N`（独立+采样并行同窗口）；GUI 侧栏「屏幕捕获」区截屏按钮+录屏 toggle（AX 目验通过）。真机回归 SS3/SS4 全通，镜像+录屏并存 13 连过
+
+---
+
+## J. Agent 能力提供（Claude Code / Codex，2026-09-18 review 排期）
+
+> 目标：编码 agent 在用户项目里经 shell 调用 xperf-cli 完成性能采集/断言。2026-09-18 review 结论：**现状对 agent 不可用**——1 个阻断缺陷 + 1 个刚需缺口 + 文档载体缺失。分 4 个实施会话 + 1 个完整 review/真机回归会话。已具备基础：CLI 全链路非交互、结果全落盘（`/tmp/xperf/<pkg>/<ts>/` CSV/报告）、`--threshold`/基线对比天然是断言接口、`--help` 自描述充分。
+
+- [x] ~~**会话 1 — 修复 tarball CLI 找不到捆绑 agent（P0 阻断缺陷）**~~（**已完成**，2026-09-18，`fix/cli-agent-resolution` 合 main，64409d4）：`resolve_agent_binary()` 三级解析链（`XPERF_AGENT_BIN` env 显式覆盖[指向不存在报错不回退] → exe 旁 `agent/xperf-agent` sibling[release tarball 布局] → 开发检出 `ensure_agent_built()` 兜底[workspace_root 有 Cargo.toml 才走，语义不变]；全落空报错指引 tarball 布局不再盲目 cargo build），纯函数 `pick_agent_binary` 锁顺序；替换 CLI main 预热/ensure_daemon 强制重推/reconnect 三处 None 分支，GUI 资源路径不动。真机（--remote hppc SS3）：掩蔽 workspace agent 二进制 A/B——tarball CLI 从 /tmp 采样+trace 全通且未触发重建（sibling 生效实证）；dev 回归、env 错误路径 exit 1 全通。单测 5 新用例，全量 162+5+11 绿，clippy/doc 零警告
+
+**会话 2 — CLI `--duration <SECONDS>` 限时采样（P0 缺口）**
+- 现状：纯采样（`--cpu --memory`）只能 Ctrl-C；agent 的 shell 调用必须有界（macOS 无 `timeout`）。`--trace/--stack/--record N` 已有同窗口限时语义可复用
+- 修法：采样循环到点走**正常退出流程**（汇总打印/退出图表/基线保存对比/验证报告照常）；与 `--trace/--stack` 同给时窗口取 max（对齐现有限时语义）；help 注明 agent 场景用法
+- 验收：`--cpu --memory --duration 10` 到点自动退出、退出码 0、CSV/图表/汇总齐全；与 trace/stack/record/threshold/baseline 组合回归；单测覆盖时长计算
+
+**会话 3 — 文档载体：`AGENTS.md` + `skills/xperf/SKILL.md` + README agent 一节**
+- `AGENTS.md`（仓库根，Codex 只认它）：面向「使用 xperf」的精简指引——安装（release tarball/无 NDK 依赖）、核心命令配方、输出布局、退出码语义汇总表（现无文档：独立模式 trace/stack 失败非零、截屏/录屏/logcat/feedback 独立失败 exit 1、采样正常 0 等需先梳理代码确认）、常见坑（多设备必须 `--device`；首跑 agent 自动构建 ~1-2min；非 root 降级矩阵指 WORKSPACE G 节）
+- `skills/xperf/SKILL.md`（Claude Code/siada skill 格式，frontmatter + 触发描述）：何时用（Android 应用性能分析/回归断言）、命令配方（有界采样/threshold 断言/基线对比/trace/stack/截屏录屏/logcat）、输出文件消费方式（CSV 列、报告位置）
+- README（中英双语同步）补「For AI agents」一节：安装 + 有界运行 + 退出码 + 指向 AGENTS.md/SKILL.md
+- 验收：文档内每条命令真机可执行（抽查）；退出码表与代码实际行为一致（逐条核对 main.rs 退出路径）
+
+**会话 4 — 退出落 `summary.json`（可选，用户拍板后做）**
+- 动机：agent 免解析终端文本，直接拿结构化会话汇总（均值/峰值/判定）
+- 修法：复用 baseline 的 `SessionSummary` schema，退出汇总时落 `<ts>/summary.json`（CLI；含 threshold 判定结论与 baseline 对比结论引用）；GUI 不动
+- 验收：schema 与基线 JSON 一致；`--save-baseline` 同会话两文件口径相同；单测
+
+**会话 5 — 完整 review + 真机回归**
+- 对会话 1-4 全部改动做独立 review（功能 diff、无 magic number、备选方案与残余风险排序）
+- 真机回归（`--remote hppc`）：SS3/SS2MAX/SS4 三机——tarball CLI（隔离环境）采样/`--duration` 各组合/退出码逐条真值表/文档命令抽查执行
+- 全量测试 + clippy + cargo doc 零警告；CHANGELOG 与 README 收尾
+- 产出：review 报告 + 回归矩阵结论回填本节并勾销
 
 ---
 
