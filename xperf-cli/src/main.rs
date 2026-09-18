@@ -149,17 +149,17 @@ struct Args {
     #[arg(long)]
     screenshot: bool,
 
-    /// 录屏：scrcpy 无窗口录制 N 秒设备屏幕（MP4，host 侧落盘无时长上限，
+    /// 录屏：scrcpy 无窗口录制 N 秒设备屏幕（MP4，host 侧落盘，
     /// 需本机安装 scrcpy）。与采样并行时采样限时同窗口（Ctrl-C 提前停止并正常
     /// 封盘）；可单独使用（无 --package）
-    #[arg(long, value_name = "SECONDS", value_parser = clap::value_parser!(u64).range(1..))]
+    #[arg(long, value_name = "SECONDS", value_parser = clap::value_parser!(u64).range(1..=86400))]
     record: Option<u64>,
 
     /// 限时采样：N 秒后自动结束采样并走正常退出流程（汇总/退出图表/基线保存对比/验证
     /// 报告照常），供脚本与 AI agent 做有界采样（macOS 无 timeout 命令）。与
     /// --trace/--stack/--record 同给时采样窗口取最长者（覆盖所有录制）；仅作用于
     /// 采样会话（纯深挖/纯录屏/镜像-only 模式自带边界，本参数不生效）
-    #[arg(long, value_name = "SECONDS", value_parser = clap::value_parser!(u64).range(1..))]
+    #[arg(long, value_name = "SECONDS", value_parser = clap::value_parser!(u64).range(1..=86400))]
     duration: Option<u64>,
 
     /// 抓取设备 logcat 流式落盘（-v threadtime -v year，与采样 CSV 同设备时钟）。
@@ -1290,6 +1290,8 @@ fn build_session_summary(
         span(samples.front().map(|(t, _, _, _, _)| *t), samples.back().map(|(t, _, _, _, _)| *t));
     }
     span(extra.net.front().map(|(t, _, _)| *t), extra.net.back().map(|(t, _, _)| *t));
+    span(extra.freq.front().map(|(t, _)| *t), extra.freq.back().map(|(t, _)| *t));
+    span(extra.temp.front().map(|(t, _, _)| *t), extra.temp.back().map(|(t, _, _)| *t));
     let duration_s = match (first, last) {
         (Some(a), Some(b)) => (b - a).num_milliseconds() as f64 / 1000.0,
         _ => 0.0,
