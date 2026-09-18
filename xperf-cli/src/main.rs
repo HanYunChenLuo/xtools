@@ -33,8 +33,9 @@ struct Args {
     #[arg(short = 'd', long, value_name = "SERIAL")]
     device: Option<String>,
 
-    /// SSH 远程后端：真机接在远端机（如 `--remote hppc`），本机 adb 客户端经 SSH 隧道
-    /// 连远端 adb server，采样/perfetto/simpleperf 全功能。认证支持 ssh config 别名
+    /// SSH 远程后端：真机接在远端机（如 `--remote myserver`，ssh config 别名或
+    /// user@host），本机 adb 客户端经 SSH 隧道连远端 adb server，
+    /// 采样/perfetto/simpleperf 全功能。认证支持 ssh config 别名
     /// 免密或密码（`XPERF_SSH_PASSWORD` 环境变量，密码仅内存驻留不落盘）
     #[arg(long, value_name = "HOST")]
     remote: Option<String>,

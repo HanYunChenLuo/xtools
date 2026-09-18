@@ -114,8 +114,8 @@ Examples:
 # Capture logcat (package filter + message-body regex)
 ./target/release/xperf-cli --package com.example.app --logcat --logcat-regex 'ANR|FATAL'
 
-# SSH remote backend (device attached to the remote Linux machine "hppc")
-./target/release/xperf-cli --remote hppc --package com.example.app --cpu
+# SSH remote backend (device attached to a remote Linux machine, e.g. "myserver")
+./target/release/xperf-cli --remote myserver --package com.example.app --cpu
 ```
 
 #### Output Format

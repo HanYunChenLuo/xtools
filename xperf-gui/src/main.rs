@@ -1329,7 +1329,7 @@ fn list_devices() -> Result<serde_json::Value, String> {
 /// 远程连接配置（`~/.config/xperf/remotes.json` 持久化，顶栏「连接」控件编辑）
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct RemoteConfig {
-    /// 展示名（下拉选项文本与唯一键，如 `hppc`）
+    /// 展示名（下拉选项文本与唯一键，如 `myserver`）
     name: String,
     /// ssh 目标（`ssh_config` Host 别名或 `user@host`）
     host: String,

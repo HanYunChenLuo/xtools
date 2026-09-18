@@ -105,8 +105,8 @@ Android 应用性能分析工具集：CLI + 桌面 GUI + 设备端采样 agent�
 # 抓取 logcat（按包过滤 + 消息体正则）
 ./target/release/xperf-cli --package com.example.app --logcat --logcat-regex 'ANR|FATAL'
 
-# SSH 远程后端（真机接在远端 Linux 机 hppc）
-./target/release/xperf-cli --remote hppc --package com.example.app --cpu
+# SSH 远程后端（真机接在远端 Linux 机，如别名 myserver）
+./target/release/xperf-cli --remote myserver --package com.example.app --cpu
 ```
 
 #### 输出格式
