@@ -146,6 +146,7 @@
 - **文档驱动发现的真缺陷（08adaad 顺手修复）**：独立 `--cold-start`（无指标 flag）走 samplingless 提前返回分支，`run_cold_start` 在其后——纯冷启动静默 no-op exit 0（agent 断言陷阱）。修复：samplingless 分支前置执行冷启动测量（自带 15s 超时天然有界）。真机：SS2MAX 独立冷启动 TotalTime 613ms 正常输出
 - 真机抽查（--remote hppc SS2MAX gltf，全对得上文档）：退出码 0/1/2 各路径（限时采样+阈值告警 exit 0、基线 save→compare 落 `baseline_report.txt`、截屏独立 exit 0、多设备未指定/非法包名/离线设备 exit 1、clap 互斥 exit 2、应用未运行 exit 0 无 CSV、`XPERF_AGENT_BIN=` 空串正常）；CSV 路径/表头逐一比对一致；**文档命令修正**：独立 logcat 无界（配方改为组合采样限时）、独立冷启动自界 15s 超时
 - 全量 162+8/9/11 绿，clippy + cargo doc（含 missing_docs 三 crate）零警告
+- **会话内 review 修正**（4a6e776，merge b865304）：08adaad 让独立冷启动真正执行但失败仍 exit 0，与其他独立能力失败码语义不一致（断言启动耗时的脚本拿不到失败信号）——独立模式测量失败如实置失败码（真机：.NoSuchActivity → exit 1 / 正常 → exit 0），AGENTS.md/SKILL.md 退出码表同步
 
 **会话 4 — 退出落 `summary.json`（可选，用户拍板后做）**
 - 动机：agent 免解析终端文本，直接拿结构化会话汇总（均值/峰值/判定）
