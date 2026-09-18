@@ -124,14 +124,32 @@ pub fn status() -> Option<OAuthIdentity> {
 /// refresh 被 GitLab 拒绝（invalid_grant，如授权被撤销）时删除本地存储返回 None，
 /// 由调用方引导重新登录。
 pub fn current_access_token() -> Result<Option<String>> {
-    let path = store_path();
+    current_access_token_with(store_path(), &mut |refresh_token| {
+        let client = http_client().map_err(RefreshError::Other)?;
+        refresh_tokens(&client, refresh_token)
+    })
+}
+
+/// [`current_access_token`] 的可测核心：刷新动作经 `refresh` 闭包注入（生产为
+/// HTTP 调用 [`refresh_tokens`]，单测注入脚本化响应），token 存储路径显式传入
+/// （单测各用临时文件，并行安全）。
+///
+/// 竞态语义（GitLab 轮换刷新：每次刷新换发新 refresh_token，旧值立即作废）：
+/// 本进程刷新撞 `invalid_grant` 时可能是**另一进程刚完成轮换**（我方持有的
+/// refresh_token 已被作废）——重读存储，refresh_token 已变则复用新登录态（新
+/// token 仍临期则以新 refresh_token 再刷一次，再撞 invalid_grant 才确属授权
+/// 失效清登录态）；refresh_token 未变则确属授权撤销，删除存储。网络/服务端
+/// 临时故障（[`RefreshError::Other`]）原样上抛，**不清登录态**。
+fn current_access_token_with(
+    path: PathBuf,
+    refresh: &mut dyn FnMut(&str) -> std::result::Result<TokenPair, RefreshError>,
+) -> Result<Option<String>> {
     let Some(mut store) = load_store(&path) else { return Ok(None) };
     if now_epoch() + REFRESH_MARGIN_SECS < store.expires_at {
         return Ok(Some(store.access_token));
     }
     crate::utils::diag("oauth: access token 临期，刷新中");
-    let client = http_client()?;
-    match refresh_tokens(&client, &store.refresh_token) {
+    match refresh(&store.refresh_token) {
         Ok(tokens) => {
             store.access_token = tokens.access_token;
             store.refresh_token = tokens.refresh_token;
@@ -150,7 +168,7 @@ pub fn current_access_token() -> Result<Option<String>> {
                         return Ok(Some(fresh.access_token));
                     }
                     // 新 token 也临期/过期：以新 refresh_token 再刷一次
-                    match refresh_tokens(&client, &fresh.refresh_token) {
+                    match refresh(&fresh.refresh_token) {
                         Ok(tokens) => {
                             let mut store2 = fresh;
                             store2.access_token = tokens.access_token;
@@ -711,5 +729,157 @@ mod tests {
     fn test_urlencoding() {
         assert_eq!(urlencoding("http://127.0.0.1:39859/callback"), "http%3A%2F%2F127.0.0.1%3A39859%2Fcallback");
         assert_eq!(urlencoding("a b"), "a%20b");
+    }
+
+    // ---- current_access_token_with：刷新与并发轮换竞态恢复（刷新动作脚本化注入）----
+
+    /// 恒未过期的 expires_at（2100 年）——绕开时钟依赖
+    const FAR_EXPIRES: i64 = 4_102_444_800;
+
+    /// 每个测试独立的临时 store 路径（并行安全）
+    fn race_test_path(tag: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("xperf-oauth-race-{}-{tag}", std::process::id()))
+    }
+
+    /// 写入指定状态的登录态
+    fn write_race_store(path: &Path, access: &str, refresh: &str, expires_at: i64) {
+        save_store(path, &TokenStore {
+            access_token: access.into(),
+            refresh_token: refresh.into(),
+            expires_at,
+            username: "tester".into(),
+            name: "T".into(),
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn test_token_fresh_no_refresh() {
+        let path = race_test_path("fresh");
+        write_race_store(&path, "at", "rt", FAR_EXPIRES);
+        let r = current_access_token_with(path.clone(), &mut |_| {
+            panic!("token 未临期不应触发刷新")
+        })
+        .unwrap();
+        assert_eq!(r.as_deref(), Some("at"));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_no_store_returns_none() {
+        let path = race_test_path("absent");
+        let _ = std::fs::remove_file(&path);
+        let r = current_access_token_with(path.clone(), &mut |_| panic!("无登录态不应刷新")).unwrap();
+        assert_eq!(r, None);
+    }
+
+    #[test]
+    fn test_refresh_success_persists_rotation() {
+        let path = race_test_path("ok");
+        write_race_store(&path, "at-old", "rt-old", 1); // 早已过期
+        let r = current_access_token_with(path.clone(), &mut |rt| {
+            assert_eq!(rt, "rt-old", "首刷用旧 refresh_token");
+            Ok(TokenPair { access_token: "at-new".into(), refresh_token: "rt-new".into(), expires_in: 7200 })
+        })
+        .unwrap();
+        assert_eq!(r.as_deref(), Some("at-new"));
+        let saved = load_store(&path).unwrap();
+        assert_eq!(saved.refresh_token, "rt-new", "轮换后的 refresh_token 须落盘");
+        assert!(saved.expires_at > now_epoch() + 7000, "有效期须按响应更新");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// 无竞态的 invalid_grant（授权真被撤销）：refresh_token 未被并发轮换 → 清登录态
+    #[test]
+    fn test_invalid_grant_no_race_clears_login() {
+        let path = race_test_path("revoke");
+        write_race_store(&path, "at", "rt", 1);
+        let r = current_access_token_with(path.clone(), &mut |rt| {
+            assert_eq!(rt, "rt");
+            Err(RefreshError::InvalidGrant)
+        })
+        .unwrap();
+        assert_eq!(r, None);
+        assert!(!path.exists(), "登录态文件应被删除");
+    }
+
+    /// 竞态：另一进程已轮换（store 文件已是新登录态且未过期）→ 复用赢家 token，不再刷
+    #[test]
+    fn test_race_winner_rotated_reuse_fresh() {
+        let path = race_test_path("race1");
+        write_race_store(&path, "at-old", "rt-old", 1);
+        let winner_path = path.clone();
+        let mut calls = 0;
+        let r = current_access_token_with(path.clone(), &mut |rt| {
+            calls += 1;
+            assert_eq!(rt, "rt-old");
+            // 模拟并发赢家：我方 refresh_token 作废的同时已把轮换后的登录态写入存储
+            write_race_store(&winner_path, "at-winner", "rt-winner", FAR_EXPIRES);
+            Err(RefreshError::InvalidGrant)
+        })
+        .unwrap();
+        assert_eq!(calls, 1, "赢家 token 未临期不应触发二次刷新");
+        assert_eq!(r.as_deref(), Some("at-winner"));
+        assert!(path.exists(), "复用赢家登录态，文件保留");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// 竞态变体：赢家轮换过但其 token 也临期 → 以新 refresh_token 再刷一次成功
+    #[test]
+    fn test_race_rotated_but_expiring_refreshes_again() {
+        let path = race_test_path("race2");
+        write_race_store(&path, "at-old", "rt-old", 1);
+        let winner_path = path.clone();
+        let mut seen: Vec<String> = Vec::new();
+        let r = current_access_token_with(path.clone(), &mut |rt| {
+            seen.push(rt.to_string());
+            if seen.len() == 1 {
+                // 赢家刚轮换，但它的 token 也临期（两次会话几乎同时到期）
+                write_race_store(&winner_path, "at-winner", "rt-winner", now_epoch() + 30);
+                Err(RefreshError::InvalidGrant)
+            } else {
+                assert_eq!(rt, "rt-winner", "二次刷新须用赢家的新 refresh_token");
+                Ok(TokenPair { access_token: "at2".into(), refresh_token: "rt2".into(), expires_in: 7200 })
+            }
+        })
+        .unwrap();
+        assert_eq!(seen, vec!["rt-old", "rt-winner"]);
+        assert_eq!(r.as_deref(), Some("at2"));
+        let saved = load_store(&path).unwrap();
+        assert_eq!((saved.access_token.as_str(), saved.refresh_token.as_str()), ("at2", "rt2"));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// 竞态变体：二次刷新（用赢家的新 refresh_token）仍被拒 → 确属失效，清登录态
+    #[test]
+    fn test_race_second_rejected_clears_login() {
+        let path = race_test_path("race3");
+        write_race_store(&path, "at-old", "rt-old", 1);
+        let winner_path = path.clone();
+        let r = current_access_token_with(path.clone(), &mut |rt| {
+            if rt == "rt-winner" {
+                Err(RefreshError::InvalidGrant) // 二次刷新仍被拒
+            } else {
+                write_race_store(&winner_path, "at-winner", "rt-winner", now_epoch() + 30);
+                Err(RefreshError::InvalidGrant) // 首刷被拒（被赢家轮换作废）
+            }
+        })
+        .unwrap();
+        assert_eq!(r, None);
+        assert!(!path.exists());
+    }
+
+    /// 网络/服务端临时故障：原样上抛，不清登录态（下次调用可重试）
+    #[test]
+    fn test_transient_error_keeps_login_state() {
+        let path = race_test_path("neterr");
+        write_race_store(&path, "at", "rt", 1);
+        let r = current_access_token_with(path.clone(), &mut |_| {
+            Err(RefreshError::Other(anyhow!("connection reset")))
+        });
+        assert!(r.is_err());
+        assert!(path.exists(), "临时故障不应清登录态");
+        assert_eq!(load_store(&path).unwrap().refresh_token, "rt");
+        let _ = std::fs::remove_file(&path);
     }
 }
