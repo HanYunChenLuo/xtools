@@ -380,6 +380,68 @@ pub fn agent_binary_path() -> PathBuf {
     workspace_root().join("target/aarch64-linux-android/release/xperf-agent")
 }
 
+/// agent 二进制解析结果（[`pick_agent_binary`] 返回值，[`resolve_agent_binary`] 的内核）
+#[derive(Debug, PartialEq, Eq)]
+enum AgentPick {
+    /// 显式指定（`XPERF_AGENT_BIN` 环境变量）——最高优先级；存在性由调用方校验
+    Explicit(PathBuf),
+    /// 可执行文件旁 `agent/xperf-agent`（release tarball 布局）
+    Bundled(PathBuf),
+    /// 开发检出：走 [`ensure_agent_built`]（workspace 交叉构建产物，按需自动构建）
+    DevBuild,
+    /// 全部落空（发布包布局缺失；调用方报错）
+    Missing,
+}
+
+/// agent 二进制解析顺序（纯函数，单测锁定）：
+/// 1. `env`（`XPERF_AGENT_BIN` 显式值）——**为 Some 即不再回落**：显式配置指向
+///    不存在的文件是配置错误，必须暴露而非静默换源；
+/// 2. `exe_dir` 下 `agent/xperf-agent`（release tarball 捆绑布局）；
+/// 3. `workspace` 下存在 `Cargo.toml`（开发检出）→ `DevBuild`；
+/// 4. `Missing`。
+fn pick_agent_binary(env: Option<PathBuf>, exe_dir: Option<&Path>, workspace: &Path) -> AgentPick {
+    if let Some(p) = env {
+        return AgentPick::Explicit(p);
+    }
+    if let Some(dir) = exe_dir {
+        let bundled = dir.join("agent").join("xperf-agent");
+        if bundled.is_file() {
+            return AgentPick::Bundled(bundled);
+        }
+    }
+    if workspace.join("Cargo.toml").is_file() {
+        return AgentPick::DevBuild;
+    }
+    AgentPick::Missing
+}
+
+/// 解析本机 agent 二进制路径——release tarball 安装与开发检出通用入口（CLI 用）。
+///
+/// 解析顺序（纯函数内核 `pick_agent_binary`，单测锁定）：
+/// 1. `XPERF_AGENT_BIN` 环境变量（显式覆盖；指向的文件不存在则报错，**不回退**）；
+/// 2. 当前可执行文件旁 `agent/xperf-agent`（release tarball 布局：`xperf-cli` 与
+///    `agent/` 目录并排分发）；
+/// 3. 开发检出（编译期 [`workspace_root`] 存在 `Cargo.toml`）：[`ensure_agent_built`]
+///    交叉构建产物，源码变更自动重建；
+/// 4. 全部落空：报错说明 tarball 布局（发布包用户机器不应落到开发构建路径——
+///    编译期路径在该机器上不存在，盲目 `cargo build` 只会报误导性错误）。
+pub fn resolve_agent_binary() -> Result<PathBuf> {
+    let env = std::env::var_os("XPERF_AGENT_BIN").map(PathBuf::from);
+    let exe_dir = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.to_path_buf()));
+    match pick_agent_binary(env, exe_dir.as_deref(), &workspace_root()) {
+        AgentPick::Explicit(p) if p.is_file() => Ok(p),
+        AgentPick::Explicit(p) => {
+            anyhow::bail!("XPERF_AGENT_BIN 指向的文件不存在: {}", p.display())
+        }
+        AgentPick::Bundled(p) => Ok(p),
+        AgentPick::DevBuild => ensure_agent_built(),
+        AgentPick::Missing => anyhow::bail!(
+            "找不到设备端 agent 二进制：release 安装应为 `xperf-cli` 与 `agent/xperf-agent` \
+             并排布局（或设 XPERF_AGENT_BIN 显式指定路径）"
+        ),
+    }
+}
+
 /// 目录树下最新 .rs 文件的 mtime（递归；目录不可读/为空返回 None）
 fn newest_mtime_under(dir: &Path) -> Option<std::time::SystemTime> {
     std::fs::read_dir(dir).ok()?
@@ -587,7 +649,8 @@ pub fn deploy_agent(local: &Path, serial: Option<&str>) -> Result<()> {
 /// platform: 平台提示（如 "ss3"），传入时 agent 跳过对应探测
 /// `serial`：目标设备（多设备并行会话用，`None` 回退全局选择）。
 ///
-/// CLI 使用此入口；本机缺少 agent 时会按开发模式自动交叉编译。
+/// CLI 使用此入口；agent 二进制经 [`resolve_agent_binary`] 解析
+/// （`XPERF_AGENT_BIN` → exe 旁 `agent/xperf-agent` → 开发检出自动交叉编译）。
 pub fn spawn_agent(
     package: Option<&str>,
     interval_ms: u64,
@@ -736,7 +799,7 @@ fn ensure_daemon(serial: Option<&str>, local_bin: Option<&Path>) -> Result<u16> 
 fn deploy_fresh_with_binary(serial: Option<&str>, local_bin: Option<&Path>) -> Result<()> {
     let bin = match local_bin {
         Some(path) => path.to_path_buf(),
-        None => ensure_agent_built()?,
+        None => resolve_agent_binary()?,
     };
     push_agent_binary(&bin, serial)
 }
@@ -986,7 +1049,7 @@ fn reconnect_agent_inner(
             let result = match local_bin {
                 Some(bin) => deploy_agent(bin, serial)
                     .and_then(|_| spawn_agent_with_binary(package, interval_ms, flags, platform, serial, bin)),
-                None => ensure_agent_built()
+                None => resolve_agent_binary()
                     .and_then(|bin| deploy_agent(&bin, serial))
                     .and_then(|_| spawn_agent(package, interval_ms, flags, platform, serial)),
             };
@@ -1016,6 +1079,103 @@ mod tests {
             agent_binary_path(),
             root.join("target/aarch64-linux-android/release/xperf-agent")
         );
+    }
+
+    /// `pick_agent_binary` 解析顺序测试的临时目录脚手架（释放即清理）
+    struct PickFixture {
+        root: PathBuf,
+    }
+
+    impl PickFixture {
+        fn new(tag: &str) -> Self {
+            let root = std::env::temp_dir().join(format!("xperf-picktest-{}-{}", tag, std::process::id()));
+            let _ = std::fs::remove_dir_all(&root);
+            std::fs::create_dir_all(&root).unwrap();
+            Self { root }
+        }
+
+        /// 造 tarball 布局：`<exe_dir>/agent/xperf-agent`（空文件），返回 exe_dir
+        fn with_bundled(&self) -> PathBuf {
+            let exe_dir = self.root.join("bin");
+            std::fs::create_dir_all(exe_dir.join("agent")).unwrap();
+            std::fs::write(exe_dir.join("agent").join("xperf-agent"), b"").unwrap();
+            exe_dir
+        }
+
+        /// 造开发检出布局：`<workspace>/Cargo.toml`，返回 workspace 根
+        fn with_workspace(&self) -> PathBuf {
+            let ws = self.root.join("ws");
+            std::fs::create_dir_all(&ws).unwrap();
+            std::fs::write(ws.join("Cargo.toml"), b"[workspace]").unwrap();
+            ws
+        }
+    }
+
+    impl Drop for PickFixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    #[test]
+    fn test_pick_agent_binary_explicit_wins_over_all() {
+        let f = PickFixture::new("explicit");
+        let exe_dir = f.with_bundled();
+        let ws = f.with_workspace();
+        let custom = f.root.join("custom-agent");
+        // 显式路径胜出（即使 sibling 与 workspace 都在；存在性由 resolve 层校验，
+        // pick 层不判——这里故意用不存在的路径也照样返回 Explicit）
+        assert_eq!(
+            pick_agent_binary(Some(custom.clone()), Some(&exe_dir), &ws),
+            AgentPick::Explicit(custom)
+        );
+    }
+
+    #[test]
+    fn test_pick_agent_binary_bundled_beats_dev() {
+        let f = PickFixture::new("bundled");
+        let exe_dir = f.with_bundled();
+        let ws = f.with_workspace();
+        assert_eq!(
+            pick_agent_binary(None, Some(&exe_dir), &ws),
+            AgentPick::Bundled(exe_dir.join("agent").join("xperf-agent"))
+        );
+    }
+
+    #[test]
+    fn test_pick_agent_binary_bundled_requires_file() {
+        let f = PickFixture::new("bundled-dir");
+        // sibling 路径存在但为目录（不是文件）→ 不算 Bundled，回落 DevBuild
+        let exe_dir = f.root.join("bin");
+        std::fs::create_dir_all(exe_dir.join("agent").join("xperf-agent")).unwrap();
+        let ws = f.with_workspace();
+        assert_eq!(pick_agent_binary(None, Some(&exe_dir), &ws), AgentPick::DevBuild);
+    }
+
+    #[test]
+    fn test_pick_agent_binary_dev_and_missing() {
+        let f = PickFixture::new("dev");
+        let ws = f.with_workspace();
+        let empty_exe_dir = f.root.join("nowhere");
+        // 无 env 无 sibling，workspace 有 Cargo.toml → DevBuild
+        assert_eq!(pick_agent_binary(None, Some(&empty_exe_dir), &ws), AgentPick::DevBuild);
+        assert_eq!(pick_agent_binary(None, None, &ws), AgentPick::DevBuild);
+        // workspace 无 Cargo.toml（非构建机的编译期路径）→ Missing
+        let no_ws = f.root.join("no-ws");
+        std::fs::create_dir_all(&no_ws).unwrap();
+        assert_eq!(pick_agent_binary(None, Some(&empty_exe_dir), &no_ws), AgentPick::Missing);
+    }
+
+    /// `resolve_agent_binary` 的显式路径错误信息（env 指向不存在文件 → 报错不回退）。
+    /// 进程级 env 操作：本测试是唯一改 `XPERF_AGENT_BIN` 的用例，串行无竞争
+    /// （cargo test 默认多线程，但同进程内其他用例不读该变量）。
+    #[test]
+    fn test_resolve_agent_binary_explicit_missing_file_errors() {
+        let bogus = std::env::temp_dir().join(format!("xperf-picktest-noent-{}", std::process::id()));
+        std::env::set_var("XPERF_AGENT_BIN", &bogus);
+        let err = resolve_agent_binary().unwrap_err().to_string();
+        std::env::remove_var("XPERF_AGENT_BIN");
+        assert!(err.contains("XPERF_AGENT_BIN"), "错误应指明 env 变量名: {}", err);
     }
 
 
