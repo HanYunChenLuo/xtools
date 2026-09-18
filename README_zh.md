@@ -156,7 +156,9 @@ xperf-cli --package com.example.app --cpu --memory --duration 30 --compare-basel
 ```
 
 退出码：`0` 成功（阈值告警与基线回归判定只出报告、不改变退出码），
-`1` 运行期失败，`2` 参数错误。release tar 包布局要求 `agent/xperf-agent`
+`1` 运行期失败，`2` 参数错误。采样会话退出时总是写 `<会话目录>/summary.json`
+——结构化指标汇总 + 阈值/基线判定结论，是 CI 断言入口（免解析终端文本）。
+release tar 包布局要求 `agent/xperf-agent`
 与 `xperf-cli` 并排存放（或用 `XPERF_AGENT_BIN` 显式指定）。
 
 完整命令配方、CSV 列定义与常见坑见 [AGENTS.md](AGENTS.md)（Codex 自动发现）

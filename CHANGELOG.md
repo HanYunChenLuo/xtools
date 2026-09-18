@@ -6,17 +6,23 @@
 
 ### 新增
 
+- **`--duration <秒>` 限时采样**：到点自动走正常退出流程（汇总/退出图表/验证报告/基线保存对比照常），供脚本与 AI agent 做有界调用；与 `--trace`/`--stack`/`--record` 同给时采样窗口取最长者。设备断连重连同样遵守限时（含 SSH 隧道重建退避切片，到点及时退出）。
+- **采样会话退出落 `summary.json`**：结构化会话汇总（与基线 JSON 同 schema）+ 阈值判定（all_pass + 逐规则触发详情）+ 基线动作与对比结论（verdict/回归指标名），CI 断言免解析终端文本；零样本会话也落盘（samples=0）。
 - **问题反馈**：CLI `--feedback "问题描述"` 与 GUI 顶栏「问题反馈」按钮——收集最近 1 小时工具自身证据（会话产物 / GUI 诊断日志 / 各设备端 agent 日志），逐项自检后打包上传内部 GitLab issue 并给出链接；issue 默认指派维护者（`XPERF_GITLAB_ASSIGNEE` 可覆盖）。
 - **GitLab OAuth 登录**：`--gitlab-login` / `--gitlab-logout`（浏览器授权码 + PKCE，兼容 SSO/2FA），登录后 `--feedback` 以本人身份创建 issue；凭证优先级 `GITLAB_TOKEN` 环境变量 > `~/.config/xperf/gitlab-token`（PAT）> OAuth 登录态。
 - **SSH 远程密码认证**：GUI 远程配置表单支持 用户名+IP+密码+端口；CLI 经 `XPERF_SSH_PASSWORD` 环境变量传密码。密码仅进程内存驻留、不落盘（不进配置文件/日志）；可选把主机保存为纯 Host 条目（HostName/User/Port，零秘密）写入 ssh config 复用。密码错误立即报错，不占用服务器重试配额。支持非 22 SSH 端口。
 
 ### 修复
 
+- 修复 release tar 包安装的 `xperf-cli` 找不到捆绑 agent：解析链改为 `XPERF_AGENT_BIN` 环境变量（指向不存在即报错不回退、空串视同未设置）→ 二进制旁 `agent/xperf-agent`（tar 包布局）→ 开发检出自动构建兜底。
+- 修复独立 `--cold-start`（不带采样指标）静默不执行仍退出 0：现真正执行测量，且失败（如 Activity 不存在）以退出码 1 上报。
+- 修复纯 `--freq`/`--thermal` 会话 `summary.json` 的 `duration_s` 恒 0：频率/温度序列计入会话时长跨度（两指标本身仍为 CSV-only，见 AGENTS.md）。
 - 修复 Linux AppImage 在 Ubuntu 22.04 启动失败（`libpango` symbol lookup error）：AppImage 内 pango/WebKitGTK 引用的 libharfbuzz 新符号（3.3.0 / 4.0.0）在 jammy 自带版本（2.7.4）中缺失；现向 AppDir 注入构建侧 libharfbuzz 后重打包（24.04 不受影响）。
 - 修复 `cargo run --bin xperf-gui --release` 开发运行误报「GUI 发布包缺少预编译 agent」：agent 解析的开发判定从 `debug_assertions` 改为「编译期 workspace 是否存在」——开发运行（`cargo run`/`cargo install`，任意 profile）回退与 CLI 一致的自动构建，发布包（DMG/AppImage）行为不变（只认包内资源，不触发编译）。
 
 ### 变更
 
+- 文档：新增 `AGENTS.md`（Codex 自动发现约定）与 `skills/xperf/SKILL.md`（Claude Code/siada skill），README 双语补「For AI agents / 面向 AI agent」节。
 - 文档：README 标题与资产命名统一为 xperf，补中文版 `README_zh.md`（与主 README 互链），功能面与 GUI 章节更新至当前版本。
 
 ## [v0.2.1] - 2026-09-16

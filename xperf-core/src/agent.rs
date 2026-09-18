@@ -1047,7 +1047,13 @@ fn reconnect_agent_inner(
                 }
                 Err(e) => {
                     eprintln!("SSH 隧道重建失败：{:#}，{:?} 后重试…", e, rebuild_backoff);
-                    std::thread::sleep(rebuild_backoff);
+                    // 退避睡眠切片（每 ≤500ms 醒一次）：loop 顶的 is_running() 检查
+                    // （含 --duration 限时 deadline）才能及时生效——否则到点后仍可能
+                    // 睡在最长 30s 的退避里，有界承诺被拉长
+                    let backoff_start = std::time::Instant::now();
+                    while backoff_start.elapsed() < rebuild_backoff && is_running() {
+                        std::thread::sleep(std::time::Duration::from_millis(500));
+                    }
                     rebuild_backoff = (rebuild_backoff * 2).min(std::time::Duration::from_secs(30));
                 }
             }

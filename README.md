@@ -169,6 +169,9 @@ xperf-cli --package com.example.app --cpu --memory --duration 30 --compare-basel
 
 Exit codes: `0` success (threshold alerts and baseline regressions are
 report-only and never fail the run), `1` runtime failure, `2` argument error.
+Every sampling session writes `<session>/summary.json` on exit — structured
+metrics plus threshold/baseline verdicts, the assertion entry point for CI
+(no terminal-output parsing needed).
 Keep `agent/xperf-agent` next to the `xperf-cli` binary (release tarball
 layout) or set `XPERF_AGENT_BIN`.
 
