@@ -16,6 +16,8 @@ agent/xperf-agent    # on-device sampler (aarch64 Android, pushed automatically)
 
 Resolution order: `XPERF_AGENT_BIN` env override → `agent/xperf-agent` next to
 the `xperf-cli` binary → dev-checkout auto cross-build (needs Rust + NDK).
+An explicit `XPERF_AGENT_BIN` pointing to a missing file is a hard error
+(exit 1, no fallback); an empty value is treated as unset.
 No NDK or extra setup is needed when using the tarball as-is. Do not move
 `xperf-cli` out of its directory without also moving `agent/`.
 
@@ -111,6 +113,12 @@ saved with `--save-baseline`), plus two verdict objects:
   (only when `compared`) is `{verdict, regressions, improvements, flat,
   no_compare, regressed_metrics}` with `verdict` ∈ `no_regression` /
   `regression` / `no_comparable`.
+
+Schema scope: per-metric keys cover cpu / mem_pss_kb / fps / jank / gpu_busy /
+io / net / cold_start — freq, thermal, GPU memory and thread detail stay
+CSV-only (freq/thermal samples do extend `duration_s`). `samples` is the CPU
+sample count, so a freq/thermal-only session reports `samples: 0` with a
+real `duration_s`.
 
 CSVs are streamed row-by-row with flush; a killed run loses at most the tail.
 Timestamps are local-time with millisecond precision; logcat uses the device
