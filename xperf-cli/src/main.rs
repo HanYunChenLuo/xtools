@@ -1261,7 +1261,8 @@ async fn monitor_process_agent(
 
 /// 构建会话汇总统计（基线保存/对比的数据体）：pid_stats 的 CPU/内存/FPS + B 类时序的
 /// GPU/IO/网络，多 PID 样本全量合并（口径见 `baseline::SessionSummary` 文档）。
-/// 时长取全部 CPU/内存/FPS 样本时间戳的首尾跨度；长会话内存序列已抽稀时均值为
+/// 时长取全部时序（含 freq/temp 等设备级序列）样本时间戳的首尾跨度——纯
+/// --freq/--thermal 会话也有真实时长；长会话内存序列已抽稀时均值为
 /// 均匀抽稀下的近似（CSV 全量仍在）。
 fn build_session_summary(
     args: &Args,

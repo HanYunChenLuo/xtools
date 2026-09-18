@@ -474,7 +474,8 @@ fn newest_mtime_under(dir: &Path) -> Option<std::time::SystemTime> {
 /// （与 utils.rs 的 adb / transport.rs 的 ssh 解析链同套路。）
 fn host_cargo_path() -> PathBuf {
     let mut candidates = Vec::new();
-    if let Some(path) = std::env::var_os("XPERF_CARGO") {
+    // 空串视同未设置（与 XPERF_AGENT_BIN 语义一致），否则 `PathBuf::from("")` 会进入候选
+    if let Some(path) = std::env::var_os("XPERF_CARGO").filter(|v| !v.is_empty()) {
         candidates.push(PathBuf::from(path));
     }
     if let Some(path) = std::env::var_os("PATH") {

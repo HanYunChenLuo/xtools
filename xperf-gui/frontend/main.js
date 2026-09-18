@@ -207,6 +207,7 @@ class DeviceSession {
     this.serial = serial;
     this.info = info || { model: '', version: '' };
     this.samplingRunning = false;
+    this.agentBuilding = false; // 开发运行 agent 构建中（agent-build 事件/agent_building 回查驱动）
     this.offline = false;
     this.eventCount = 0;
     this.statusText = '未开始';
@@ -1110,7 +1111,8 @@ class DeviceSession {
       this.setStatus('首次构建 Android agent 中（约 1-2 分钟，仅开发运行）…');
     } else if (stage === 'done') {
       this.agentBuilding = false;
-      this.setStatus('agent 构建完成，正在启动采样…');
+      // 构建期间用户可能已点停止（samplingRunning=false）——那时没有采样在启动，不覆盖「已停止」
+      if (this.samplingRunning) this.setStatus('agent 构建完成，正在启动采样…');
     }
   }
 
@@ -1159,6 +1161,7 @@ class DeviceSession {
       this.el('stop-btn').disabled = false;
       if (!this.agentBuilding) this.setStatus('监控中: ' + f.package);
     } catch (e) {
+      this.agentBuilding = false;
       this.setStatus('错误: ' + e);
       _diag('[' + this.serial + '] startBtn invoke ERROR: ' + JSON.stringify(e));
     }
@@ -1889,7 +1892,8 @@ const feedbackUI = {
         // 启动会话的设备可能已断开（快照晚于启动）：也建页，采样线程等设备回来
         app.addDevice({ serial, model: '', version: '' });
       }
-      app.sessions.get(serial).applyStartupArgs(args);
+      app.sessions.get(serial).applyStartupArgs(args)
+        .catch((e) => _diag('[' + serial + '] applyStartupArgs ERROR: ' + (e && e.message ? e.message : JSON.stringify(e))));
     }
   } catch (e) {
     _diag('startup_sessions ERROR: ' + JSON.stringify(e));

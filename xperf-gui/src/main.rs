@@ -376,10 +376,11 @@ impl DeviceSession {
 /// 首次触达的 serial 自动建会话（设备在线性由命令前置校验保证）。
 struct AppState {
     sessions: Mutex<HashMap<String, DeviceSession>>,
-    /// 正在构建 agent 的设备 serial 集（开发运行构建期）：命令行自动启动时
-    /// 构建早于前端事件监听就绪，`agent-build` building 事件会丢——前端加载后
-    /// 经 `agent_building` 命令回查该状态补偿（done 事件必然晚于构建完成，能收到）
-    agent_building: Mutex<std::collections::HashSet<String>>,
+    /// 正在构建 agent 的设备 serial → 构建者计数（开发运行构建期）：命令行自动
+    /// 启动时构建早于前端事件监听就绪，`agent-build` building 事件会丢——前端加载后
+    /// 经 `agent_building` 命令回查该状态补偿（done 事件必然晚于构建完成，能收到）。
+    /// 计数配对：构建窗口内重启采样会产生并发构建者，归零才算真正构建完
+    agent_building: Mutex<HashMap<String, usize>>,
 }
 
 impl AppState {
@@ -491,8 +492,8 @@ fn bundled_agent_path(app: &tauri::AppHandle, serial: &str) -> Result<std::path:
         let needs_build = agent::agent_binary_needs_build();
         if needs_build {
             if let Some(state) = app.try_state::<AppState>() {
-                if let Ok(mut set) = state.agent_building.lock() {
-                    set.insert(serial.to_string());
+                if let Ok(mut map) = state.agent_building.lock() {
+                    *map.entry(serial.to_string()).or_insert(0) += 1;
                 }
             }
             let _ = app.emit(
@@ -502,12 +503,20 @@ fn bundled_agent_path(app: &tauri::AppHandle, serial: &str) -> Result<std::path:
         }
         let result = agent::ensure_agent_built().map_err(|e| e.to_string());
         if needs_build {
+            // 计数配对：构建窗口内重启采样会产生并发构建者，归零才向界面上报完成
+            let mut last_builder = false;
             if let Some(state) = app.try_state::<AppState>() {
-                if let Ok(mut set) = state.agent_building.lock() {
-                    set.remove(serial);
+                if let Ok(mut map) = state.agent_building.lock() {
+                    if let Some(n) = map.get_mut(serial) {
+                        *n -= 1;
+                        if *n == 0 {
+                            map.remove(serial);
+                            last_builder = true;
+                        }
+                    }
                 }
             }
-            if result.is_ok() {
+            if result.is_ok() && last_builder {
                 let _ = app.emit(
                     "agent-build",
                     serde_json::json!({ "serial": serial, "stage": "done" }),
@@ -524,7 +533,7 @@ fn bundled_agent_path(app: &tauri::AppHandle, serial: &str) -> Result<std::path:
 /// `agent-build` building 事件（done 事件晚于构建完成，前端必然能收到）。
 #[tauri::command]
 fn agent_building(serial: String, state: State<'_, AppState>) -> bool {
-    state.agent_building.lock().map(|s| s.contains(&serial)).unwrap_or(false)
+    state.agent_building.lock().map(|m| m.contains_key(&serial)).unwrap_or(false)
 }
 
 #[tauri::command]
@@ -1989,7 +1998,7 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         .manage(AppState {
             sessions: Mutex::new(HashMap::new()),
-            agent_building: Mutex::new(std::collections::HashSet::new()),
+            agent_building: Mutex::new(HashMap::new()),
         })
         .setup(move |app| {
             // 默认窗口大小：前端加载完成后经 resize_default 命令按屏幕动态设置
@@ -2227,7 +2236,7 @@ Host myserver          # 重复别名去重
 
     #[test]
     fn test_app_state_sessions_per_device() {
-        let state = AppState { sessions: Mutex::new(HashMap::new()), agent_building: Mutex::new(std::collections::HashSet::new()) };
+        let state = AppState { sessions: Mutex::new(HashMap::new()), agent_building: Mutex::new(HashMap::new()) };
         let a1 = state.session("devA");
         let b1 = state.session("devB");
         assert!(!*a1.running.lock().unwrap());
@@ -2300,7 +2309,7 @@ Host myserver          # 重复别名去重
 
     #[test]
     fn test_csv_dir_for_fresh_and_reuse() {
-        let state = AppState { sessions: Mutex::new(HashMap::new()), agent_building: Mutex::new(std::collections::HashSet::new()) };
+        let state = AppState { sessions: Mutex::new(HashMap::new()), agent_building: Mutex::new(HashMap::new()) };
         let pkg = format!("test_csvdir_{}", std::process::id());
         // 同包 + 非 fresh（指标勾选重启）→ 复用同一目录
         let d1 = state.csv_dir_for("devA", &pkg, false);
