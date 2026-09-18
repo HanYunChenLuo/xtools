@@ -138,7 +138,7 @@
 - 真机回归（--remote hppc SS3 gltf viewer，全部 exit 0）：`--cpu --memory --duration 8` 8 样本+CSV+图表+峰值 ✓；`--duration 3 --trace 6` 窗口取 6s（trace 30MB+SQL 报告）✓；`--duration 3 --stack 6` 窗口取 6s（.data+三视图）✓；`--duration 5 --threshold cpu>5` 实时告警×4+退出验证报告 ✓；`--duration 5 --save-baseline`→`--compare-baseline` 保存+持平报告 ✓；无 duration Ctrl-C 回归不变 ✓
 - 单测：`stop_window` 4 用例（全 None/单独/原有录制语义/取 max）；全量 core 162+8 + CLI 9 + GUI 11 绿，clippy/doc 零警告
 - 注意：被测应用未运行时 agent 无事件源（resolve_pids 为空），限时到点正常退出但会话目录无 CSV——首轮回归误撞此情况，非缺陷
-- **会话内 review 修复**（13f347c，merge 57250ff）：断连重连的 keep-going 闭包原只查 Ctrl-C——设备在限时窗口内断开会使采样无限悬挂，`--duration` 有界承诺失效（trace/stack 限时路径同样受影响，预先存在）；闭包加 deadline 判定到点放弃重连走正常退出。真机验证：`--duration 12` 采样 5s 后 `adb reconnect offline` 强制离线，~12s 到点 exit 0 + 汇总照常。其余观察项（记录不修）：deadline 起点在 spawn_agent 之后（部署耗时不计入窗口，语义正确）；`--duration`+无指标（纯深挖）不生效（help 已注明）
+- **会话内 review 修复**（13f347c，merge 57250ff）：断连重连的 keep-going 闭包原只查 Ctrl-C——设备在限时窗口内断开会使采样无限悬挂，`--duration` 有界承诺失效（trace/stack 限时路径同样受影响，预先存在）；闭包加 deadline 判定到点放弃重连走正常退出。真机验证：`--duration 12` 采样 5s 后 `adb reconnect offline` 强制离线，~12s 到点 exit 0 + 汇总照常。其余观察项：deadline 起点在 spawn_agent 之后（部署耗时不计入窗口——**刻意语义**，慢部署不应吃掉采样窗口，维持现状）；`--duration`+无指标（纯深挖）不生效（纯深挖自带边界、无可修对象，help 已注明）；EOF 尾部空行（测试模块带入）**已顺手修复**（随 13f347c 提交，尾字节验证干净）
 
 **会话 3 — 文档载体：`AGENTS.md` + `skills/xperf/SKILL.md` + README agent 一节**
 - 顺手项（会话 1 review 观察）：① `XPERF_AGENT_BIN=""` 空串视同未设置（一行 filter + 单测——现状走 Explicit 分支报空白路径，文案怪）；② CLAUDE.md「agent 部署」节补一句三级解析链说明
