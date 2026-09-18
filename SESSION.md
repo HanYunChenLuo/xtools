@@ -5,6 +5,23 @@
 > 待办事项（backlog）在 `WORKSPACE.md` 维护，本文件只做历史追溯。
 > 新会话开始时可先读本文件了解近期上下文。
 
+## 2026-09-18（深夜·二）：J 节会话 5——整体 review + 三机真机回归（J 节收官）
+
+**任务**：WORKSPACE J 节会话 5——会话 1-4 全部改动（bdd345a..98e55db，18 commit）独立 review + SS3/SS2MAX/SS4 三机 tarball 真机回归 + CHANGELOG/README 收尾。
+
+**commit**：`887417d`（fix：G1 重连退避切片 + G2 span 计入 freq/temp + O1 时长上限）、`da6fd7c`（docs：AGENTS/README 双语/CHANGELOG）、`2409341`（--no-ff 合 main）；会话内附带 `dbec30a`（test：flaky sigint 竞态修复，merge `80da281`）。
+
+**关键结论**：
+- **独立 review（子代理干净上下文）：LGTM 无阻断**，功能 diff 与四会话设计意图逐条一致、无 magic number。0 严重；一般 2 项已修：G1=SSH 隧道重建失败的退避睡眠（最长 30s）不尊重 --duration deadline → 切片 ≤500ms 查 is_running；G2=纯 --freq/--thermal 会话 summary.json duration_s 恒 0 → freq/temp 计入跨度，schema 范围（freq/thermal/显存/线程明细 CSV-only、samples=CPU 样本数）写入 AGENTS.md。O1 顺手修（--duration/--record 加 86400s 上限防 u64 溢出）
+- **review 教训**：子代理的 O6 引用了代码库中不存在的注释（误引/幻觉），以代码为准核销——review 报告的文件:行号证据必须抽查
+- **G1 真机验证**：杀 CLI 进程的 ControlMaster socket → 「连接断开」→ 隧道重建（Ok 臂回归）→ 恢复采样 → 20s 窗口到点 23s 退出 rc=0（Err 臂切片路径未强造失败，残余 ≤500ms 误差接受）
+- **回归矩阵（tarball /tmp/xperf-e2e + 掩蔽 workspace agent 证实 sibling 不触发 cargo 重建，全 --remote hppc）**：三机限时采样 rc=0；SS3 阈值/trace/stack/截屏/logcat+regex/录屏/冷启动好坏两态；SS2MAX save→compare 持平/零样本（目录仅 summary.json）；SS4 窗口取 max（135MB trace 过隧道）；退出码真值表 0/1/2 逐条与 AGENTS.md 一致
+- **会话内发现并修复既有 flake**（非 J 节引入）：test_record_stop_sends_sigint 的 300ms 固定等待 trap 安装在全量并行高负载下不足 → ready 文件握手（2026-09-14 scrcpy 功能引入）
+- **工具坑（本会话实踩，后续必守）**：① edit_file str_replace 对含非 ASCII（—）的 new_str 曾以 cp1252 单字节写入破坏 README.md UTF-8（报错 "'>' not supported" 但文件已被写）——含非 ASCII 的编辑改 python 二进制模式 + 写后 decode 校验；② zsh 变量不分词：`$R` 整体成单参数致 clap rc=2，须 ${=R} 或写字面量；③ 本会话 run_cmd 输出大面积行重复（harness 展示 glitch），按去重读、关键事实以文件为准
+- **测试**：core 165+8 / CLI 12 / GUI 11 修复前后多轮全绿；clippy + cargo doc（missing_docs 三 crate）零警告
+
+**遗留**：J 节全部收官；I 节命令行输入（唯一未做功能候补，形态待定）；D 节 GUI agent 构建反馈缺口（低频边缘）。
+
 ## 2026-09-18（深夜）：J 节会话 4——退出落 `summary.json` 结构化会话汇总
 
 **任务**：WORKSPACE J 节会话 4（用户拍板做）——agent 免解析终端文本，采样会话退出时落 `<ts>/summary.json`（复用 SessionSummary schema + threshold/baseline 结论）。

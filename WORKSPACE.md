@@ -2,7 +2,7 @@
 
 > 本文件记录跨会话的待办事项（backlog）。每次会话的历史总结见 `SESSION.md`。
 > 完成一项就把状态改为 ✅ 并注明完成的 commit；新增想法随时追加。
-> 最后更新：2026-09-18 深夜：J 节会话 4 完成（merge 12a78fb，退出落 summary.json 结构化会话汇总）；前序：会话 3（merge 2b2c819 + b865304，AGENTS.md + SKILL.md + README agent 节）、会话 1（64409d4 tarball CLI agent 解析链）、会话 2（`--duration N`，merge d7bbf45）
+> 最后更新：2026-09-18 深夜·二：**J 节全部收官**——会话 5 完成（merge 2409341：独立 review LGTM + 三机 tarball 真机回归 + G1/G2/O1 修复；附带 flaky 测试修复 80da281）；前序：会话 4（merge 12a78fb，summary.json）、会话 3（2b2c819 + b865304）、会话 1（64409d4）、会话 2（d7bbf45）
 
 ## 当前状态速览
 
@@ -155,11 +155,13 @@
 - 单测：core +3（compare_outcome 三态）、CLI +3（report_outcome、schema 超集一致性、写盘往返）；全量 core 165+8 / CLI 12 / GUI 11 绿，clippy + cargo doc（missing_docs 三 crate）零警告
 - 文档：AGENTS.md（输出表 + `summary.json` schema 小节 + CI 断言指引 + 零样本坑修订）、SKILL.md（消费/断言两处）、CLAUDE.md（基线节结构化结论 + 输出表行）
 
-**会话 5 — 完整 review + 真机回归**
-- 对会话 1-4 全部改动做独立 review（功能 diff、无 magic number、备选方案与残余风险排序）
-- 真机回归（`--remote hppc`）：SS3/SS2MAX/SS4 三机——tarball CLI（隔离环境）采样/`--duration` 各组合/退出码逐条真值表/文档命令抽查执行
-- 全量测试 + clippy + cargo doc 零警告；CHANGELOG 与 README 收尾
-- 产出：review 报告 + 回归矩阵结论回填本节并勾销
+**会话 5 — 完整 review + 真机回归** ✅ **已完成**（2026-09-18，merge 2409341；子提交 887417d + da6fd7c；会话内附带 flaky 测试修复 merge 80da281）
+- **独立 review 结论：LGTM 无阻断**（独立子代理干净上下文审 bdd345a..98e55db 全部 18 commit：功能 diff 逐条核实现与意图一致、无 magic number、备选方案已考量）：0 严重；**一般 2 项已修**——G1 SSH 隧道重建失败的退避睡眠不尊重 `--duration` deadline（原最长 +30s+一次完整重部署；887417d 切片 ≤500ms 醒一次查 is_running；真机杀 ControlMaster 验证隧道重建→恢复采样→23s 到点退出，Err 臂未强造失败、残余 ≤500ms 接受）；G2 纯 `--freq`/`--thermal` 会话 summary.json `duration_s` 恒 0（freq/temp 序列计入跨度；schema 范围=CPU/内存/FPS/jank/GPU busy/IO/网络/冷启动，freq/thermal/显存/线程明细 CSV-only、`samples`=CPU 样本数——已写入 AGENTS.md）；**O1 顺手修**：`--duration`/`--record` 加 86400s 上限（防 u64 极端值溢出 panic，对齐 trace/stack 既有上限思路）
+- **观察项核销**：O6（review 引用的「双打印」注释在代码库中不存在，子代理误引——代码无此注释，无需修）；O2 同秒双会话目录后缀碰撞（启动自然错开即现实规避）、O3 duration 打印不随录制变长（同「部署不计入窗口」刻意语义）、O4 独立冷启动失败输出样式、O5 compare/compare_outcome 双计算（µs 级开销）、O8 include_bytes 备选（已回答：tarball 双文件布局是刻意设计）、O9 env-mutating 单测串行化（默认并行无冲突实证）——均接受为残余风险
+- **会话内发现修复（非 J 节改动引入）**：`test_record_stop_sends_sigint` 全量并行下竞态 flake（sh trap 安装的 300ms 固定等待在高负载下不足 → SIGINT 先于 trap 到达误杀；改 ready 文件握手轮询，dbec30a；scrcpy 功能 2026-09-14 引入的既有问题，本轮全量测试暴露）
+- **真机回归矩阵（tarball CLI 隔离环境 /tmp/xperf-e2e + 掩蔽 workspace agent 证实 sibling 解析不触发 cargo 重建，全 `--remote hppc`）**：SS3/SS2MAX/SS4 三机限时采样 rc=0（CSV + summary.json，SS4 经桥接）；SS3：阈值触发 rc=0（summary.json `thresholds.all_pass=false` 结构化）/ `--trace 10` / `--stack 10` / `--screenshot` / `--logcat --logcat-regex` 并行 / 坏 Activity 冷启动 rc=1 / 正常冷启动 rc=0 / `--record 10`；SS2MAX：save→compare 持平 rc=0 / 独立冷启动 rc=0（应用在前台时 TotalTime 0ms 为预期语义）/ force-stop 零样本 rc=0（目录仅 summary.json、samples=0）；SS4：`--duration 3 --trace 6` 窗口取 6s（135MB trace 经隧道拉回 + SQL 报告）
+- **退出码真值表逐条真机验证**（与 AGENTS.md 表一致）：0=限时采样/阈值触发/零样本/冷启动成功/深挖/截屏/录屏；1=非法包名/离线设备/多机未指定 `--device`/独立冷启动失败；2=基线互斥/`--logcat-regex` 无 `--logcat`/未知 flag
+- 全量测试 core 165+8 / CLI 12 / GUI 11 修复前后多轮全绿；clippy + cargo doc（missing_docs 三 crate）零警告；CHANGELOG [Unreleased] 补 J 节 5 条、README 双语补 summary.json 断言入口。**J 节全部收官**
 
 ---
 
