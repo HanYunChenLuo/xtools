@@ -1093,10 +1093,25 @@ class DeviceSession {
   }
 
   handleSamplingError(message) {
+    this.agentBuilding = false;
     this.setStatus('错误: ' + message);
     this.el('start-btn').disabled = false;
     this.el('stop-btn').disabled = true;
     this.samplingRunning = false;
+  }
+
+  // 开发运行的 agent 构建进度（首次/源码变更后交叉构建约 1-2 分钟，
+  // 期间采样线程阻塞——状态栏提示防「点了开始没反应」；失败走 sampling-error）。
+  // agentBuilding 标志让各路径乐观的「监控中」setStatus 在构建期间让位：
+  // 事件先到则守卫跳过「监控中」，事件后到则直接覆盖——两种时序都安全。
+  handleAgentBuild(stage) {
+    if (stage === 'building') {
+      this.agentBuilding = true;
+      this.setStatus('首次构建 Android agent 中（约 1-2 分钟，仅开发运行）…');
+    } else if (stage === 'done') {
+      this.agentBuilding = false;
+      this.setStatus('agent 构建完成，正在启动采样…');
+    }
   }
 
   // ---- 采样启动/停止/重启 ----
@@ -1142,7 +1157,7 @@ class DeviceSession {
       this.samplingRunning = true;
       this.el('start-btn').disabled = true;
       this.el('stop-btn').disabled = false;
-      this.setStatus('监控中: ' + f.package);
+      if (!this.agentBuilding) this.setStatus('监控中: ' + f.package);
     } catch (e) {
       this.setStatus('错误: ' + e);
       _diag('[' + this.serial + '] startBtn invoke ERROR: ' + JSON.stringify(e));
@@ -1162,7 +1177,7 @@ class DeviceSession {
     const f = this.currentFlags();
     _diag('[' + this.serial + '] restart sampling with flags: ' + JSON.stringify(f));
     await invoke('start_sampling', { ...f, fresh: false });
-    this.setStatus('监控中: ' + f.package);
+    if (!this.agentBuilding) this.setStatus('监控中: ' + f.package);
   }
   onMetricToggle() {
     this.toggleCharts();
@@ -1211,7 +1226,7 @@ class DeviceSession {
   }
 
   // --package --device 自动启动回填（--package：与手动开始同流程同效果）
-  applyStartupArgs(args) {
+  async applyStartupArgs(args) {
     this.samplingRunning = true;
     this.el('package-input').value = args.package;
     if (args.interval) this.el('interval-select').value = String(args.interval);
@@ -1228,7 +1243,13 @@ class DeviceSession {
     }
     this.el('start-btn').disabled = true;
     this.el('stop-btn').disabled = false;
-    this.setStatus('监控中: ' + args.package);
+    // 构建可能早于本页加载开始（building 事件已丢）——回查后端状态补偿
+    this.agentBuilding = await invoke('agent_building', { serial: this.serial });
+    if (this.agentBuilding) {
+      this.setStatus('首次构建 Android agent 中（约 1-2 分钟，仅开发运行）…');
+    } else {
+      this.setStatus('监控中: ' + args.package);
+    }
     // 自动启动会话的设备页置为激活页（否则停留在默认第一台的 idle 页）
     app.switchDevice(this.serial);
   }
@@ -1533,6 +1554,11 @@ listen('stack', (e) => {
 listen('sampling-error', (e) => {
   const s = app.sessions.get(e.payload.serial);
   if (s) s.handleSamplingError(e.payload.message);
+});
+// agent 构建进度事件（每设备；payload {serial, stage}——开发运行首次构建提示）
+listen('agent-build', (e) => {
+  const s = app.sessions.get(e.payload.serial);
+  if (s) s.handleAgentBuild(e.payload.stage);
 });
 // 镜像进程退出事件（每设备；payload {serial, stage, message}）
 listen('mirror', (e) => {

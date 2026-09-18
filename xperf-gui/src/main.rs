@@ -152,7 +152,7 @@ fn spawn_sampling(app: tauri::AppHandle, serial: String, package: String, interv
         let debug_events = std::env::var_os("XPERF_DEBUG").is_some();
         let platform = xperf_core::detect_platform_live(Some(&serial));
         eprintln!("[sampling] 平台: {} ({})", platform.name(), platform.description());
-        let bin = match bundled_agent_path(&app) {
+        let bin = match bundled_agent_path(&app, &serial) {
             Ok(b) => b,
             Err(e) => {
                 eprintln!("[sampling] agent 资源不可用: {}", e);
@@ -376,6 +376,10 @@ impl DeviceSession {
 /// 首次触达的 serial 自动建会话（设备在线性由命令前置校验保证）。
 struct AppState {
     sessions: Mutex<HashMap<String, DeviceSession>>,
+    /// 正在构建 agent 的设备 serial 集（开发运行构建期）：命令行自动启动时
+    /// 构建早于前端事件监听就绪，`agent-build` building 事件会丢——前端加载后
+    /// 经 `agent_building` 命令回查该状态补偿（done 事件必然晚于构建完成，能收到）
+    agent_building: Mutex<std::collections::HashSet<String>>,
 }
 
 impl AppState {
@@ -471,7 +475,12 @@ fn gui_data_root() -> std::path::PathBuf {
 /// 开发运行（曾因此误报「缺少预编译 agent」）；改用「编译期 workspace 是否
 /// 存在」判定：`workspace_root()` 是编译期固化的绝对路径，只存在于构建机，
 /// 发布包用户机器上必然缺失，落到安装包缺资源的报错（不触发编译）。
-fn bundled_agent_path(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
+///
+/// 开发路径且需要构建时先 emit `agent-build {serial, stage: building}` 事件：
+/// 首次/源码变更后的交叉构建约 1-2 分钟，期间采样线程阻塞在此——没有提示的
+/// 话 Finder 启动的 GUI（stderr 不可见）用户视角是「点了开始没反应」。
+/// 构建成功后补 `stage: done`；失败由调用点的 `sampling-error` 如实上报。
+fn bundled_agent_path(app: &tauri::AppHandle, serial: &str) -> Result<std::path::PathBuf, String> {
     if let Ok(resource_dir) = app.path().resource_dir() {
         let bundled = resource_dir.join("agent").join("xperf-agent");
         if bundled.is_file() {
@@ -479,9 +488,43 @@ fn bundled_agent_path(app: &tauri::AppHandle) -> Result<std::path::PathBuf, Stri
         }
     }
     if agent::workspace_root().join("Cargo.toml").is_file() {
-        return agent::ensure_agent_built().map_err(|e| e.to_string());
+        let needs_build = agent::agent_binary_needs_build();
+        if needs_build {
+            if let Some(state) = app.try_state::<AppState>() {
+                if let Ok(mut set) = state.agent_building.lock() {
+                    set.insert(serial.to_string());
+                }
+            }
+            let _ = app.emit(
+                "agent-build",
+                serde_json::json!({ "serial": serial, "stage": "building" }),
+            );
+        }
+        let result = agent::ensure_agent_built().map_err(|e| e.to_string());
+        if needs_build {
+            if let Some(state) = app.try_state::<AppState>() {
+                if let Ok(mut set) = state.agent_building.lock() {
+                    set.remove(serial);
+                }
+            }
+            if result.is_ok() {
+                let _ = app.emit(
+                    "agent-build",
+                    serde_json::json!({ "serial": serial, "stage": "done" }),
+                );
+            }
+        }
+        return result;
     }
     Err("GUI 发布包缺少预编译 agent/xperf-agent；请重新安装完整 GUI 包".to_string())
+}
+
+/// 回查指定设备是否处于 agent 构建中（开发运行首次/重建约 1-2 分钟）：
+/// 命令行自动启动时构建早于前端事件监听就绪，前端加载后以此命令补偿 missed 的
+/// `agent-build` building 事件（done 事件晚于构建完成，前端必然能收到）。
+#[tauri::command]
+fn agent_building(serial: String, state: State<'_, AppState>) -> bool {
+    state.agent_building.lock().map(|s| s.contains(&serial)).unwrap_or(false)
 }
 
 #[tauri::command]
@@ -1946,6 +1989,7 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         .manage(AppState {
             sessions: Mutex::new(HashMap::new()),
+            agent_building: Mutex::new(std::collections::HashSet::new()),
         })
         .setup(move |app| {
             // 默认窗口大小：前端加载完成后经 resize_default 命令按屏幕动态设置
@@ -2020,6 +2064,7 @@ fn main() {
             diag_log,
             list_packages,
             startup_sessions,
+            agent_building,
             launch_app,
             restart_app,
             stop_app,
@@ -2182,7 +2227,7 @@ Host myserver          # 重复别名去重
 
     #[test]
     fn test_app_state_sessions_per_device() {
-        let state = AppState { sessions: Mutex::new(HashMap::new()) };
+        let state = AppState { sessions: Mutex::new(HashMap::new()), agent_building: Mutex::new(std::collections::HashSet::new()) };
         let a1 = state.session("devA");
         let b1 = state.session("devB");
         assert!(!*a1.running.lock().unwrap());
@@ -2255,7 +2300,7 @@ Host myserver          # 重复别名去重
 
     #[test]
     fn test_csv_dir_for_fresh_and_reuse() {
-        let state = AppState { sessions: Mutex::new(HashMap::new()) };
+        let state = AppState { sessions: Mutex::new(HashMap::new()), agent_building: Mutex::new(std::collections::HashSet::new()) };
         let pkg = format!("test_csvdir_{}", std::process::id());
         // 同包 + 非 fresh（指标勾选重启）→ 复用同一目录
         let d1 = state.csv_dir_for("devA", &pkg, false);
