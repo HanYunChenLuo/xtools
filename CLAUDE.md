@@ -8,12 +8,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **会话历史**：`SESSION.md` —— 每个会话结束前追加一条总结（最新在最上）：日期/任务/commit 列表/关键结论与基线/遗留问题。新会话开始先读它获取近期上下文。
 - 一个会话聚焦一个任务线，多会话通过这两个文件同步。
 - **代码规则（强制）**：写代码必须同时考虑 `cargo doc`——新增/修改的所有 pub 项（crate/mod/struct/enum/fn/字段/变体）都要有规范完整的 doc 注释（含单位/语义/无值字段要写明），路径/参数/日志样例包反引号或 code block；交付前必须跑完整 `cargo doc` 并做到**零 warning 零 error**（默认 lint 集 + missing_docs，命令见 Commands 节）。
-- **git 拓扑**：本机（Mac）→ `hppc`（Linux 机中转远端）→ **内部 GitLab（hppc 默认远端）**。
-  本机 `git push` 推 hppc（main 的 upstream 已设 hppc/main）；**对外 push 统一在 hppc 上
-  执行**——默认 `git push` = 内部 GitLab（remote `li` = `git@gitlab.chehejia.com:ligraphic/xperf.git`，
-  main 的 upstream 已设 li/main，2026-09-15 起）；GitHub 为 `origin`，需显式
-  `git push origin main`。LFS 对象随 push 经 SSH 直传（locksverify 已关）。拉取：GitLab
-  变更先在 hppc `git pull`，本机再 pull hppc。
+- **git 拓扑（多人维护）**：仓库主远端 = **内部 GitLab** `git@gitlab.chehejia.com:ligraphic/xperf.git`。
+  通用流程：clone 后 feature/fix 分支开发 → `--no-ff` 合 main → `git push origin main`（LFS 对象随
+  push 经 SSH 直传）。**wangjinhan 个人拓扑（中转，其他人不需要）**：本机（Mac）→ `hppc`（个人
+  Linux 机）→ GitLab——本机 push 推 hppc，对外 push 在 hppc 上执行（其默认远端即 GitLab）；
+  GitHub 镜像为 `origin`，需显式 `git push origin main`；拉取 GitLab 变更先在 hppc `git pull`
+  再本机 pull hppc。
 
 ## Commands
 
@@ -272,7 +272,7 @@ SS4（SA8797P）是 **MindRT（Linux PVM，USB 可见）+ Android（GVM，USB �
 
 ### SSH 远程后端（`--remote`，xperf-core/src/transport.rs，CLI 与 GUI 共用）
 
-**为什么**：真机接在远端 Linux 机（hppc）时，本机（Mac）跑 GUI/CLI 经 SSH 完成采样/perfetto/simpleperf 全部功能。完整设计与逐条实测依据：`docs/DESIGN-ssh-remote.md`。
+**为什么**：真机接在远端 Linux 机时，本机（Mac）跑 GUI/CLI 经 SSH 完成采样/perfetto/simpleperf 全部功能。完整设计与逐条实测依据：`docs/DESIGN-ssh-remote.md`。
 
 **架构**：adb server 前移 + SSH 隧道——本机恒为 adb **客户端**（`ADB_SERVER_SOCKET` 指向 hop#1 本机端口），`pull`/`push` 落点、trace_processor/report_html.py、`/tmp/xperf` 落盘全留本机零改动；唯一例外是 `adb forward` 的监听端口在**远端 server** 侧（v1 曾误判为客户端侧，真实拓扑复验推翻）⇒ agent NDJSON 流需第二跳隧道：
 
@@ -297,7 +297,7 @@ hop#2: 本机 P_loc → 远端 adb forward 分配端口（agent 事件流，每�
 
 **要点与实测基线**：
 - forward 规则由 **server** 持有、跨会话存活（本机进程死亡也不消失）⇒ `ensure_forward` 查 `--list` 复用同名规则是防泄漏关键（`tcp:0` 每次调用新建，实测连调 3 次得 3 条）
-- 远端 adb 常不在 PATH（hppc 在 `~/Android/Sdk/platform-tools/adb`）⇒ `--remote-adb` 可配
+- 远端 adb 常不在 PATH（实测环境在 `~/Android/Sdk/platform-tools/adb`，预检会自动探测该标准位置）⇒ `--remote-adb` 可配
 - 真机回归（Mac←SSH→hppc→SS2MAX，gltf viewer）：`--cpu --interval 500` 采样（hello 8 核/CPU ~42%/线程明细/CSV 节拍）✓、`--trace 10`（44MB 落本机 + SQL 报告）✓、`--stack 10`（5.1MB .data + 三视图）✓、杀隧道断连恢复（重建→重连→采样继续）✓、双进程并发（采样+trace 节拍无退化）✓、优雅退出后 hppc forward 规则与 control socket 零残留 ✓
 - 已知边界：多真机远程并行未经双设备验证（hppc 仅挂一台，机制上与本地多设备同层）；SIGKILL 残留的远端 forward 规则由下次会话复用消化
 
@@ -397,7 +397,7 @@ hop#2: 本机 P_loc → 远端 adb forward 分配端口（agent 事件流，每�
 
 ### 软件发布（GitLab CI + tag Release，2026-09-15）
 
-**发版流程**：**根 `Cargo.toml` `[workspace.package]` bump 版本（唯一出处——四 crate `version.workspace = true` 继承，tauri.conf.json 不写 version 由 Tauri 回落到 Cargo.toml，CI/scripts 的 sed 均读根）** → `CHANGELOG.md` 加 `## [vX.Y.Z]` 章节 → 合 main → `git tag -a vX.Y.Z` → 推 hppc 且 hppc 推 li（tag 同样两跳）→ CI 流水线（validate→test→build:linux→gui:linux→release）出 CLI/AppImage 挂 Release → Mac 上 `GITLAB_TOKEN=<api 权限 PAT> scripts/release-macos.sh vX.Y.Z` 构建 CLI 双架构 + GUI DMG 双架构上传挂同一 Release。`validate:tag` 校验 tag 格式/根 Cargo.toml 版本一致/tauri.conf.json 无手写 version（防回归）/CHANGELOG 章节，任一不符 tag 流水线在 validate 阶段拦截；GUI 测试 `test_tauri_version_falls_back_to_workspace` 锁住整条回落链。资产链接统一指向 **package registry API 下载路径**（`.../api/v4/projects/39859/packages/generic/xperf/<tag>/<file>`，登录态浏览器可直接下载）；**`/-/package_files/<id>` web 路径在本实例 404 不可用**（用户实测）。
+**发版流程**：**根 `Cargo.toml` `[workspace.package]` bump 版本（唯一出处——四 crate `version.workspace = true` 继承，tauri.conf.json 不写 version 由 Tauri 回落到 Cargo.toml，CI/scripts 的 sed 均读根）** → `CHANGELOG.md` 加 `## [vX.Y.Z]` 章节 → 合 main → `git tag -a vX.Y.Z` 并推送 GitLab（wangjinhan 经 hppc 两跳，其他维护者直推）→ CI 流水线（validate→test→build:linux→gui:linux→release）出 CLI/AppImage 挂 Release → Mac 维护者执行 `GITLAB_TOKEN=<api 权限 PAT> scripts/release-macos.sh vX.Y.Z` 构建 CLI 双架构 + GUI DMG 双架构上传挂同一 Release。`validate:tag` 校验 tag 格式/根 Cargo.toml 版本一致/tauri.conf.json 无手写 version（防回归）/CHANGELOG 章节，任一不符 tag 流水线在 validate 阶段拦截；GUI 测试 `test_tauri_version_falls_back_to_workspace` 锁住整条回落链。资产链接统一指向 **package registry API 下载路径**（`.../api/v4/projects/39859/packages/generic/xperf/<tag>/<file>`，登录态浏览器可直接下载）；**`/-/package_files/<id>` web 路径在本实例 404 不可用**（用户实测）。
 
 **流水线结构**（`.gitlab-ci.yml`；触发=main push / tag / web·api 手动）：`test:linux`（core+cli）→ `build:linux`（CLI release + NDK agent 交叉 + tar.gz，内含 `xperf-cli` + `agent/xperf-agent`）→ `gui:linux`（Ubuntu 22.04 + WebKitGTK 4.1，先注入同一预编译 agent，再出 x86_64 AppImage；`ARCH=x86_64` 避免 AppDir 中 Android ELF 触发 appimagetool 多架构拒绝）→ `release`（`scripts/release_create.py` 建 Release 描述取 CHANGELOG 章节 + `release_upload.py` 上传 Linux CLI/AppImage，幂等可重跑）。macOS 无 runner，`scripts/release-macos.sh` 本地补 CLI tar + arm64/x86_64 DMG；默认通过 `tauri.release.json` 使用完整 ad-hoc bundle 签名，脚本挂载 DMG 后执行 `codesign --verify --deep --strict`；有 Developer ID 时用 `APPLE_SIGNING_IDENTITY` 覆盖并配置 Apple 公证。DMG 构建设 `CI=true` 跳过无界面 Finder AppleScript，`COPYFILE_DISABLE=1` 去 AppleDouble。GUI 的 `tauri.release.json` 只在发布构建注入 `release-resources/agent/xperf-agent`，运行时通过 Tauri `resource_dir()` 找 agent；资源缺失时按「编译期 workspace 是否存在」（core `agent::workspace_root()`，绝对路径只在构建机有效）判定开发运行——是则回退 `ensure_agent_built`（与 CLI 一致自动构建，**任意 profile**：`cargo run --release` 也是开发运行，曾以 `debug_assertions` 误判致报「缺少预编译 agent」），发布包用户机器必然落到缺资源报错、不触发 Cargo/NDK。
 
