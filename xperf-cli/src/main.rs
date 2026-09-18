@@ -727,9 +727,11 @@ async fn monitor_process_agent(
             Ok(None) | Err(_) => {
                 println!("{}", "连接断开，等待设备恢复…（Ctrl-C 退出）".yellow());
                 let r = running.clone();
+                // keep-going：Ctrl-C 或断连期间越过限时的 deadline 都放弃重连
+                // （--duration 的有界承诺不因设备断开而失效）
                 match agent::reconnect_agent(
                     Some(&package), args.interval, flags, Some(&*platform),
-                    &move || r.load(Ordering::SeqCst),
+                    &move || r.load(Ordering::SeqCst) && deadline.is_none_or(|d| Instant::now() < d),
                     None,
                 ) {
                     Some(s) => {
@@ -737,7 +739,12 @@ async fn monitor_process_agent(
                         println!("{}", "已重连，恢复采样".green());
                         continue;
                     }
-                    None => break, // Ctrl-C
+                    None => {
+                        if deadline.is_some_and(|d| Instant::now() >= d) {
+                            println!("{}", "限时采样结束".green());
+                        }
+                        break; // Ctrl-C 或限时到点
+                    }
                 }
             }
         };
@@ -2009,4 +2016,3 @@ mod tests {
         assert_eq!(stop_window(Some(5), None, None, Some(120)), Some(Duration::from_secs(120)));
     }
 }
-
