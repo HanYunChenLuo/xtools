@@ -607,22 +607,35 @@ mod tests {
         // 优雅退出）。用 trap INT 的 sh 验证信号语义：收到 SIGINT 写标记文件后退出；
         // 若被 SIGKILL 则标记文件不存在
         let marker = std::env::temp_dir().join(format!("xperf-test-sigint-{}", std::process::id()));
+        let ready = std::env::temp_dir().join(format!("xperf-test-sigint-ready-{}", std::process::id()));
         std::fs::remove_file(&marker).ok();
+        std::fs::remove_file(&ready).ok();
         let child = Command::new("sh")
             .args([
                 "-c",
-                &format!("trap 'touch {}' INT; while :; do sleep 0.2; done", marker.display()),
+                &format!(
+                    "trap 'touch {}' INT; touch {}; while :; do sleep 0.2; done",
+                    marker.display(),
+                    ready.display()
+                ),
             ])
             .spawn()
             .unwrap();
         let mut h = handle_for(child);
         h.record_path = Some(PathBuf::from("/tmp/xperf-test-rec.mp4"));
-        std::thread::sleep(Duration::from_millis(300)); // 等 sh 装好 trap
+        // 等 sh 装好 trap（ready 握手——固定 sleep 在全量并行测试高负载下曾竞态：
+        // SIGINT 先于 trap 安装到达，默认动作杀 shell，标记缺失误报失败）
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !ready.exists() {
+            assert!(std::time::Instant::now() < deadline, "sh trap 就绪握手超时");
+            std::thread::sleep(Duration::from_millis(20));
+        }
         h.stop();
         assert!(matches!(h.wait_exit(), MirrorExit::Stopped));
         assert!(marker.exists(), "录屏停止应投递 SIGINT（trap 标记文件）");
         assert!(!h.is_alive());
         std::fs::remove_file(&marker).ok();
+        std::fs::remove_file(&ready).ok();
     }
 
     #[test]
