@@ -154,6 +154,13 @@ struct Args {
     #[arg(long, value_name = "SECONDS", value_parser = clap::value_parser!(u64).range(1..))]
     record: Option<u64>,
 
+    /// 限时采样：N 秒后自动结束采样并走正常退出流程（汇总/退出图表/基线保存对比/验证
+    /// 报告照常），供脚本与 AI agent 做有界采样（macOS 无 timeout 命令）。与
+    /// --trace/--stack/--record 同给时采样窗口取最长者（覆盖所有录制）；仅作用于
+    /// 采样会话（纯深挖/纯录屏/镜像-only 模式自带边界，本参数不生效）
+    #[arg(long, value_name = "SECONDS", value_parser = clap::value_parser!(u64).range(1..))]
+    duration: Option<u64>,
+
     /// 抓取设备 logcat 流式落盘（-v threadtime -v year，与采样 CSV 同设备时钟）。
     /// 有 --package 时按包过滤（Android 12+ 按 UID 进程重启耐受；11 及以下按 pid，
     /// 需应用已运行且重启后新进程日志缺失）；无包名全机抓取。与采样并行（同窗口
@@ -398,6 +405,9 @@ async fn monitor_process(args: &Args, cold_start_ms: Option<u64>) -> Result<(), 
     if args.compare_baseline {
         println!("{}", "基线模式: 会话结束后与已存基线对比".cyan());
     }
+    if let Some(d) = args.duration {
+        println!("限时采样: {}s 后自动退出", d);
+    }
 
     let flags = metric_flags(args);
     if !flags.any() {
@@ -445,14 +455,25 @@ async fn monitor_process(args: &Args, cold_start_ms: Option<u64>) -> Result<(), 
         }
         return Ok(());
     }
-    // 统一走设备端 agent 采样（无 adb 轮询路径）；--trace/--stack/--record 时采样
-    // 限时与录制同窗口（多个同给取较长者，采样窗口覆盖所有录制）
-    let stop_after = [args.trace, args.stack, args.record]
+    // 统一走设备端 agent 采样（无 adb 轮询路径）；--duration/--trace/--stack/--record
+    // 限时采样（多个同给取最长者，采样窗口覆盖所有录制）
+    let stop_after = stop_window(args.duration, args.trace, args.stack, args.record);
+    monitor_process_agent(args, flags, stop_after, cold_start_ms).await
+}
+
+/// 采样限时窗口：`--duration` 与 `--trace`/`--stack`/`--record` 同给时取最长者
+/// （采样窗口须覆盖所有录制）；全为 None = 不限时（Ctrl-C 退出）。
+fn stop_window(
+    duration: Option<u64>,
+    trace: Option<u64>,
+    stack: Option<u64>,
+    record: Option<u64>,
+) -> Option<std::time::Duration> {
+    [duration, trace, stack, record]
         .into_iter()
         .flatten()
         .max()
-        .map(std::time::Duration::from_secs);
-    monitor_process_agent(args, flags, stop_after, cold_start_ms).await
+        .map(std::time::Duration::from_secs)
 }
 
 /// trace 录制线程收尾：join → 拉回提示 → SQL 分析报告。
@@ -589,7 +610,8 @@ fn metric_flags(args: &Args) -> xperf_core::MetricFlags {
 /// 统一采样路径：设备端 agent 常驻采样 + exec-out 事件流。
 /// 输出策略：interval ≥ 500ms 逐条详细打印（低频率，同旧轮询模式的信息量）；
 /// < 500ms 时按 ~1s 聚合打印（逐条会刷屏），全量明细均在退出 CSV 中。
-/// stop_after：限时采样（--trace N 与录制同窗口，到点自动结束）；None = Ctrl-C 退出。
+/// stop_after：限时采样（--duration 或 --trace/--stack/--record 同窗口，到点自动结束）；
+/// None = Ctrl-C 退出。
 /// cold_start_ms：--cold-start 测量结果（进会话汇总统计；None = 未测量）
 async fn monitor_process_agent(
     args: &Args,
@@ -1955,3 +1977,36 @@ async fn main() -> Result<()> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::stop_window;
+    use std::time::Duration;
+
+    #[test]
+    fn stop_window_none_when_all_absent() {
+        assert_eq!(stop_window(None, None, None, None), None);
+    }
+
+    #[test]
+    fn stop_window_duration_alone() {
+        assert_eq!(stop_window(Some(10), None, None, None), Some(Duration::from_secs(10)));
+    }
+
+    #[test]
+    fn stop_window_recording_alone_kept() {
+        // 原有限时语义不变：trace/stack/record 单独给时窗口等于录制时长
+        assert_eq!(stop_window(None, Some(30), None, None), Some(Duration::from_secs(30)));
+        assert_eq!(stop_window(None, None, Some(15), None), Some(Duration::from_secs(15)));
+        assert_eq!(stop_window(None, None, None, Some(20)), Some(Duration::from_secs(20)));
+    }
+
+    #[test]
+    fn stop_window_takes_max() {
+        // duration 短于录制：窗口取录制时长（覆盖录制）；duration 更长：取 duration
+        assert_eq!(stop_window(Some(10), Some(30), None, None), Some(Duration::from_secs(30)));
+        assert_eq!(stop_window(Some(60), Some(30), Some(15), None), Some(Duration::from_secs(60)));
+        assert_eq!(stop_window(Some(5), None, None, Some(120)), Some(Duration::from_secs(120)));
+    }
+}
+
