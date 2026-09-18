@@ -170,6 +170,8 @@ Release notes live in [CHANGELOG.md](CHANGELOG.md).
 
 ## Building
 
+See [CONTRIBUTING.md](CONTRIBUTING.md) for environment setup and workflow conventions.
+
 The project uses Cargo workspaces. To build all host tools (the agent is
 Android-only and is **not** part of the default member set):
 

@@ -157,6 +157,8 @@ macOS DMG 默认使用完整 ad-hoc bundle 签名以封印应用资源；正式�
 
 ## 构建
 
+环境准备与工作流约定见 [CONTRIBUTING.md](CONTRIBUTING.md)。
+
 Cargo workspace 管理全部工具。构建所有主机侧工具（agent 仅 Android 目标，
 不在默认成员集内）：
 
