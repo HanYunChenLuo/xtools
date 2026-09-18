@@ -5,6 +5,21 @@
 > 待办事项（backlog）在 `WORKSPACE.md` 维护，本文件只做历史追溯。
 > 新会话开始时可先读本文件了解近期上下文。
 
+## 2026-09-18（深夜）：J 节会话 4——退出落 `summary.json` 结构化会话汇总
+
+**任务**：WORKSPACE J 节会话 4（用户拍板做）——agent 免解析终端文本，采样会话退出时落 `<ts>/summary.json`（复用 SessionSummary schema + threshold/baseline 结论）。
+
+**commit**：`fe29bd3`（feat：core compare_outcome + CLI summary_json 模块 + 单测）、`ca67216`（docs：AGENTS/SKILL/CLAUDE）、`12a78fb`（--no-ff 合 main）。
+
+**关键结论**：
+- **schema 设计**：顶层 `serde(flatten)` 平铺 `SessionSummary` 全部字段（与基线 JSON 完全同构——同会话两文件 18 键真机 diff 全同），附加两个判定对象：`thresholds`（null 除非 --threshold；all_pass + 逐规则 pass/triggers/extreme/last_trigger）、`baseline`（null 除非基线 flag；action 五态 saved/compared/skipped_no_data/no_baseline/failed + baseline_file/report_file/outcome{verdict/regressions/…/regressed_metrics}/error）
+- **core 重构**：`baseline.rs` 抽出 `build_rows`/`evaluate_rows`，`compare()` 文本报告与新增 `compare_outcome()` 结构化结论评估**同一份对比行**（口径不会发散）；GUI 零改动（仍 `compare()` → String）
+- **退出段重排**：`session_summary` 构建提前到验证报告后（基线保存/对比与 summary.json 共用同一份数据体）；summary.json 总是落盘（零样本会话也落 samples=0，目录仅含该文件——agent 确定性产物契约）；写盘失败只告警不改退出码（与 baseline_report 一致）
+- **真机回归**（--remote hppc SS2MAX d1f39648c1f gltf，SS3 不在线）：①save+`--threshold cpu>5`（all_pass=false、triggers=7、峰值 43.58 结构化 ✓，schema 超集 diff ✓）②compare（verdict=regression、regressed_metrics=[Jank 频率]与文本报告一致、report_file 存在 ✓）③force-stop 后零样本（samples=0、cpu=null、skipped_no_data ✓）④删基线后 compare（no_baseline ✓）
+- **测试**：core +3 / CLI +3（schema 超集一致性测试锚定验收口径）；全量 core 165+8 / CLI 12 / GUI 11 绿，clippy + cargo doc（missing_docs 三 crate）零警告
+
+**遗留**：J 节会话 5（会话 1-4 独立 review + SS3/SS2MAX/SS4 三机真机回归 + CHANGELOG/README 收尾）；I 节命令行输入（唯一未做功能候补）。
+
 ## 2026-09-18（傍晚）：J 节会话 2——CLI `--duration N` 限时采样
 
 **任务**：WORKSPACE J 节会话 2——纯采样只能 Ctrl-C，agent 的 shell 调用必须有界（macOS 无 timeout），加 `--duration <SECONDS>`。

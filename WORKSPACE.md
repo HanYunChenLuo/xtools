@@ -2,7 +2,7 @@
 
 > 本文件记录跨会话的待办事项（backlog）。每次会话的历史总结见 `SESSION.md`。
 > 完成一项就把状态改为 ✅ 并注明完成的 commit；新增想法随时追加。
-> 最后更新：2026-09-18 晚：J 节会话 3 完成（merge 2b2c819，AGENTS.md + SKILL.md + README 双语 agent 节；顺手修复 XPERF_AGENT_BIN 空串 + 独立冷启动静默 no-op 缺陷 08adaad）；前序：会话 1（64409d4 tarball CLI agent 解析链）、会话 2（`--duration N`，merge d7bbf45）
+> 最后更新：2026-09-18 深夜：J 节会话 4 完成（merge 12a78fb，退出落 summary.json 结构化会话汇总）；前序：会话 3（merge 2b2c819 + b865304，AGENTS.md + SKILL.md + README agent 节）、会话 1（64409d4 tarball CLI agent 解析链）、会话 2（`--duration N`，merge d7bbf45）
 
 ## 当前状态速览
 
@@ -148,10 +148,12 @@
 - 全量 162+8/9/11 绿，clippy + cargo doc（含 missing_docs 三 crate）零警告
 - **会话内 review 修正**（4a6e776，merge b865304）：08adaad 让独立冷启动真正执行但失败仍 exit 0，与其他独立能力失败码语义不一致（断言启动耗时的脚本拿不到失败信号）——独立模式测量失败如实置失败码（真机：.NoSuchActivity → exit 1 / 正常 → exit 0），AGENTS.md/SKILL.md 退出码表同步
 
-**会话 4 — 退出落 `summary.json`（可选，用户拍板后做）**
-- 动机：agent 免解析终端文本，直接拿结构化会话汇总（均值/峰值/判定）
-- 修法：复用 baseline 的 `SessionSummary` schema，退出汇总时落 `<ts>/summary.json`（CLI；含 threshold 判定结论与 baseline 对比结论引用）；GUI 不动
-- 验收：schema 与基线 JSON 一致；`--save-baseline` 同会话两文件口径相同；单测
+**会话 4 — 退出落 `summary.json`** ✅ **已完成**（2026-09-18，`feature/cli-summary-json` 合 main，merge 12a78fb；子提交 fe29bd3 + ca67216）
+- 落地：采样会话退出时总是落 `<ts>/summary.json`——顶层 `serde(flatten)` 平铺 `SessionSummary`（与基线 JSON 同 schema、同会话两文件口径一致，真机 diff 验证 18 键全同），附加 `thresholds`（all_pass + 逐规则 pass/triggers/extreme/last_trigger）与 `baseline`（action 五态 saved/compared/skipped_no_data/no_baseline/failed + baseline_file/report_file + `CompareOutcome`{verdict/regressions/improvements/flat/no_compare/regressed_metrics}）
+- core：`baseline.rs` 抽 `build_rows`/`evaluate_rows` 共用内部函数，新增 `compare_outcome()`（与文本报告同口径，GUI 零改动）；CLI：`alerts::report_outcome` + 新模块 `summary_json.rs`；写盘失败只告警不改退出码；零样本会话也落盘（samples=0，目录仅含该文件）
+- 真机回归（--remote hppc SS2MAX gltf，SS3 不在线）四场景：save+threshold（all_pass=false 结构化 ✓）→ compare（verdict=regression 与文本报告一致、report_file 存在 ✓）→ 零样本（samples=0/skipped_no_data ✓）→ no_baseline ✓
+- 单测：core +3（compare_outcome 三态）、CLI +3（report_outcome、schema 超集一致性、写盘往返）；全量 core 165+8 / CLI 12 / GUI 11 绿，clippy + cargo doc（missing_docs 三 crate）零警告
+- 文档：AGENTS.md（输出表 + `summary.json` schema 小节 + CI 断言指引 + 零样本坑修订）、SKILL.md（消费/断言两处）、CLAUDE.md（基线节结构化结论 + 输出表行）
 
 **会话 5 — 完整 review + 真机回归**
 - 对会话 1-4 全部改动做独立 review（功能 diff、无 magic number、备选方案与残余风险排序）
