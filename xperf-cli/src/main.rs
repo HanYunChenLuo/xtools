@@ -600,7 +600,7 @@ async fn monitor_process_agent(
     use xperf_core::agent::{self, AgentEvent};
     let package = args.package.clone().unwrap_or_default();
 
-    let bin = agent::ensure_agent_built()?;
+    let bin = agent::resolve_agent_binary()?;
     agent::deploy_agent(&bin, None)?;
     let platform = xperf_core::detect_platform_live(None);
     println!("平台: {} ({})", platform.name(), platform.description());
