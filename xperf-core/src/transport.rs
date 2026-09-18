@@ -70,7 +70,7 @@ impl SshTunnel {
     /// （**绝不 `kill-server`**——远端 server 可能被他人共用，R2）+ 协议版本校验；
     /// ④ 探活：对 hop#1 端口做 adb `host:version` 握手（验证隧道+远端 server 全链路）。
     ///
-    /// 设计要点：全程仅 master spawn 一次 SSH 握手。实测到 hppc 的单次握手在网络
+    /// 设计要点：全程仅 master spawn 一次 SSH 握手。实测内网远端的单次握手在网络
     /// 波动时可达 2.5~10s，旧实现顺序执行 5 次握手（解析路径×2/版本校验/start-server/
     /// master），总耗时随 RTT 成倍放大（实测 28s+）；预检收敛进 mux 后恒为 1 次握手。
     pub fn establish(target: &SshTarget) -> Result<Self> {
@@ -650,10 +650,10 @@ pub enum Transport {
 /// SSH 远端描述。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SshTarget {
-    /// ssh 目标：`ssh_config` 中的 Host 别名（如 `hppc`）或 `user@host`。
+    /// ssh 目标：`ssh_config` 中的 Host 别名（如 `myserver`）或 `user@host`。
     /// 用别名可复用用户既有的免密/跳板/端口配置。
     pub host: String,
-    /// 远端 adb 可执行路径。**不能假设在 PATH 中**（实测 hppc 即不在），
+    /// 远端 adb 可执行路径。**不能假设在 PATH 中**（实测多数远端机不在），
     /// 默认 `"adb"`。
     pub adb_path: String,
     /// 远端 adb server 监听端口，默认 [`SshTarget::DEFAULT_ADB_PORT`]。
@@ -869,8 +869,8 @@ mod tests {
 
     #[test]
     fn test_ssh_target_defaults() {
-        let t = SshTarget::new("hppc");
-        assert_eq!(t.host, "hppc");
+        let t = SshTarget::new("myserver");
+        assert_eq!(t.host, "myserver");
         assert_eq!(t.adb_path, "adb");
         assert_eq!(t.remote_port, 5037);
     }
@@ -890,7 +890,7 @@ mod tests {
     fn test_transport_global_roundtrip() {
         let _serial = TRANSPORT_TEST_LOCK.lock().unwrap();
         assert_eq!(transport(), Transport::Local); // 默认本机
-        let target = SshTarget::new("hppc");
+        let target = SshTarget::new("myserver");
         set_transport(Transport::Ssh(target.clone()));
         assert_eq!(transport(), Transport::Ssh(target));
         set_transport(Transport::Local); // 复位，不影响其他测试
@@ -901,20 +901,20 @@ mod tests {
 
     #[test]
     fn test_sanitize_host() {
-        assert_eq!(sanitize_host("hppc"), "hppc");
+        assert_eq!(sanitize_host("myserver"), "myserver");
         assert_eq!(sanitize_host("user@192.168.1.10"), "user@192.168.1.10");
         assert_eq!(sanitize_host("user@host:22/x"), "user@host-22-x");
     }
 
     #[test]
     fn test_control_socket_path_within_unix_limit() {
-        let p = control_socket_path("hppc");
+        let p = control_socket_path("myserver");
         assert!(p.as_os_str().len() <= MAX_CONTROL_PATH_LEN);
         let fname = p.file_name().unwrap().to_string_lossy();
-        assert!(fname.starts_with("xperf-hppc-"));
+        assert!(fname.starts_with("xperf-myserver-"));
         assert!(fname.contains(&format!("-{}-", std::process::id())));
         // 同进程多次调用生成不同路径（并行测试/多隧道不互踩）
-        assert_ne!(control_socket_path("hppc"), control_socket_path("hppc"));
+        assert_ne!(control_socket_path("myserver"), control_socket_path("myserver"));
         // 极端长 host 也必须在上限内（退化路径）
         let long = "a".repeat(200);
         let p = control_socket_path(&long);
@@ -923,16 +923,16 @@ mod tests {
 
     #[test]
     fn test_parse_stale_pid() {
-        assert_eq!(parse_stale_pid("xperf-hppc-12345-0", "hppc"), Some(12345));
-        assert_eq!(parse_stale_pid("xperf-hppc-12345", "hppc"), Some(12345)); // 兼容无序号
-        assert_eq!(parse_stale_pid("xperf-hppc-abc-0", "hppc"), None);
-        assert_eq!(parse_stale_pid("xperf-other-12345-0", "hppc"), None); // 别的 host 不匹配
-        assert_eq!(parse_stale_pid("unrelated", "hppc"), None);
+        assert_eq!(parse_stale_pid("xperf-myserver-12345-0", "myserver"), Some(12345));
+        assert_eq!(parse_stale_pid("xperf-myserver-12345", "myserver"), Some(12345)); // 兼容无序号
+        assert_eq!(parse_stale_pid("xperf-myserver-abc-0", "myserver"), None);
+        assert_eq!(parse_stale_pid("xperf-other-12345-0", "myserver"), None); // 别的 host 不匹配
+        assert_eq!(parse_stale_pid("unrelated", "myserver"), None);
     }
 
     #[test]
     fn test_master_ssh_args() {
-        let target = SshTarget::new("hppc").with_remote_port(5037);
+        let target = SshTarget::new("myserver").with_remote_port(5037);
         let args = master_ssh_args(std::path::Path::new("/tmp/ctl"), 51234, &target, false);
         let s = args.join(" ");
         // 实测依据参数（设计 §4.2）：ControlMaster / 后台 / 压缩 / 快速失败 / 保活 / hop#1 转发
@@ -945,14 +945,14 @@ mod tests {
         ] {
             assert!(s.contains(needle), "缺少参数 {needle}：{s}");
         }
-        assert_eq!(args.last().unwrap(), "hppc");
+        assert_eq!(args.last().unwrap(), "myserver");
         // 安全红线：绝不携带 kill-server（R2）
         assert!(!s.contains("kill-server"));
     }
 
     #[test]
     fn test_master_ssh_args_password_mode() {
-        let target = SshTarget::new("hppc").with_remote_port(5037);
+        let target = SshTarget::new("myserver").with_remote_port(5037);
         let args = master_ssh_args(std::path::Path::new("/tmp/ctl"), 51234, &target, true);
         let s = args.join(" ");
         // 密码模式：BatchMode 必须缺席（它会禁掉密码询问），快速失败参数在
@@ -968,14 +968,14 @@ mod tests {
 
     #[test]
     fn test_host_alias_exists() {
-        let cfg = "# 注释\nHost hppc\n    HostName 1.2.3.4\nHost gpu farm\n    User a\nHost * \n    Port 22\n#Host commented\n";
-        assert!(host_alias_exists(cfg, "hppc"));
+        let cfg = "# 注释\nHost myserver\n    HostName 1.2.3.4\nHost gpu farm\n    User a\nHost * \n    Port 22\n#Host commented\n";
+        assert!(host_alias_exists(cfg, "myserver"));
         assert!(host_alias_exists(cfg, "farm")); // 一行多别名
         assert!(!host_alias_exists(cfg, "commented")); // 注释行不算
         assert!(host_alias_exists(cfg, "*")); // 精确匹配语义：别名恰好是 * 才算占用
         assert!(!host_alias_exists(cfg, "other")); // Host * 通配行不影响其他别名
         assert!(!host_alias_exists(cfg, "nonexist"));
-        assert!(!host_alias_exists("", "hppc"));
+        assert!(!host_alias_exists("", "myserver"));
     }
 
     #[test]
@@ -1081,13 +1081,14 @@ mod tests {
         assert_eq!(t.mapped_remote_ports(), vec![27184]);
     }
 
-    // ---- 集成测试（需 hppc SSH 可达 + 远端 adb，标 #[ignore]，手动跑） ----
+    // ---- 集成测试（需真实远端环境，标 #[ignore] 手动跑；环境变量注入见
+    // `crate::utils::it_env`：XPERF_IT_SSH_HOST / XPERF_IT_SSH_ADB / XPERF_IT_DEVICE） ----
 
     /// 隧道全生命周期：establish → is_alive → hop#1 探活 → Drop 后端口拒绝连接
     #[test]
-    #[ignore = "需要 hppc：SSH 免密可达 + 远端 adb（~/Android/Sdk/platform-tools/adb）"]
-    fn test_tunnel_lifecycle_hppc() {
-        let target = SshTarget::new("hppc").with_adb_path("~/Android/Sdk/platform-tools/adb");
+    #[ignore = "需真实远端：设 XPERF_IT_SSH_HOST=<ssh 别名或 user@host>（免密可达 + 远端 adb）"]
+    fn test_tunnel_lifecycle_remote() {
+        let target = crate::utils::it_env::ssh_target();
         let tun = SshTunnel::establish(&target).expect("establish 失败");
         assert!(tun.is_alive(), "-O check 应通过");
         let v = probe_adb_server(tun.server_port()).expect("hop#1 探活失败");
@@ -1103,9 +1104,9 @@ mod tests {
     /// hop#2 全生命周期：add_forward（以远端 adb server 5037 为假想 forward 目标，
     /// 免设备依赖）→ 复用同端口 → remove_forward 后拒绝连接
     #[test]
-    #[ignore = "需要 hppc：SSH 免密可达 + 远端 adb（~/Android/Sdk/platform-tools/adb）"]
-    fn test_hop2_forward_lifecycle_hppc() {
-        let target = SshTarget::new("hppc").with_adb_path("~/Android/Sdk/platform-tools/adb");
+    #[ignore = "需真实远端：设 XPERF_IT_SSH_HOST=<ssh 别名或 user@host>（免密可达 + 远端 adb）"]
+    fn test_hop2_forward_lifecycle_remote() {
+        let target = crate::utils::it_env::ssh_target();
         let tun = SshTunnel::establish(&target).expect("establish 失败");
         // add：hop#2 把远端 5037（adb server）映射回本机，握手应成功
         let local = tun.add_forward(SshTarget::DEFAULT_ADB_PORT).expect("add_forward 失败");
@@ -1137,10 +1138,10 @@ mod tests {
     /// 远程后端全生命周期：init → transport 切 Ssh → adb 命令指向远端 →
     /// shutdown → 回落 Local + 隧道摘除（幂等二次调用不炸）
     #[test]
-    #[ignore = "需要 hppc：SSH 免密可达 + 远端 adb（~/Android/Sdk/platform-tools/adb）"]
-    fn test_init_shutdown_remote_hppc() {
+    #[ignore = "需真实远端：设 XPERF_IT_SSH_HOST=<ssh 别名或 user@host>（免密可达 + 远端 adb）"]
+    fn test_init_shutdown_remote() {
         let _serial = TRANSPORT_TEST_LOCK.lock().unwrap();
-        let target = SshTarget::new("hppc").with_adb_path("~/Android/Sdk/platform-tools/adb");
+        let target = crate::utils::it_env::ssh_target();
         let devices = init_remote(target.clone()).expect("init_remote 失败");
         assert_eq!(transport(), Transport::Ssh(target));
         assert!(tunnel().is_some());

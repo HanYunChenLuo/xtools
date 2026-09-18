@@ -2134,7 +2134,7 @@ mod tests {
     fn test_parse_ssh_config_hosts() {
         let cfg = r#"
 # 注释行
-Host hppc
+Host myserver
   HostName 10.0.0.2
   User han
 
@@ -2145,9 +2145,9 @@ Host *             # 通配符跳过
   ServerAliveInterval 30
 Host *.corp !jump  # 含通配/否定整行跳过
 HOST Upper         # 大小写不敏感
-Host hppc          # 重复别名去重
+Host myserver          # 重复别名去重
 "#;
-        assert_eq!(parse_ssh_config_hosts(cfg), vec!["hppc", "lab", "dev-lab", "Upper"]);
+        assert_eq!(parse_ssh_config_hosts(cfg), vec!["myserver", "lab", "dev-lab", "Upper"]);
         assert!(parse_ssh_config_hosts("").is_empty());
         assert!(parse_ssh_config_hosts("Host *\n").is_empty());
     }
@@ -2164,12 +2164,12 @@ Host hppc          # 重复别名去重
             ssh_port: None,
         };
         // 新增两条 + name 相同 upsert（host 更新）
-        save_remote(cfg("hppc", "hppc")).unwrap();
+        save_remote(cfg("myserver", "myserver")).unwrap();
         save_remote(cfg("lab", "user@lab")).unwrap();
-        save_remote(cfg("hppc", "hppc2")).unwrap();
+        save_remote(cfg("myserver", "myserver2")).unwrap();
         let list = list_remotes();
         assert_eq!(list.len(), 2);
-        assert_eq!(list.iter().find(|r| r.name == "hppc").unwrap().host, "hppc2");
+        assert_eq!(list.iter().find(|r| r.name == "myserver").unwrap().host, "myserver2");
         assert_eq!(list.iter().find(|r| r.name == "lab").unwrap().host, "user@lab");
         // 校验：空名称/空 host 拒绝
         assert!(save_remote(cfg("", "x")).is_err());

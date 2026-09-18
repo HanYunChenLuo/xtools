@@ -686,21 +686,21 @@ mod tests {
     }
 
     /// 集成测试：start → 全机抓取有行 → restart 切级别+按包过滤+文本正则（同文件
-    /// 续写标记行）→ restart 回全机 → stop。需 hppc 远程环境 + SS3 在线 +
-    /// gltf 已安装（过滤解析只要求已安装，不要求运行）。
+    /// 续写标记行）→ restart 回全机 → stop。需真实远端环境 + 设备在线 +
+    /// 测试包已安装（过滤解析只要求已安装，不要求运行）——环境变量注入见
+    /// `crate::utils::it_env`（XPERF_IT_SSH_HOST / XPERF_IT_DEVICE / XPERF_IT_PACKAGE）。
     #[test]
-    #[ignore = "需要 hppc：SSH 免密 + 远端 adb + SS3(6eb792dfb0f) 在线"]
-    fn test_logcat_restart_hppc() {
-        let target = crate::transport::SshTarget::new("hppc")
-            .with_adb_path("~/Android/Sdk/platform-tools/adb");
+    #[ignore = "需真实远端+设备：XPERF_IT_SSH_HOST=<ssh 目标> + XPERF_IT_DEVICE=<serial>（在线）"]
+    fn test_logcat_restart_remote() {
+        let target = crate::utils::it_env::ssh_target();
         crate::transport::init_remote(target).expect("init_remote 失败");
-        let serial = "6eb792dfb0f";
+        let serial = crate::utils::it_env::device();
         let dir = std::env::temp_dir().join(format!("xperf_logcattest_{}", std::process::id()));
         let r = (|| -> Result<()> {
-            let h = start_logcat(Some(serial), &dir, LogcatFilter::All, None, None, None)?;
+            let h = start_logcat(Some(&serial), &dir, LogcatFilter::All, None, None, None)?;
             std::thread::sleep(std::time::Duration::from_secs(4));
             // 热切换：按包过滤 + W 级别 + 文本正则（"FATAL" 命中稀少，但过滤链路须真实生效）
-            let f = resolve_package_filter(Some(serial), "com.google.android.filament.gltf")?;
+            let f = resolve_package_filter(Some(&serial), &crate::utils::it_env::package())?;
             h.restart(f, Some('W'), Some("FATAL".to_string()));
             std::thread::sleep(std::time::Duration::from_secs(4));
             // 热切回全机（同时清掉文本过滤）

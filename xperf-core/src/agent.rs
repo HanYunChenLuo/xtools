@@ -1221,17 +1221,18 @@ mod tests {
     }
 
     /// 真机显式获取 root（GUI「获取 root」按钮的后端函数）：shell→root 全迁移
-    /// （adb root → adbd 重启 → 轮询 id 确认）。前置：SS2MAX 接 hppc 且当前
-    /// **非 root**（`adb -s d1f39648c1f reboot` 掉 root 后跑本测试）。
+    /// （adb root → adbd 重启 → 轮询 id 确认）。前置：目标设备接在远端机
+    /// （`XPERF_IT_SSH_HOST`/`XPERF_IT_DEVICE`）且当前**非 root**（reboot 掉
+    /// root 后跑本测试）。
     #[test]
-    #[ignore = "需要 hppc + SS2MAX(d1f39648c1f)（任意权限状态均可，已 root 时幂等成功）"]
-    fn test_acquire_root_hppc() {
-        let target = crate::transport::SshTarget::new("hppc")
-            .with_adb_path("~/Android/Sdk/platform-tools/adb");
+    #[ignore = "需真实远端+设备：XPERF_IT_SSH_HOST=<ssh 目标> + XPERF_IT_DEVICE=<serial>（任意权限状态均可，已 root 时幂等成功）"]
+    fn test_acquire_root_remote() {
+        let target = crate::utils::it_env::ssh_target();
+        let serial = crate::utils::it_env::device();
         crate::transport::init_remote(target).expect("init_remote 失败");
-        let r = acquire_root(Some("d1f39648c1f"));
+        let r = acquire_root(Some(&serial));
         // 二次确认：返回值成功之外，设备当前 id 应为 uid=0
-        let id = crate::utils::run_adb_command_for(Some("d1f39648c1f"), &["shell", "id"])
+        let id = crate::utils::run_adb_command_for(Some(&serial), &["shell", "id"])
             .map(|o| o.stdout)
             .unwrap_or_default();
         crate::transport::shutdown_remote();
