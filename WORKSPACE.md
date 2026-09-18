@@ -2,7 +2,7 @@
 
 > 本文件记录跨会话的待办事项（backlog）。每次会话的历史总结见 `SESSION.md`。
 > 完成一项就把状态改为 ✅ 并注明完成的 commit；新增想法随时追加。
-> 最后更新：2026-09-18 下午：J 节会话 1 完成（64409d4，tarball CLI 找不到捆绑 agent 修复——env/sibling/开发兜底三级解析链，真机 A/B 实证）；前序：新增 J 节「Agent 能力提供」排期
+> 最后更新：2026-09-18 傍晚：J 节会话 2 完成（aac08d4 + 75ada1c，merge d7bbf45，CLI `--duration N` 限时采样，真机六场景回归全通）；前序：会话 1（64409d4 tarball CLI agent 解析链）
 
 ## 当前状态速览
 
@@ -133,10 +133,11 @@
 
 - [x] ~~**会话 1 — 修复 tarball CLI 找不到捆绑 agent（P0 阻断缺陷）**~~（**已完成**，2026-09-18，`fix/cli-agent-resolution` 合 main，64409d4）：`resolve_agent_binary()` 三级解析链（`XPERF_AGENT_BIN` env 显式覆盖[指向不存在报错不回退] → exe 旁 `agent/xperf-agent` sibling[release tarball 布局] → 开发检出 `ensure_agent_built()` 兜底[workspace_root 有 Cargo.toml 才走，语义不变]；全落空报错指引 tarball 布局不再盲目 cargo build），纯函数 `pick_agent_binary` 锁顺序；替换 CLI main 预热/ensure_daemon 强制重推/reconnect 三处 None 分支，GUI 资源路径不动。真机（--remote hppc SS3）：掩蔽 workspace agent 二进制 A/B——tarball CLI 从 /tmp 采样+trace 全通且未触发重建（sibling 生效实证）；dev 回归、env 错误路径 exit 1 全通。单测 5 新用例，全量 162+5+11 绿，clippy/doc 零警告
 
-**会话 2 — CLI `--duration <SECONDS>` 限时采样（P0 缺口）**
-- 现状：纯采样（`--cpu --memory`）只能 Ctrl-C；agent 的 shell 调用必须有界（macOS 无 `timeout`）。`--trace/--stack/--record N` 已有同窗口限时语义可复用
-- 修法：采样循环到点走**正常退出流程**（汇总打印/退出图表/基线保存对比/验证报告照常）；与 `--trace/--stack` 同给时窗口取 max（对齐现有限时语义）；help 注明 agent 场景用法
-- 验收：`--cpu --memory --duration 10` 到点自动退出、退出码 0、CSV/图表/汇总齐全；与 trace/stack/record/threshold/baseline 组合回归；单测覆盖时长计算
+**会话 2 — CLI `--duration <SECONDS>` 限时采样（P0 缺口）** ✅ **已完成**（2026-09-18，`feature/cli-duration` 合 main，aac08d4 + 75ada1c，merge d7bbf45）
+- 落地：`--duration N`（u64 ≥1s，无上限）；复用现有 `stop_after` 通路，到点走正常退出流程（汇总/退出图表/基线保存对比/验证报告照常）；窗口计算抽纯函数 `stop_window(duration, trace, stack, record)` 取最长者（覆盖所有录制）；启动打印生效窗口（max 后的值，避免与录制同给时印错）；help 注明 agent 场景与「纯深挖/纯录屏/镜像-only 不生效」边界
+- 真机回归（--remote hppc SS3 gltf viewer，全部 exit 0）：`--cpu --memory --duration 8` 8 样本+CSV+图表+峰值 ✓；`--duration 3 --trace 6` 窗口取 6s（trace 30MB+SQL 报告）✓；`--duration 3 --stack 6` 窗口取 6s（.data+三视图）✓；`--duration 5 --threshold cpu>5` 实时告警×4+退出验证报告 ✓；`--duration 5 --save-baseline`→`--compare-baseline` 保存+持平报告 ✓；无 duration Ctrl-C 回归不变 ✓
+- 单测：`stop_window` 4 用例（全 None/单独/原有录制语义/取 max）；全量 core 162+8 + CLI 9 + GUI 11 绿，clippy/doc 零警告
+- 注意：被测应用未运行时 agent 无事件源（resolve_pids 为空），限时到点正常退出但会话目录无 CSV——首轮回归误撞此情况，非缺陷
 
 **会话 3 — 文档载体：`AGENTS.md` + `skills/xperf/SKILL.md` + README agent 一节**
 - 顺手项（会话 1 review 观察）：① `XPERF_AGENT_BIN=""` 空串视同未设置（一行 filter + 单测——现状走 Explicit 分支报空白路径，文案怪）；② CLAUDE.md「agent 部署」节补一句三级解析链说明

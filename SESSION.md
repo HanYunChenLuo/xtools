@@ -5,6 +5,21 @@
 > 待办事项（backlog）在 `WORKSPACE.md` 维护，本文件只做历史追溯。
 > 新会话开始时可先读本文件了解近期上下文。
 
+## 2026-09-18（傍晚）：J 节会话 2——CLI `--duration N` 限时采样
+
+**任务**：WORKSPACE J 节会话 2——纯采样只能 Ctrl-C，agent 的 shell 调用必须有界（macOS 无 timeout），加 `--duration <SECONDS>`。
+
+**commit**：`aac08d4`（feat：--duration + stop_window 纯函数 + 4 单测）、`75ada1c`（fix：限时打印改生效窗口值）、`d7bbf45`（--no-ff 合 main）。
+
+**关键结论**：
+- 实现极小：现有 `stop_after` 限时通路（`--trace/--stack/--record` 同窗口语义）已完备，`--duration` 并入窗口计算即可——抽纯函数 `stop_window(duration, trace, stack, record)` 取最长者（采样窗口覆盖所有录制）；启动打印生效窗口（max 后的值）；help 注明「纯深挖/纯录屏/镜像-only 模式自带边界不生效」
+- **真机回归**（--remote hppc SS3 gltf viewer，全部 exit 0）：`--cpu --memory --duration 8`（8 样本+CSV+图表+峰值汇总）/ `--duration 3 --trace 6`（窗口取 6s，30MB trace+SQL 报告）/ `--duration 3 --stack 6`（窗口取 6s，.data+三视图）/ `--duration 5 --threshold cpu>5`（告警×4+验证报告）/ `--save-baseline`→`--compare-baseline`（保存+持平）/ 无 duration Ctrl-C 回归不变
+- **测试**：stop_window 4 单测；全量 core 162+8 / CLI 9 / GUI 11 绿，clippy + cargo doc 零警告
+- **踩坑**：首轮回归被测应用未运行（pidof 空）→ agent 无事件源，到点正常退出但零样本零 CSV（非缺陷，采样语义本就如此）；真机回归前先确认应用在跑
+- macOS 数据根是 `$TMPDIR/xperf` 不是 `/tmp/xperf`（验证落盘别找错地方）
+
+**遗留**：J 节会话 3（AGENTS.md + SKILL.md + README agent 节，含会话 1 review 两顺手项）；会话 4（summary.json，待用户拍板）；会话 5（整体 review + 三机回归）。
+
 ## 2026-09-18（下午）：J 节排期 + 会话 1——tarball CLI agent 解析链修复
 
 **任务**：「向 Claude Code/Codex 等 agent 提供 xperf 能力」的代码与文档 review → WORKSPACE 新增 J 节排期（4 实施会话 + 1 review/真机回归会话）→ 会话 1 实施：修复 release tarball 安装的 xperf-cli 在非构建机找不到捆绑 agent（P0 阻断缺陷）。
