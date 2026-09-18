@@ -332,6 +332,46 @@ pub fn is_interrupted() -> bool {
     INTERRUPT_FLAG.load(AtomicOrdering::SeqCst)
 }
 
+/// 集成测试环境注入（`#[ignore]` 测试手动跑时读取——多人维护各自环境，不硬编码主机）：
+/// - `XPERF_IT_SSH_HOST`：SSH 目标（ssh config 别名或 `user@host`），须免密可达
+/// - `XPERF_IT_SSH_ADB`：远端 adb 路径（可选；默认 `adb`，establish 预检自动退
+///   标准 SDK 位置 `~/Android/Sdk/platform-tools/adb`）
+/// - `XPERF_IT_DEVICE`：目标设备 serial（设备相关测试用）
+/// - `XPERF_IT_PACKAGE`：已安装包名（logcat 过滤测试用，默认 gltf viewer）
+///
+/// 未设置必填变量时 panic 并给出指引——集成测试是显式 `--ignored` 调起的，
+/// 静默跳过会被误读为通过。
+#[cfg(test)]
+pub(crate) mod it_env {
+    /// 从 `XPERF_IT_SSH_HOST`（必填）+ `XPERF_IT_SSH_ADB`（可选）构造 SSH 目标
+    pub(crate) fn ssh_target() -> crate::transport::SshTarget {
+        let host = std::env::var("XPERF_IT_SSH_HOST")
+            .unwrap_or_else(|_| panic!("集成测试须设 XPERF_IT_SSH_HOST=<ssh 别名或 user@host>"));
+        let mut t = crate::transport::SshTarget::new(&host);
+        if let Ok(adb) = std::env::var("XPERF_IT_SSH_ADB") {
+            let adb = adb.trim().to_string();
+            if !adb.is_empty() {
+                t = t.with_adb_path(&adb);
+            }
+        }
+        t
+    }
+
+    /// 从 `XPERF_IT_DEVICE`（必填）取目标设备 serial
+    pub(crate) fn device() -> String {
+        std::env::var("XPERF_IT_DEVICE")
+            .unwrap_or_else(|_| panic!("集成测试须设 XPERF_IT_DEVICE=<设备 serial>"))
+    }
+
+    /// 从 `XPERF_IT_PACKAGE`（可选）取包名，默认 gltf viewer（团队统一测试对象）
+    pub(crate) fn package() -> String {
+        std::env::var("XPERF_IT_PACKAGE")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| "com.google.android.filament.gltf".into())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -486,7 +526,7 @@ mod tests {
         );
 
         // Ssh + 隧道：注入 tcp:127.0.0.1:<hop#1 端口>
-        set_transport(Transport::Ssh(SshTarget::new("hppc")));
+        set_transport(Transport::Ssh(SshTarget::new("myserver")));
         install_tunnel(SshTunnel::for_test(54321));
         let c = adb_command();
         let v = c

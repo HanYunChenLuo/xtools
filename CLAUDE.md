@@ -27,6 +27,15 @@ cargo build --release
 # Run tests（default-members，主机工具；agent 仅 Android 目标无主机测试）
 cargo test
 
+# 集成测试（#[ignore]，需真实环境，手动跑；环境注入见 core utils.rs `it_env` 模块，
+# 各维护者按自己的环境设变量，代码不硬编码主机/设备）：
+#   XPERF_IT_SSH_HOST=<ssh 别名或 user@host>   # 必填，免密可达 + 远端 adb
+#   XPERF_IT_SSH_ADB=<远端 adb 路径>           # 可选，默认 adb（预检自动探测标准 SDK 位置）
+#   XPERF_IT_DEVICE=<设备 serial>              # 设备相关测试必填
+#   XPERF_IT_PACKAGE=<已安装包名>              # 可选，默认 gltf viewer
+# 例：XPERF_IT_SSH_HOST=myserver XPERF_IT_DEVICE=localhost:5559 \
+#     cargo test -p xperf-core -- --ignored
+
 # Run tests for a single crate
 cargo test -p xperf-cli
 

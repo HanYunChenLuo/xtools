@@ -24,6 +24,8 @@
 
 **追记（同日）**：用户指出代码不应含个人主机名 hppc——盘点分类后修用户可见面 5 处（README×2 示例/CLI `--remote` help/GUI 表单占位符/`RemoteConfig.name` doc → 通用别名 `myserver`，合 main `29c7cb6`）；保留 `#[ignore]` 集成测试（维护者真机回归资产，他人永不执行）与内部文档（SESSION/WORKSPACE/CLAUDE/DESIGN 工作笔记）；`.claude/settings.local.json` 未被 git 跟踪无泄漏。
 
+**追记2（同日，多人维护启动）**：上述「集成测试保留硬编码」的判断随多人维护失效 → **参数化**：core `utils.rs` 新增 `#[cfg(test)] it_env` 模块（`XPERF_IT_SSH_HOST` 必填/`XPERF_IT_SSH_ADB` 可选默认自动探测/`XPERF_IT_DEVICE` 必填（设备类）/`XPERF_IT_PACKAGE` 可选默认 gltf），5 个集成测试（transport×3/agent/logcat）改注入 + 更名去 `_hppc` 后缀 + `#[ignore]` 原因写明变量；未设必填变量 panic 给指引（显式 `--ignored` 调起，静默跳过会误读为通过）。纯单测 fixture 字符串 hppc→myserver（transport 23/utils 1/gui 9 处）。**实证**：`XPERF_IT_SSH_HOST=hppc` 跑 tunnel ✓（adb 自动探测生效）；同测试 `XPERF_IT_DEVICE=localhost:5559`（SS4）跑 logcat restart ✓——同一测试二进制纯靠环境变量换主机/设备跑通；SS3 离线期间 logcat-on-SS3 失败为环境性（getprop 空输出）。CLAUDE.md Commands 节补集成测试环境变量说明；WORKSPACE 测试行刷新（core 157+8）。源代码（含测试）至此**零 hppc**，仅内部文档保留历史记录。
+
 ## 2026-09-17（晚，续3）：GUI `--release` 开发运行误报「缺少预编译 agent」修复
 
 **任务**：用户报 bug——`cargo run --bin xperf-gui --release` 报「GUI 发布包缺少预编译 agent/xperf-agent；请重新安装完整 GUI 包」。
