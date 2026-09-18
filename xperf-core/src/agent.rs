@@ -415,6 +415,14 @@ fn pick_agent_binary(env: Option<PathBuf>, exe_dir: Option<&Path>, workspace: &P
     AgentPick::Missing
 }
 
+/// 读取 `XPERF_AGENT_BIN`：空串视同未设置（shell 里 `XPERF_AGENT_BIN=` 常见，
+/// 空白路径没有诊断价值）。
+fn agent_bin_env() -> Option<PathBuf> {
+    std::env::var_os("XPERF_AGENT_BIN")
+        .map(PathBuf::from)
+        .filter(|p| !p.as_os_str().is_empty())
+}
+
 /// 解析本机 agent 二进制路径——release tarball 安装与开发检出通用入口（CLI 用）。
 ///
 /// 解析顺序（纯函数内核 `pick_agent_binary`，单测锁定）：
@@ -426,7 +434,7 @@ fn pick_agent_binary(env: Option<PathBuf>, exe_dir: Option<&Path>, workspace: &P
 /// 4. 全部落空：报错说明 tarball 布局（发布包用户机器不应落到开发构建路径——
 ///    编译期路径在该机器上不存在，盲目 `cargo build` 只会报误导性错误）。
 pub fn resolve_agent_binary() -> Result<PathBuf> {
-    let env = std::env::var_os("XPERF_AGENT_BIN").map(PathBuf::from);
+    let env = agent_bin_env();
     let exe_dir = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.to_path_buf()));
     match pick_agent_binary(env, exe_dir.as_deref(), &workspace_root()) {
         AgentPick::Explicit(p) if p.is_file() => Ok(p),
@@ -1166,16 +1174,26 @@ mod tests {
         assert_eq!(pick_agent_binary(None, Some(&empty_exe_dir), &no_ws), AgentPick::Missing);
     }
 
-    /// `resolve_agent_binary` 的显式路径错误信息（env 指向不存在文件 → 报错不回退）。
+    /// 显式路径语义：env 指向不存在文件 → 报错指明变量名不回退；`XPERF_AGENT_BIN=""`
+    /// 空串视同未设置（不报「空白路径不存在」）。
     /// 进程级 env 操作：本测试是唯一改 `XPERF_AGENT_BIN` 的用例，串行无竞争
     /// （cargo test 默认多线程，但同进程内其他用例不读该变量）。
     #[test]
-    fn test_resolve_agent_binary_explicit_missing_file_errors() {
+    fn test_agent_bin_env_semantics() {
+        // 空串 → None（走正常解析链）
+        std::env::set_var("XPERF_AGENT_BIN", "");
+        assert_eq!(agent_bin_env(), None, "空串应视同未设置");
+        // 非空值原样透传
+        std::env::set_var("XPERF_AGENT_BIN", "/nonexistent/agent");
+        assert_eq!(agent_bin_env(), Some(std::path::PathBuf::from("/nonexistent/agent")));
+        // 指向不存在文件 → 报错且指明 env 变量名
         let bogus = std::env::temp_dir().join(format!("xperf-picktest-noent-{}", std::process::id()));
         std::env::set_var("XPERF_AGENT_BIN", &bogus);
         let err = resolve_agent_binary().unwrap_err().to_string();
         std::env::remove_var("XPERF_AGENT_BIN");
         assert!(err.contains("XPERF_AGENT_BIN"), "错误应指明 env 变量名: {}", err);
+        // 移除后回到未设置
+        assert_eq!(agent_bin_env(), None);
     }
 
 
