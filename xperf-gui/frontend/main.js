@@ -143,8 +143,95 @@ const __xperfDebug = {
     }
     return out;
   },
+  // 动作目标定位：selector 优先，否则 x,y 经 elementFromPoint（都没有 → bad_params）
+  _target(p) {
+    if (p.selector) return this._query(p.selector);
+    if (p.x != null && p.y != null) {
+      const el = document.elementFromPoint(p.x, p.y);
+      if (!el) throw Object.assign(new Error('坐标处无元素: ' + p.x + ',' + p.y), { kind: 'not_found' });
+      return el;
+    }
+    throw Object.assign(new Error('须给 selector 或 x,y'), { kind: 'bad_params' });
+  },
+  // 事件坐标：显式 x,y（视口坐标）优先，否则元素中心
+  _point(p, el) {
+    if (p.x != null && p.y != null) return { x: p.x, y: p.y };
+    const r = el.getBoundingClientRect();
+    return { x: r.x + r.width / 2, y: r.y + r.height / 2 };
+  },
+  _mouse(el, types, pt) {
+    for (const t of types) {
+      el.dispatchEvent(new MouseEvent(t, { bubbles: true, cancelable: true, clientX: pt.x, clientY: pt.y, button: 0, view: window }));
+    }
+  },
+  // 元素简述（操作回执，确认作用对象）
+  _describe(el) {
+    let text = '';
+    for (const n of el.childNodes) if (n.nodeType === 3) text += n.nodeValue;
+    return { tag: el.tagName.toLowerCase(), id: el.id || undefined, class: el.className || undefined, text: text.trim().replace(/\s+/g, ' ').slice(0, 60) || undefined };
+  },
+  // 操作注入（真实 DOM 事件序列；全在主线程同步完成）
+  _action(p) {
+    if (typeof p.op !== 'string' || !p.op) throw Object.assign(new Error('op 必填'), { kind: 'bad_params' });
+    const el = this._target(p);
+    const pt = this._point(p, el);
+    switch (p.op) {
+      case 'click':
+        this._mouse(el, ['mousedown', 'mouseup', 'click'], pt);
+        return { acted: this._describe(el) };
+      case 'hover':
+        this._mouse(el, ['mouseover', 'mouseenter', 'mousemove'], pt);
+        return { acted: this._describe(el), at: pt };
+      case 'input': {
+        if (!(el instanceof HTMLInputElement) && !(el instanceof HTMLTextAreaElement)) {
+          throw Object.assign(new Error('目标不是 input/textarea'), { kind: 'bad_params' });
+        }
+        el.focus();
+        // 原生 setter 写值（绕过潜在的框架 value 拦截），随后显式发 input+change
+        // （AX 教训：change 常随 blur 派发、合成事件不触发——这里显式全发）
+        const proto = el instanceof HTMLInputElement ? HTMLInputElement.prototype : HTMLTextAreaElement.prototype;
+        Object.getOwnPropertyDescriptor(proto, 'value').set.call(el, String(p.value ?? ''));
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+        return { acted: this._describe(el), value: el.value };
+      }
+      case 'select': {
+        if (!(el instanceof HTMLSelectElement)) throw Object.assign(new Error('目标不是 select'), { kind: 'bad_params' });
+        const v = String(p.value ?? '');
+        const ok = [...el.options].some(o => o.value === v);
+        if (!ok) throw Object.assign(new Error('无此选项: ' + v + '（可选 ' + [...el.options].map(o => o.value).join(',') + '）'), { kind: 'bad_params' });
+        el.value = v;
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+        return { acted: this._describe(el), value: el.value };
+      }
+      case 'check': {
+        if (!(el instanceof HTMLInputElement) || (el.type !== 'checkbox' && el.type !== 'radio')) {
+          throw Object.assign(new Error('目标不是 checkbox/radio'), { kind: 'bad_params' });
+        }
+        el.checked = p.value !== false && p.value !== 'false';
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+        return { acted: this._describe(el), checked: el.checked };
+      }
+      case 'scroll':
+        if (p.y != null) el.scrollTop = p.y;
+        if (p.x != null) el.scrollLeft = p.x;
+        el.dispatchEvent(new Event('scroll', { bubbles: true }));
+        return { acted: this._describe(el), scrollTop: el.scrollTop, scrollLeft: el.scrollLeft };
+      case 'key': {
+        const target = p.selector ? el : (document.activeElement || el);
+        const init = { key: String(p.key || ''), bubbles: true, cancelable: true, ctrlKey: !!p.ctrl, shiftKey: !!p.shift, altKey: !!p.alt, metaKey: !!p.meta };
+        if (!init.key) throw Object.assign(new Error('key 必填（如 Enter/Tab/a）'), { kind: 'bad_params' });
+        target.dispatchEvent(new KeyboardEvent('keydown', init));
+        target.dispatchEvent(new KeyboardEvent('keyup', init));
+        return { acted: this._describe(target), key: init.key };
+      }
+      default:
+        throw Object.assign(new Error('未知 op: ' + p.op + '（可选 click/input/select/check/hover/scroll/key）'), { kind: 'bad_params' });
+    }
+  },
   async exec(op, p) {
     if (op === 'ping') return 'pong';
+    if (op === 'action') return this._action(p);
     if (op === 'dom') return this._domSnapshot(p);
     if (op === 'state') return this._stateSnapshot(p);
     if (op === 'series') return this._seriesData(p);

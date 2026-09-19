@@ -397,6 +397,26 @@ async fn api_series(
     .await
 }
 
+/// `POST /api/action`：操作注入（click/input/select/check/hover/scroll/key）。
+/// body 整个透传前端：`{op, selector?, x?, y?, value?, key?, ctrl?, shift?, alt?, meta?}`；
+/// 目标定位 selector 优先、缺省 x,y 经 elementFromPoint；元素中心或显式坐标触发
+/// 真实 DOM 事件序列（click=mousedown+mouseup+click，input=focus+原生 setter
+/// 写值+input+change，hover=mouseover+mouseenter+mousemove 带 clientX/Y）。
+/// 注意：图表悬停 tooltip 经 rAF 合帧呈现，hover 后读 tooltip 请轮询 /api/state。
+async fn api_action(
+    State(ctx): State<Ctx>,
+    body: Result<Json<Value>, axum::extract::rejection::JsonRejection>,
+) -> (StatusCode, Json<Value>) {
+    let Ok(Json(req)) = body else {
+        return err_json(StatusCode::BAD_REQUEST, "body 须为 JSON：{\"op\": \"click\", ...}");
+    };
+    match req.get("op").and_then(Value::as_str) {
+        Some(op) if !op.trim().is_empty() => op,
+        _ => return err_json(StatusCode::BAD_REQUEST, "op 必填（click/input/select/check/hover/scroll/key）"),
+    };
+    frontend_call(&ctx, "action", req).await
+}
+
 /// 组装路由（Ctx 注入；鉴权中间件经 `.layer` 挂整个 Router——route_layer 只覆盖
 /// 已匹配路由，未知路径 404 会绕过鉴权，layer 则连 404 也先过 token 校验）
 fn router(ctx: Ctx) -> Router {
@@ -407,6 +427,7 @@ fn router(ctx: Ctx) -> Router {
         .route("/api/dom", get(api_dom))
         .route("/api/state", get(api_state))
         .route("/api/series", get(api_series))
+        .route("/api/action", post(api_action))
         .layer(middleware::from_fn_with_state(ctx.dbg.clone(), auth))
         .with_state(ctx)
 }
