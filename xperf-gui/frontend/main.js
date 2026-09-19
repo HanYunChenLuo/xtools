@@ -64,6 +64,8 @@ class LineChart {
     this.unit = unit;
     this.maxValue = maxValue; // Y 轴下限（如 CPU=100），实际值超出时自动扩展；undefined = 自适应
     this.series = {}; // pid -> [{t, v}]，完整会话历史（回看用），绘制时按窗口裁剪+抽稀
+    this.seriesColor = {}; // pid -> 色板序号（创建时分配，终生不变；绘色时 % 色板长度解析，主题切换自动跟随）
+    this._colorSeq = 0;
     this.windowMode = 'follow'; // follow=最近 followMs；all=全部历史
     this.followMs = 10 * 60 * 1000;
     this.dirty = false; // 有待绘制数据（requestDraw 置位，flushCharts 统一绘制）
@@ -98,7 +100,7 @@ class LineChart {
     this.draw();
   }
   push(pid, t, v) {
-    if (!this.series[pid]) this.series[pid] = [];
+    if (!this.series[pid]) { this.series[pid] = []; this.seriesColor[pid] = this._colorSeq++; }
     pushCapped(this.series[pid], { t, v });
   }
   draw() {
@@ -174,10 +176,13 @@ class LineChart {
     // 折线：窗口外点跳过（起点二分已预算）；可见点超过 2×像素宽时按 stride 抽稀
     let legendX = W - R;
     const plotW = W - R - L;
-    rows.forEach(({ pid, all, lo }, i) => {
+    rows.forEach(({ pid, all, lo }) => {
       const visLen = all.length - lo;
       const stride = Math.max(1, Math.ceil(visLen / (plotW * 2)));
-      ctx.strokeStyle = C.series[i % C.series.length];
+      // 颜色按序列创建时分配的稳定序号取（而非可见行下标）——序列滑出窗口后其余折线不再整体变色，
+      // 悬停 tooltip 色点也查同一映射，与折线恒一致
+      const color = C.series[this.seriesColor[pid] % C.series.length];
+      ctx.strokeStyle = color;
       ctx.lineWidth = 2;
       ctx.beginPath();
       // 从窗口前一个点开始画，保证折线在左边界处连续（不截断出缺口）
@@ -198,7 +203,7 @@ class LineChart {
       ctx.stroke();
       // 图例（key 即展示名：CPU/内存用 "PID xxx"，FPS 用图层短名）；
       // 从右往左按文字实际宽度排布，长图层名不截断不重叠
-      ctx.fillStyle = C.series[i % C.series.length];
+      ctx.fillStyle = color;
       legendX -= ctx.measureText(pid).width;
       ctx.fillText(pid, legendX, 20);
       legendX -= 14;
@@ -243,7 +248,7 @@ class LineChart {
       let best = lo < all.length ? all[lo] : null;
       if (lo > 0 && (!best || t - all[lo - 1].t <= best.t - t)) best = all[lo - 1];
       if (!best || best.t < p.tMin || best.t > p.tMax) continue; // 窗口外（如已停止的 PID）不读数
-      rows.push({ name: keys[i], color: C.series[i % C.series.length], v: best.v });
+      rows.push({ name: keys[i], color: C.series[this.seriesColor[keys[i]] % C.series.length], v: best.v });
     }
     if (rows.length === 0) return this.hideHover();
     // 竖线
@@ -256,13 +261,15 @@ class LineChart {
     const hh = d.toTimeString().slice(0, 8) + '.' + String(d.getMilliseconds()).padStart(3, '0');
     let html = '<div class="ht-time">' + hh + '</div><div class="ht-rows">';
     for (const row of rows) {
-      html += '<div class="ht-row"><span class="ht-chip" style="background:' + row.color + '"></span><span>'
+      html += '<div class="ht-row"><span class="ht-chip" style="background:' + row.color + '"></span><span class="ht-name">'
         + escHtml(row.name) + '</span><span class="ht-val">' + fmtChartVal(row.v) + ' ' + escHtml(this.unit) + '</span></div>';
     }
     html += '</div>';
     this.hoverTip.innerHTML = html;
-    // 多序列（如 8 核频率图）两列排布，避免浮层高于图框被 overflow 裁剪
-    this.hoverTip.classList.toggle('cols2', rows.length > 5);
+    // 列数分档（行高约 18px，图框 min-height 120px）：>5 序列（如 8 核频率图）两列、
+    // >12（真实设备温度传感器可达 10~30 个）三列，避免浮层高出图框被 overflow 裁剪
+    this.hoverTip.classList.toggle('cols2', rows.length > 5 && rows.length <= 12);
+    this.hoverTip.classList.toggle('cols3', rows.length > 12);
     this.hoverTip.style.display = 'block';
     // 定位：右侧放不下则翻到光标左边；垂直钳在图框内
     const tipW = this.hoverTip.offsetWidth, tipH = this.hoverTip.offsetHeight;
@@ -1219,7 +1226,8 @@ class DeviceSession {
     this.coldStarts = [];
     this.renderPeaks();
     this.renderColdStarts();
-    for (const c of this.allCharts) c.series = {};
+    // 重置图表：序列与配色序号清零（新会话从色板头重新配色），并摘掉悬停 overlay 残留
+    for (const c of this.allCharts) { c.series = {}; c.seriesColor = {}; c._colorSeq = 0; c.hideHover(); }
     // 新会话：旧基线对比报告不再适用，隐藏清空
     this.el('panel-baseline').classList.add('hidden');
     this.el('baseline-report').textContent = '';
