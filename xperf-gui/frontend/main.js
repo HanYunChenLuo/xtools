@@ -118,15 +118,19 @@ const __xperfDebug = {
       peaks: s.peaks,
       coldStarts: s.coldStarts,
       charts,
-      logcatTail: s.logcatBuf.slice(-Math.min(Math.max(p.logcat_tail ?? 50, 0), 2000)),
+      // logcat_tail=0 须返回 0 行——slice(-0) 等价 slice(0) 会返回全量，须特判
+      logcatTail: (() => { const n = Math.min(Math.max(p.logcat_tail ?? 50, 0), 2000); return n === 0 ? [] : s.logcatBuf.slice(-n); })(),
     };
     return out;
   },
   // 单图表全分辨率读数：tail=n 取尾 n 点；at=<epoch_ms> 二分最近点（悬停同口径）
   _seriesData(p) {
     const s = this._session(p.serial);
+    // hasOwn 防原型链穿透（metric=constructor 之类会命中 Object 原型属性而非图表）
+    if (!p.metric || !Object.hasOwn(s.charts, p.metric)) {
+      throw Object.assign(new Error('未知图表: ' + p.metric + '（可选 ' + Object.keys(s.charts).join(',') + '）'), { kind: 'not_found' });
+    }
     const ch = s.charts[p.metric];
-    if (!ch) throw Object.assign(new Error('未知图表: ' + p.metric + '（可选 ' + Object.keys(s.charts).join(',') + '）'), { kind: 'not_found' });
     const tail = Math.min(Math.max(p.tail ?? 100, 1), 1000);
     const at = p.at != null ? Number(p.at) : null;
     const out = {};
@@ -213,8 +217,13 @@ const __xperfDebug = {
         return { acted: this._describe(el), checked: el.checked };
       }
       case 'scroll':
-        if (p.y != null) el.scrollTop = p.y;
-        if (p.x != null) el.scrollLeft = p.x;
+        // 滚动量用 scrollX/scrollY——与定位坐标 x/y 解耦（x/y 在 _target/_point 是
+        // 视口坐标语义，混用会让「selector 缺省 + 给了 x,y」被误当定位坐标）
+        if (p.scrollY != null) el.scrollTop = p.scrollY;
+        if (p.scrollX != null) el.scrollLeft = p.scrollX;
+        if (p.scrollY == null && p.scrollX == null) {
+          throw Object.assign(new Error('scroll 须给 scrollX/scrollY（滚动偏移，与定位坐标 x/y 无关）'), { kind: 'bad_params' });
+        }
         el.dispatchEvent(new Event('scroll', { bubbles: true }));
         return { acted: this._describe(el), scrollTop: el.scrollTop, scrollLeft: el.scrollLeft };
       case 'key': {

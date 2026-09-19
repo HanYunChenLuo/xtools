@@ -35,7 +35,8 @@ agent/curl ──HTTP──▶ 127.0.0.1:<随机端口>（axum server，GUI 进�
 
 - **HTTP 库 = axum + tokio**：tokio "full" 已是 GUI/core 直接依赖；独立
   std 线程里起 current_thread runtime，不耦合 Tauri 内部 runtime。
-  handler panic 逐请求隔离成 500；`tower::ServiceExt::oneshot` 支持不绑
+  handler panic 由 tokio task 隔离（仅断当前连接，进程不死；未挂
+  catch_panic 的 500 包装）；`tower::ServiceExt::oneshot` 支持不绑
   端口的进程内路由层单测。WebSocket 被否：推送非需求、curl 不可调试、
   请求/响应配对要自建（详见会话记录，WebDriver 先例 = 纯 HTTP REST）。
 - **前端通信走 Tauri 事件/命令**（不引 WebSocket、不改 CSP、前端零网络
@@ -69,11 +70,11 @@ agent/curl ──HTTP──▶ 127.0.0.1:<随机端口>（axum server，GUI 进�
 
 | 端点 | 应答方 | 说明 |
 |---|---|---|
-| `GET /api/status` | 后端 | 版本/pid/运行时长；remote 状态；设备列表（serial/model/version/platform/offline）；每设备采样·trace·stack·logcat·镜像·录屏 running、package、csv_dir、agent_building |
+| `GET /api/status` | 后端 | 版本/pid/运行时长；remote 状态；设备列表（serial/model/product/android_version/platform/is_gateway）；每设备采样·trace·stack·logcat·镜像·录屏 running、package、csv_dir、agent_building |
 | `GET /api/dom?selector=<css>&depth=<n>&max_nodes=<n>` | 前端 | DOM 子树快照：tag/id/class/全部 attributes（截断）/text（截断）/rect [x,y,w,h]/visible；默认 root=body depth=4 max_nodes=400（防爆上限硬顶 2000） |
 | `GET /api/state?serial=<s>` | 前端 | 设备会话状态快照：statusText+progress、activeTab、samplingRunning、realtime 数值面板、peaks、每图表 series 摘要（点数/末值/末时间戳/窗口 min-max）、悬停 tooltip（null 或 {t, rows}）、冷启动面板、logcatBuf 尾 N 行 |
 | `GET /api/series?serial=<s>&metric=<m>&tail=<n>` | 前端 | 单图表全分辨率读数（series 名 → 尾 n 点 [{t,v}]；at=<ms> 单点取值走二分同悬停口径） |
-| `POST /api/action` | 前端 | `{op, selector?, x?, y?, value?, key?}`：op ∈ click / input / select / check / hover / scroll / key / tap_xy。selector 命中失败 404；坐标模式经 elementFromPoint |
+| `POST /api/action` | 前端 | `{op, selector?, x?, y?, value?, key?}`：op ∈ click / input / select / check / hover / scroll / key。selector 命中失败 404；x/y 缺省时取元素中心，给定为视口坐标（click/hover 坐标模式经 elementFromPoint）；scroll 的偏移量是独立参数 `scrollX/scrollY`（与定位坐标解耦） |
 | `POST /api/eval` | 前端 | `{expr}` 任意 JS（async 表达式自动 await）；结果 JSON 序列化回传（循环引用/undefined 兜底为字符串）。逃逸舱，覆盖 DOM/state 长尾 |
 
 action 事件语义（根治 AX 时代的坑，全部真实 DOM 事件）：

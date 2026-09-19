@@ -58,7 +58,7 @@ _, st = req("GET", "/api/status")
 d = st["data"]
 devs = [x for x in d["devices"] if not x["is_gateway"]]
 check("设备在线", any(x["serial"] == SERIAL for x in devs), f"devices={[x['serial'] for x in devs]}")
-check("remote=ssh", d["remote"]["mode"] == "ssh" and d["remote"]["alive"])
+check("remote 通道存活", d["remote"]["mode"] in ("local", "ssh") and d["remote"]["alive"], f"remote={d['remote']}")
 
 # 3. dom：设备页结构 + rect
 code, dom = req("GET", f"/api/dom?selector={PAGE.replace('[', '%5B').replace(']', '%5D').replace('\"', '%22')}&depth=2")

@@ -282,6 +282,7 @@ async fn api_status(State(ctx): State<Ctx>) -> (StatusCode, Json<Value>) {
                 "model": d.model,
                 "product": d.product,
                 "android_version": d.android_version,
+                "platform": d.platform.as_str(),
                 "is_gateway": d.is_gateway,
             })
         })
@@ -500,7 +501,7 @@ pub(crate) fn start(app: &AppHandle, slot: &DebugSlot) {
     {
         xperf_core::utils::diag(&format!("debug api: 线程启动失败: {e}"));
     }
-    eprintln!("[debug-api] http://127.0.0.1:{port}（token 见 {}", dbg.pid_file.display());
+    eprintln!("[debug-api] http://127.0.0.1:{port}（token 见 {}）", dbg.pid_file.display());
     xperf_core::utils::diag(&format!("debug api: 127.0.0.1:{port}"));
 }
 
