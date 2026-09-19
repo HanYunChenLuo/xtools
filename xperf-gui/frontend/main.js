@@ -25,8 +25,129 @@ const __xperfDebug = {
       return x;
     }));
   },
+  // selector 未命中 → not_found（后端映射 404）
+  _query(selector) {
+    const el = document.querySelector(selector);
+    if (!el) throw Object.assign(new Error('selector 未命中: ' + selector), { kind: 'not_found' });
+    return el;
+  },
+  // DOM 子树快照：tag/attrs/text/rect/visible，depth 与节点数双上限防爆
+  _domSnapshot(p) {
+    const root = this._query(p.selector || 'body');
+    const depth = Math.min(Math.max(p.depth ?? 4, 0), 12);
+    const maxNodes = Math.min(Math.max(p.max_nodes ?? 400, 1), 2000);
+    let count = 0, truncated = false;
+    const walk = (el, d) => {
+      if (count >= maxNodes) { truncated = true; return null; }
+      count++;
+      const r = el.getBoundingClientRect();
+      const attrs = {};
+      for (const a of el.attributes) attrs[a.name] = a.value.length > 120 ? a.value.slice(0, 120) + '…' : a.value;
+      let text = '';
+      for (const n of el.childNodes) if (n.nodeType === 3) text += n.nodeValue;
+      text = text.trim().replace(/\s+/g, ' ');
+      const cs = getComputedStyle(el);
+      const node = {
+        tag: el.tagName.toLowerCase(),
+        attrs,
+        text: text ? (text.length > 80 ? text.slice(0, 80) + '…' : text) : undefined,
+        rect: [r.x, r.y, r.width, r.height].map(v => Math.round(v * 10) / 10),
+        visible: !!(r.width || r.height) && cs.visibility !== 'hidden' && cs.display !== 'none',
+      };
+      if (d < depth) {
+        const kids = [];
+        for (const c of el.children) {
+          const k = walk(c, d + 1);
+          if (k) kids.push(k); else { truncated = true; break; }
+        }
+        if (kids.length) node.children = kids;
+      } else if (el.children.length) {
+        node.childCount = el.children.length;
+      }
+      return node;
+    };
+    const tree = walk(root, 0);
+    return { tree, nodes: count, truncated };
+  },
+  // 设备会话取（serial 省略时取当前激活页；不存在 → not_found）
+  _session(serial) {
+    const s = app.sessions.get(serial || app.active);
+    if (!s) throw Object.assign(new Error('设备会话不存在: ' + (serial || '(无激活)')), { kind: 'not_found' });
+    return s;
+  },
+  // 单图表序列摘要（点数/首末时间/末值/全序列 min-max）
+  _seriesSummary(pts) {
+    if (!pts.length) return { count: 0 };
+    let min = Infinity, max = -Infinity;
+    for (const pt of pts) { if (pt.v < min) min = pt.v; if (pt.v > max) max = pt.v; }
+    return { count: pts.length, first_t: pts[0].t, last: pts[pts.length - 1], min, max };
+  },
+  // 监控状态快照（无 serial 时只给 app 级概况）
+  _stateSnapshot(p) {
+    const out = {
+      activeSerial: app.active || null,
+      devices: [...app.sessions.keys()],
+      statusBar: (document.getElementById('status') || {}).textContent || null,
+    };
+    if (!p.serial && !app.active) return out;
+    const s = this._session(p.serial);
+    const charts = {};
+    for (const [name, ch] of Object.entries(s.charts)) {
+      const series = {};
+      for (const [k, pts] of Object.entries(ch.series)) series[k] = this._seriesSummary(pts);
+      charts[name] = {
+        series,
+        hover: ch._hoverRows
+          ? { t: ch._hoverT, rows: ch._hoverRows.map(r => ({ name: r.name, v: r.v })) }
+          : null,
+      };
+    }
+    out.session = {
+      serial: s.serial,
+      offline: s.offline,
+      samplingRunning: s.samplingRunning,
+      statusText: s.statusText,
+      statusProgress: s.statusProgress,
+      activeTab: s.activeTab,
+      logcatRunning: s.logcatRunning,
+      mirrorRunning: s.mirrorRunning,
+      recording: s.recording,
+      agentBuilding: s.agentBuilding,
+      rooted: s.rooted,
+      liveData: s.liveData,
+      peaks: s.peaks,
+      coldStarts: s.coldStarts,
+      charts,
+      logcatTail: s.logcatBuf.slice(-Math.min(Math.max(p.logcat_tail ?? 50, 0), 2000)),
+    };
+    return out;
+  },
+  // 单图表全分辨率读数：tail=n 取尾 n 点；at=<epoch_ms> 二分最近点（悬停同口径）
+  _seriesData(p) {
+    const s = this._session(p.serial);
+    const ch = s.charts[p.metric];
+    if (!ch) throw Object.assign(new Error('未知图表: ' + p.metric + '（可选 ' + Object.keys(s.charts).join(',') + '）'), { kind: 'not_found' });
+    const tail = Math.min(Math.max(p.tail ?? 100, 1), 1000);
+    const at = p.at != null ? Number(p.at) : null;
+    const out = {};
+    for (const [name, pts] of Object.entries(ch.series)) {
+      if (at != null) {
+        let lo = 0, hi = pts.length;
+        while (lo < hi) { const mid = (lo + hi) >> 1; if (pts[mid].t < at) lo = mid + 1; else hi = mid; }
+        let best = lo < pts.length ? lo : -1;
+        if (lo > 0 && (best < 0 || at - pts[lo - 1].t <= pts[lo].t - at)) best = lo - 1;
+        out[name] = best >= 0 ? { point: pts[best], distance_ms: Math.abs(pts[best].t - at) } : { point: null };
+      } else {
+        out[name] = pts.slice(-tail);
+      }
+    }
+    return out;
+  },
   async exec(op, p) {
     if (op === 'ping') return 'pong';
+    if (op === 'dom') return this._domSnapshot(p);
+    if (op === 'state') return this._stateSnapshot(p);
+    if (op === 'series') return this._seriesData(p);
     if (op === 'eval') {
       if (typeof p.expr !== 'string' || !p.expr.trim()) {
         throw Object.assign(new Error('expr 必填'), { kind: 'bad_params' });
@@ -311,6 +432,9 @@ class LineChart {
       rows.push({ name: keys[i], color: C.series[this.seriesColor[keys[i]] % C.series.length], v: all[bestIdx].v });
     }
     if (rows.length === 0) return this.hideHover();
+    // 悬停内容结构化留存：调试接口（__xperfDebug state）直读，免解析 hoverTip HTML
+    this._hoverRows = rows;
+    this._hoverT = t;
     // 竖线
     this.hoverLine.style.display = 'block';
     this.hoverLine.style.left = x + 'px';
@@ -343,6 +467,8 @@ class LineChart {
   }
   hideHover() {
     this.hoverX = null;
+    this._hoverRows = null;
+    this._hoverT = null;
     // 取消未消费的合帧回调，防止 mouseleave 后 rAF 又把浮层显示出来
     if (this._hoverRaf) { cancelAnimationFrame(this._hoverRaf); this._hoverRaf = 0; }
     if (this.hoverLine) this.hoverLine.style.display = 'none';

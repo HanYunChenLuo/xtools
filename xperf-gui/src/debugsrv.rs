@@ -323,6 +323,80 @@ async fn api_ping(State(ctx): State<Ctx>) -> (StatusCode, Json<Value>) {
     frontend_call(&ctx, "ping", json!({})).await
 }
 
+/// `/api/dom` 查询参数
+#[derive(serde::Deserialize)]
+struct DomQuery {
+    /// CSS 选择器（默认 `body`）
+    selector: Option<String>,
+    /// 子树深度（默认 4，硬顶 12）
+    depth: Option<u32>,
+    /// 节点数上限（默认 400，硬顶 2000）
+    max_nodes: Option<u32>,
+}
+
+/// `GET /api/dom`：DOM 子树快照（tag/attrs/text/bounding rect/visible；前端执行）
+async fn api_dom(
+    State(ctx): State<Ctx>,
+    axum::extract::Query(q): axum::extract::Query<DomQuery>,
+) -> (StatusCode, Json<Value>) {
+    frontend_call(
+        &ctx,
+        "dom",
+        json!({"selector": q.selector, "depth": q.depth, "max_nodes": q.max_nodes}),
+    )
+    .await
+}
+
+/// `/api/state` 查询参数
+#[derive(serde::Deserialize)]
+struct StateQuery {
+    /// 目标设备 serial（缺省 = 前端当前激活设备页；无激活页时只回 app 级概况）
+    serial: Option<String>,
+    /// logcat 尾行数（默认 50，硬顶 2000）
+    logcat_tail: Option<u32>,
+}
+
+/// `GET /api/state`：监控状态快照（状态栏/实时数值/峰值/图表 series 摘要/悬停
+/// tooltip/冷启动/logcat 尾行；前端执行）
+async fn api_state(
+    State(ctx): State<Ctx>,
+    axum::extract::Query(q): axum::extract::Query<StateQuery>,
+) -> (StatusCode, Json<Value>) {
+    frontend_call(&ctx, "state", json!({"serial": q.serial, "logcat_tail": q.logcat_tail})).await
+}
+
+/// `/api/series` 查询参数
+#[derive(serde::Deserialize)]
+struct SeriesQuery {
+    /// 目标设备 serial（缺省 = 激活设备页）
+    serial: Option<String>,
+    /// 图表名：cpu/mem/fps/freq/temp/gpu/gpumem/io/net（必填）
+    metric: Option<String>,
+    /// 尾 N 点（默认 100，硬顶 1000；与 `at` 互斥）
+    tail: Option<u32>,
+    /// 取该 epoch_ms 时刻的最近点（二分，与悬停取数同口径；给了就忽略 tail）
+    at: Option<f64>,
+}
+
+/// `GET /api/series`：单图表全分辨率读数（前端 series 全量历史的尾部/定点取值）
+async fn api_series(
+    State(ctx): State<Ctx>,
+    axum::extract::Query(q): axum::extract::Query<SeriesQuery>,
+) -> (StatusCode, Json<Value>) {
+    let Some(metric) = q.metric else {
+        return err_json(
+            StatusCode::BAD_REQUEST,
+            "metric 必填（cpu/mem/fps/freq/temp/gpu/gpumem/io/net）",
+        );
+    };
+    frontend_call(
+        &ctx,
+        "series",
+        json!({"serial": q.serial, "metric": metric, "tail": q.tail, "at": q.at}),
+    )
+    .await
+}
+
 /// 组装路由（Ctx 注入；鉴权中间件经 `.layer` 挂整个 Router——route_layer 只覆盖
 /// 已匹配路由，未知路径 404 会绕过鉴权，layer 则连 404 也先过 token 校验）
 fn router(ctx: Ctx) -> Router {
@@ -330,6 +404,9 @@ fn router(ctx: Ctx) -> Router {
         .route("/api/status", get(api_status))
         .route("/api/ping", get(api_ping))
         .route("/api/eval", post(api_eval))
+        .route("/api/dom", get(api_dom))
+        .route("/api/state", get(api_state))
+        .route("/api/series", get(api_series))
         .layer(middleware::from_fn_with_state(ctx.dbg.clone(), auth))
         .with_state(ctx)
 }
