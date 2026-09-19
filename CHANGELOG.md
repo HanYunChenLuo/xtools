@@ -8,6 +8,7 @@
 
 - **`--duration <秒>` 限时采样**：到点自动走正常退出流程（汇总/退出图表/验证报告/基线保存对比照常），供脚本与 AI agent 做有界调用；与 `--trace`/`--stack`/`--record` 同给时采样窗口取最长者。设备断连重连同样遵守限时（含 SSH 隧道重建退避切片，到点及时退出）。
 - **采样会话退出落 `summary.json`**：结构化会话汇总（与基线 JSON 同 schema）+ 阈值判定（all_pass + 逐规则触发详情）+ 基线动作与对比结论（verdict/回归指标名），CI 断言免解析终端文本；零样本会话也落盘（samples=0）。
+- **CLI 发布包附带 agent 文档**：tar 包新增 `AGENTS.md` 与 `skills/xperf/SKILL.md`（编码 agent 的能力发现入口，装入 agent 的 skill 根目录即可按任务描述触发）——此前发布包只有二进制与 README，只下载发布包的用户缺少 agent 调用指引。
 - **问题反馈**：CLI `--feedback "问题描述"` 与 GUI 顶栏「问题反馈」按钮——收集最近 1 小时工具自身证据（会话产物 / GUI 诊断日志 / 各设备端 agent 日志），逐项自检后打包上传内部 GitLab issue 并给出链接；issue 默认指派维护者（`XPERF_GITLAB_ASSIGNEE` 可覆盖）。
 - **GitLab OAuth 登录**：`--gitlab-login` / `--gitlab-logout`（浏览器授权码 + PKCE，兼容 SSO/2FA），登录后 `--feedback` 以本人身份创建 issue；凭证优先级 `GITLAB_TOKEN` 环境变量 > `~/.config/xperf/gitlab-token`（PAT）> OAuth 登录态。
 - **SSH 远程密码认证**：GUI 远程配置表单支持 用户名+IP+密码+端口；CLI 经 `XPERF_SSH_PASSWORD` 环境变量传密码。密码仅进程内存驻留、不落盘（不进配置文件/日志）；可选把主机保存为纯 Host 条目（HostName/User/Port，零秘密）写入 ssh config 复用。密码错误立即报错，不占用服务器重试配额。支持非 22 SSH 端口。

@@ -83,7 +83,8 @@ build() {  # build <apple 三元组> <包架构名>
     mkdir -p "artifacts/$pkg/agent"
     cp "target/$target/release/xperf-cli" "artifacts/$pkg/"
     cp target/aarch64-linux-android/release/xperf-agent "artifacts/$pkg/agent/"
-    cp README.md README_zh.md LICENSE CHANGELOG.md "artifacts/$pkg/"
+    cp README.md README_zh.md LICENSE CHANGELOG.md AGENTS.md "artifacts/$pkg/"
+    cp -R skills "artifacts/$pkg/"  # skills/xperf/SKILL.md——编码 agent 的能力发现入口
     # COPYFILE_DISABLE=1：bsdtar 默认写入 ._ AppleDouble 元数据文件与 xattr，污染包
     COPYFILE_DISABLE=1 tar -C artifacts -czf "artifacts/$pkg.tar.gz" "$pkg"
 }

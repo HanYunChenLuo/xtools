@@ -152,7 +152,8 @@ build:linux:
     - mkdir -p "artifacts/$PKG/agent"
     - cp target/release/xperf-cli "artifacts/$PKG/"
     - cp "target/aarch64-linux-android/release/xperf-agent" "artifacts/$PKG/agent/"
-    - cp README.md README_zh.md LICENSE CHANGELOG.md "artifacts/$PKG/"
+    - cp README.md README_zh.md LICENSE CHANGELOG.md AGENTS.md "artifacts/$PKG/"
+    - cp -R skills "artifacts/$PKG/"  # skills/xperf/SKILL.md——编码 agent 的能力发现入口
     - tar -C artifacts -czf "artifacts/$PKG.tar.gz" "$PKG"
     - ls -lh artifacts/
   # job artifact 仅作 build→release 的传输（release 上传 package registry 后永久存）
