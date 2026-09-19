@@ -492,7 +492,16 @@ class LineChart {
   }
   showHover(x) {
     const p = this.plot;
-    if (!p) return this.hideHover();
+    // 图表尚未完成首帧绘制（plot 未建立，如约 150ms 合帧前/首批数据未到）：
+    // 记住悬停位置只隐视觉——draw() 建立 plot 后会用 hoverX 重刷补上读数；
+    // 若直接 hideHover 清 hoverX，这次悬停就永久丢失（自动化单次 hover 必踩）
+    if (!p) {
+      this.hoverX = x;
+      this._hoverRows = null;
+      if (this.hoverLine) this.hoverLine.style.display = 'none';
+      if (this.hoverTip) this.hoverTip.style.display = 'none';
+      return;
+    }
     const W = this.cssW, H = this.cssH;
     const plotW = W - p.R - p.L;
     if (x < p.L || x > W - p.R || plotW <= 0) return this.hideHover();
