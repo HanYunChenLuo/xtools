@@ -20,6 +20,8 @@
 
 **遗留**：无新增；backlog 仅剩 I 节命令行输入。
 
+**深夜·五 追记（agent 能力实证，无代码改动）**：用户要求验证「能力能否真被 agent 调用」——skill 安装到 `~/.siada-cli/skills/xperf/` 后，在干净目录 `/tmp/xperf-agent-e2e`（无任何提示文件）起全新 `siada-cli -p` 实例，自然语言下达「采集 HU_SS3 上 gltf 应用 10 秒 CPU/内存并报告均值」：实例自助完成 **skill 发现（读 SKILL.md）→ 环境探测（ssh hppc adb devices，HU_SS3→serial 映射）→ 坑位自查（pidof 确认应用在跑）→ 正确构造 `--remote hppc --device 6eb792dfb0f --cpu --memory --duration 10`（tarball sibling agent 零配置）→ 读 summary.json 回答**（CPU 24.28%/PSS 665080KB 与落盘 JSON 逐值精确一致，还主动报 DMA-BUF 明细）。J 节设计目标（发现→有界调用→结构化消费）全链实证。唯一杂音：siada-cli 自身在 interpreter shutdown 时 stdin 锁崩溃 rc=250（结果已产出，与本工具无关）。
+
 **深夜·四 追记（review follow-up，merge 3669412）**：用户要求对本会话全部改动（98e55db..80b4248：J5 修复 + flaky 修复 + D 节）独立 review——结论 LGTM 无严重，文档-代码逐点一致；2 一般已修（done 文案加 samplingRunning 守卫；agent_building HashSet→HashMap 计数配对防并发构建者错位），4 观察项顺手修，残余 2 项接受（见 WORKSPACE D 节）。**reviewer 质量改进**：本轮在指令中要求 file:line 证据逐字准确并声明会抽查——未见幻觉引用（对比 J5 轮 O6 误引不存在的注释）。
 
 ## 2026-09-18（深夜·二）：J 节会话 5——整体 review + 三机真机回归（J 节收官）
