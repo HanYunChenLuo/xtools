@@ -50,6 +50,11 @@ function pushCapped(arr, item) {
   arr.push(item);
 }
 
+// 悬停读数浮层用 innerHTML 拼装；序列名可能来自设备 dumpsys（图层名），须转义
+function escHtml(s) { return s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
+// 读数格式化：最多两位小数去尾零（值在 push 时已按指标精度取整，这里只兜住 mem/freq 的原始浮点）
+function fmtChartVal(v) { return String(Number(v.toFixed(2))); }
+
 class LineChart {
   // canvas 直接传元素引用（多设备页并存，不再用全局 id 查找）
   constructor(canvas, title, unit, maxValue) {
@@ -62,6 +67,18 @@ class LineChart {
     this.windowMode = 'follow'; // follow=最近 followMs；all=全部历史
     this.followMs = 10 * 60 * 1000;
     this.dirty = false; // 有待绘制数据（requestDraw 置位，flushCharts 统一绘制）
+    this.plot = null;   // 最近一次 draw 的绘图区几何（悬停读数用；无数据时为 null）
+    this.hoverX = null; // 悬停中的 canvas 内 x（CSS px）；draw 完成后按新几何刷新读数
+    // 悬停读数 overlay（DOM 实现：采样中 canvas 每 150ms 重绘，画在 canvas 上的游标会被抹掉）
+    this.hoverLine = document.createElement('div');
+    this.hoverLine.className = 'chart-hover-line';
+    this.hoverTip = document.createElement('div');
+    this.hoverTip.className = 'chart-hover-tip';
+    const box = canvas.parentElement; // .chart 容器（position:relative）
+    box.appendChild(this.hoverLine);
+    box.appendChild(this.hoverTip);
+    canvas.addEventListener('mousemove', (e) => this.onHover(e));
+    canvas.addEventListener('mouseleave', () => this.hideHover());
     this.resize();
   }
   // 数据到达不立即绘制：标脏即可，由全局 150ms 合帧器统一绘制（仅激活设备页）。
@@ -107,7 +124,7 @@ class LineChart {
       const lastT = pts[pts.length - 1].t;
       if (lastT > tMax) tMax = lastT;
     }
-    if (pids.length === 0 || !isFinite(tMax)) { this.drawAxes(L, T, W - R, H - B); return; }
+    if (pids.length === 0 || !isFinite(tMax)) { this.plot = null; this.hideHover(); this.drawAxes(L, T, W - R, H - B); return; }
     let tMin = this.windowMode === 'all' ? tMinAll : Math.max(tMinAll, tMax - this.followMs);
     if (tMax - tMin < 1000) tMax = tMin + 1000;
     // 每 series 预计算窗口起点（时间有序二分）——vMax 扫描与绘制共用，
@@ -188,6 +205,9 @@ class LineChart {
       ctx.fillRect(legendX, 11, 10, 10);
       legendX -= 10;
     });
+    // 记录绘图区几何供悬停读数；悬停中则用新几何刷新（follow 模式 tMax 随采样滚动）
+    this.plot = { L, T, R, B, tMin, tMax, span };
+    if (this.hoverX !== null) this.showHover(this.hoverX);
   }
   drawAxes(l, t, r, b) {
     const { ctx } = this;
@@ -196,6 +216,63 @@ class LineChart {
     ctx.beginPath();
     ctx.moveTo(l, t); ctx.lineTo(l, b); ctx.lineTo(r, b);
     ctx.stroke();
+  }
+  // ---- 悬停准确读数：竖线 + 浮层列出该时刻各序列的值 ----
+  // 取数与绘制无关（不受绘制 stride 抽稀影响）：按 hovered 时间在完整序列上二分最近点
+  onHover(e) {
+    const r = this.canvas.getBoundingClientRect();
+    this.showHover(e.clientX - r.left);
+  }
+  showHover(x) {
+    const p = this.plot;
+    if (!p) return this.hideHover();
+    const W = this.cssW, H = this.cssH;
+    const plotW = W - p.R - p.L;
+    if (x < p.L || x > W - p.R || plotW <= 0) return this.hideHover();
+    this.hoverX = x;
+    const t = p.tMin + (x - p.L) / plotW * p.span;
+    const C = uiColors();
+    const rows = [];
+    const keys = Object.keys(this.series);
+    for (let i = 0; i < keys.length; i++) {
+      const all = this.series[keys[i]];
+      if (!all || all.length === 0) continue;
+      // 二分第一个 >= t 的点，与其前驱取较近者
+      let lo = 0, hi = all.length;
+      while (lo < hi) { const mid = (lo + hi) >> 1; if (all[mid].t < t) lo = mid + 1; else hi = mid; }
+      let best = lo < all.length ? all[lo] : null;
+      if (lo > 0 && (!best || t - all[lo - 1].t <= best.t - t)) best = all[lo - 1];
+      if (!best || best.t < p.tMin || best.t > p.tMax) continue; // 窗口外（如已停止的 PID）不读数
+      rows.push({ name: keys[i], color: C.series[i % C.series.length], v: best.v });
+    }
+    if (rows.length === 0) return this.hideHover();
+    // 竖线
+    this.hoverLine.style.display = 'block';
+    this.hoverLine.style.left = x + 'px';
+    this.hoverLine.style.top = p.T + 'px';
+    this.hoverLine.style.height = (H - p.B - p.T) + 'px';
+    // 浮层（毫秒精度时间头 + 逐序列色点/名称/值）
+    const d = new Date(t);
+    const hh = d.toTimeString().slice(0, 8) + '.' + String(d.getMilliseconds()).padStart(3, '0');
+    let html = '<div class="ht-time">' + hh + '</div><div class="ht-rows">';
+    for (const row of rows) {
+      html += '<div class="ht-row"><span class="ht-chip" style="background:' + row.color + '"></span><span>'
+        + escHtml(row.name) + '</span><span class="ht-val">' + fmtChartVal(row.v) + ' ' + escHtml(this.unit) + '</span></div>';
+    }
+    html += '</div>';
+    this.hoverTip.innerHTML = html;
+    // 多序列（如 8 核频率图）两列排布，避免浮层高于图框被 overflow 裁剪
+    this.hoverTip.classList.toggle('cols2', rows.length > 5);
+    this.hoverTip.style.display = 'block';
+    // 定位：右侧放不下则翻到光标左边；垂直钳在图框内
+    const tipW = this.hoverTip.offsetWidth, tipH = this.hoverTip.offsetHeight;
+    this.hoverTip.style.left = (x + 14 + tipW <= W - 4 ? x + 14 : Math.max(4, x - 14 - tipW)) + 'px';
+    this.hoverTip.style.top = Math.max(4, Math.min(p.T + 4, H - tipH - 4)) + 'px';
+  }
+  hideHover() {
+    this.hoverX = null;
+    if (this.hoverLine) this.hoverLine.style.display = 'none';
+    if (this.hoverTip) this.hoverTip.style.display = 'none';
   }
 }
 
