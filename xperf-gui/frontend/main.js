@@ -7,6 +7,258 @@ const { listen } = window.__TAURI__.event;
 const { invoke } = window.__TAURI__.core;
 _diag('__TAURI__ ok');
 
+// ---------- 调试接口钩子（docs/DESIGN-gui-debug.md；默认开启，XPERF_GUI_DEBUG=0 关闭） ----------
+// 后端经 'xperf-debug' 事件下发 {id, op, params}，结果经 debug_respond 命令回传。
+// 注册在一切业务代码之前，消除「请求早于 listener」窗口；server 禁用时不发事件、零开销。
+const __xperfDebug = {
+  // JSON 安全序列化：undefined→null，循环引用/函数/DOM 元素转占位字符串
+  stringify(v) {
+    const seen = new WeakSet();
+    return JSON.parse(JSON.stringify(v === undefined ? null : v, (k, x) => {
+      if (typeof x === 'function') return '[Function ' + (x.name || 'anonymous') + ']';
+      if (typeof x === 'bigint') return x.toString();
+      if (x instanceof Element) return '[Element <' + x.tagName.toLowerCase() + '>]';
+      if (typeof x === 'object' && x !== null) {
+        if (seen.has(x)) return '[Circular]';
+        seen.add(x);
+      }
+      return x;
+    }));
+  },
+  // selector 未命中 → not_found（后端映射 404）
+  _query(selector) {
+    const el = document.querySelector(selector);
+    if (!el) throw Object.assign(new Error('selector 未命中: ' + selector), { kind: 'not_found' });
+    return el;
+  },
+  // DOM 子树快照：tag/attrs/text/rect/visible，depth 与节点数双上限防爆
+  _domSnapshot(p) {
+    const root = this._query(p.selector || 'body');
+    const depth = Math.min(Math.max(p.depth ?? 4, 0), 12);
+    const maxNodes = Math.min(Math.max(p.max_nodes ?? 400, 1), 2000);
+    let count = 0, truncated = false;
+    const walk = (el, d) => {
+      if (count >= maxNodes) { truncated = true; return null; }
+      count++;
+      const r = el.getBoundingClientRect();
+      const attrs = {};
+      for (const a of el.attributes) attrs[a.name] = a.value.length > 120 ? a.value.slice(0, 120) + '…' : a.value;
+      let text = '';
+      for (const n of el.childNodes) if (n.nodeType === 3) text += n.nodeValue;
+      text = text.trim().replace(/\s+/g, ' ');
+      const cs = getComputedStyle(el);
+      const node = {
+        tag: el.tagName.toLowerCase(),
+        attrs,
+        text: text ? (text.length > 80 ? text.slice(0, 80) + '…' : text) : undefined,
+        rect: [r.x, r.y, r.width, r.height].map(v => Math.round(v * 10) / 10),
+        visible: !!(r.width || r.height) && cs.visibility !== 'hidden' && cs.display !== 'none',
+      };
+      if (d < depth) {
+        const kids = [];
+        for (const c of el.children) {
+          const k = walk(c, d + 1);
+          if (k) kids.push(k); else { truncated = true; break; }
+        }
+        if (kids.length) node.children = kids;
+      } else if (el.children.length) {
+        node.childCount = el.children.length;
+      }
+      return node;
+    };
+    const tree = walk(root, 0);
+    return { tree, nodes: count, truncated };
+  },
+  // 设备会话取（serial 省略时取当前激活页；不存在 → not_found）
+  _session(serial) {
+    const s = app.sessions.get(serial || app.active);
+    if (!s) throw Object.assign(new Error('设备会话不存在: ' + (serial || '(无激活)')), { kind: 'not_found' });
+    return s;
+  },
+  // 单图表序列摘要（点数/首末时间/末值/全序列 min-max）
+  _seriesSummary(pts) {
+    if (!pts.length) return { count: 0 };
+    let min = Infinity, max = -Infinity;
+    for (const pt of pts) { if (pt.v < min) min = pt.v; if (pt.v > max) max = pt.v; }
+    return { count: pts.length, first_t: pts[0].t, last: pts[pts.length - 1], min, max };
+  },
+  // 监控状态快照（无 serial 时只给 app 级概况）
+  _stateSnapshot(p) {
+    const out = {
+      activeSerial: app.active || null,
+      devices: [...app.sessions.keys()],
+      statusBar: (document.getElementById('status') || {}).textContent || null,
+    };
+    if (!p.serial && !app.active) return out;
+    const s = this._session(p.serial);
+    const charts = {};
+    for (const [name, ch] of Object.entries(s.charts)) {
+      const series = {};
+      for (const [k, pts] of Object.entries(ch.series)) series[k] = this._seriesSummary(pts);
+      charts[name] = {
+        series,
+        hover: ch._hoverRows
+          ? { t: ch._hoverT, rows: ch._hoverRows.map(r => ({ name: r.name, v: r.v })) }
+          : null,
+      };
+    }
+    out.session = {
+      serial: s.serial,
+      offline: s.offline,
+      samplingRunning: s.samplingRunning,
+      statusText: s.statusText,
+      statusProgress: s.statusProgress,
+      activeTab: s.activeTab,
+      logcatRunning: s.logcatRunning,
+      mirrorRunning: s.mirrorRunning,
+      recording: s.recording,
+      agentBuilding: s.agentBuilding,
+      rooted: s.rooted,
+      liveData: s.liveData,
+      peaks: s.peaks,
+      coldStarts: s.coldStarts,
+      charts,
+      logcatTail: s.logcatBuf.slice(-Math.min(Math.max(p.logcat_tail ?? 50, 0), 2000)),
+    };
+    return out;
+  },
+  // 单图表全分辨率读数：tail=n 取尾 n 点；at=<epoch_ms> 二分最近点（悬停同口径）
+  _seriesData(p) {
+    const s = this._session(p.serial);
+    const ch = s.charts[p.metric];
+    if (!ch) throw Object.assign(new Error('未知图表: ' + p.metric + '（可选 ' + Object.keys(s.charts).join(',') + '）'), { kind: 'not_found' });
+    const tail = Math.min(Math.max(p.tail ?? 100, 1), 1000);
+    const at = p.at != null ? Number(p.at) : null;
+    const out = {};
+    for (const [name, pts] of Object.entries(ch.series)) {
+      if (at != null) {
+        let lo = 0, hi = pts.length;
+        while (lo < hi) { const mid = (lo + hi) >> 1; if (pts[mid].t < at) lo = mid + 1; else hi = mid; }
+        let best = lo < pts.length ? lo : -1;
+        if (lo > 0 && (best < 0 || at - pts[lo - 1].t <= pts[lo].t - at)) best = lo - 1;
+        out[name] = best >= 0 ? { point: pts[best], distance_ms: Math.abs(pts[best].t - at) } : { point: null };
+      } else {
+        out[name] = pts.slice(-tail);
+      }
+    }
+    return out;
+  },
+  // 动作目标定位：selector 优先，否则 x,y 经 elementFromPoint（都没有 → bad_params）
+  _target(p) {
+    if (p.selector) return this._query(p.selector);
+    if (p.x != null && p.y != null) {
+      const el = document.elementFromPoint(p.x, p.y);
+      if (!el) throw Object.assign(new Error('坐标处无元素: ' + p.x + ',' + p.y), { kind: 'not_found' });
+      return el;
+    }
+    throw Object.assign(new Error('须给 selector 或 x,y'), { kind: 'bad_params' });
+  },
+  // 事件坐标：显式 x,y（视口坐标）优先，否则元素中心
+  _point(p, el) {
+    if (p.x != null && p.y != null) return { x: p.x, y: p.y };
+    const r = el.getBoundingClientRect();
+    return { x: r.x + r.width / 2, y: r.y + r.height / 2 };
+  },
+  _mouse(el, types, pt) {
+    for (const t of types) {
+      el.dispatchEvent(new MouseEvent(t, { bubbles: true, cancelable: true, clientX: pt.x, clientY: pt.y, button: 0, view: window }));
+    }
+  },
+  // 元素简述（操作回执，确认作用对象）
+  _describe(el) {
+    let text = '';
+    for (const n of el.childNodes) if (n.nodeType === 3) text += n.nodeValue;
+    return { tag: el.tagName.toLowerCase(), id: el.id || undefined, class: el.className || undefined, text: text.trim().replace(/\s+/g, ' ').slice(0, 60) || undefined };
+  },
+  // 操作注入（真实 DOM 事件序列；全在主线程同步完成）
+  _action(p) {
+    if (typeof p.op !== 'string' || !p.op) throw Object.assign(new Error('op 必填'), { kind: 'bad_params' });
+    const el = this._target(p);
+    const pt = this._point(p, el);
+    switch (p.op) {
+      case 'click':
+        this._mouse(el, ['mousedown', 'mouseup', 'click'], pt);
+        return { acted: this._describe(el) };
+      case 'hover':
+        this._mouse(el, ['mouseover', 'mouseenter', 'mousemove'], pt);
+        return { acted: this._describe(el), at: pt };
+      case 'input': {
+        if (!(el instanceof HTMLInputElement) && !(el instanceof HTMLTextAreaElement)) {
+          throw Object.assign(new Error('目标不是 input/textarea'), { kind: 'bad_params' });
+        }
+        el.focus();
+        // 原生 setter 写值（绕过潜在的框架 value 拦截），随后显式发 input+change
+        // （AX 教训：change 常随 blur 派发、合成事件不触发——这里显式全发）
+        const proto = el instanceof HTMLInputElement ? HTMLInputElement.prototype : HTMLTextAreaElement.prototype;
+        Object.getOwnPropertyDescriptor(proto, 'value').set.call(el, String(p.value ?? ''));
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+        return { acted: this._describe(el), value: el.value };
+      }
+      case 'select': {
+        if (!(el instanceof HTMLSelectElement)) throw Object.assign(new Error('目标不是 select'), { kind: 'bad_params' });
+        const v = String(p.value ?? '');
+        const ok = [...el.options].some(o => o.value === v);
+        if (!ok) throw Object.assign(new Error('无此选项: ' + v + '（可选 ' + [...el.options].map(o => o.value).join(',') + '）'), { kind: 'bad_params' });
+        el.value = v;
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+        return { acted: this._describe(el), value: el.value };
+      }
+      case 'check': {
+        if (!(el instanceof HTMLInputElement) || (el.type !== 'checkbox' && el.type !== 'radio')) {
+          throw Object.assign(new Error('目标不是 checkbox/radio'), { kind: 'bad_params' });
+        }
+        el.checked = p.value !== false && p.value !== 'false';
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+        return { acted: this._describe(el), checked: el.checked };
+      }
+      case 'scroll':
+        if (p.y != null) el.scrollTop = p.y;
+        if (p.x != null) el.scrollLeft = p.x;
+        el.dispatchEvent(new Event('scroll', { bubbles: true }));
+        return { acted: this._describe(el), scrollTop: el.scrollTop, scrollLeft: el.scrollLeft };
+      case 'key': {
+        const target = p.selector ? el : (document.activeElement || el);
+        const init = { key: String(p.key || ''), bubbles: true, cancelable: true, ctrlKey: !!p.ctrl, shiftKey: !!p.shift, altKey: !!p.alt, metaKey: !!p.meta };
+        if (!init.key) throw Object.assign(new Error('key 必填（如 Enter/Tab/a）'), { kind: 'bad_params' });
+        target.dispatchEvent(new KeyboardEvent('keydown', init));
+        target.dispatchEvent(new KeyboardEvent('keyup', init));
+        return { acted: this._describe(target), key: init.key };
+      }
+      default:
+        throw Object.assign(new Error('未知 op: ' + p.op + '（可选 click/input/select/check/hover/scroll/key）'), { kind: 'bad_params' });
+    }
+  },
+  async exec(op, p) {
+    if (op === 'ping') return 'pong';
+    if (op === 'action') return this._action(p);
+    if (op === 'dom') return this._domSnapshot(p);
+    if (op === 'state') return this._stateSnapshot(p);
+    if (op === 'series') return this._seriesData(p);
+    if (op === 'eval') {
+      if (typeof p.expr !== 'string' || !p.expr.trim()) {
+        throw Object.assign(new Error('expr 必填'), { kind: 'bad_params' });
+      }
+      // direct eval：表达式可访问本脚本顶层作用域（app/DeviceSession 等）
+      let v = eval(p.expr);
+      if (v && typeof v.then === 'function') v = await v; // async 表达式自动 await
+      return this.stringify(v);
+    }
+    throw Object.assign(new Error('未知 op: ' + op), { kind: 'bad_params' });
+  },
+};
+listen('xperf-debug', async (e) => {
+  const { id, op, params } = e.payload || {};
+  let result;
+  try {
+    result = { ok: true, data: await __xperfDebug.exec(op, params || {}) };
+  } catch (err) {
+    result = { ok: false, error: String(err && err.message ? err.message : err), kind: (err && err.kind) || 'js_error' };
+  }
+  try { await invoke('debug_respond', { id, result }); } catch (_) { /* server 已禁用时丢弃 */ }
+});
+invoke('debug_frontend_ready').catch(() => {});
+
 // ---------- 轻量 Canvas 折线图（替代 ECharts，无外部依赖） ----------
 // 主题色从 CSS 变量动态读取（data-theme 切换后 draw/redraw 自动跟随）。
 // 按主题缓存：getComputedStyle 每次 draw 调用太贵（绘制频率可达每秒数百次），
@@ -240,7 +492,16 @@ class LineChart {
   }
   showHover(x) {
     const p = this.plot;
-    if (!p) return this.hideHover();
+    // 图表尚未完成首帧绘制（plot 未建立，如约 150ms 合帧前/首批数据未到）：
+    // 记住悬停位置只隐视觉——draw() 建立 plot 后会用 hoverX 重刷补上读数；
+    // 若直接 hideHover 清 hoverX，这次悬停就永久丢失（自动化单次 hover 必踩）
+    if (!p) {
+      this.hoverX = x;
+      this._hoverRows = null;
+      if (this.hoverLine) this.hoverLine.style.display = 'none';
+      if (this.hoverTip) this.hoverTip.style.display = 'none';
+      return;
+    }
     const W = this.cssW, H = this.cssH;
     const plotW = W - p.R - p.L;
     if (x < p.L || x > W - p.R || plotW <= 0) return this.hideHover();
@@ -267,6 +528,9 @@ class LineChart {
       rows.push({ name: keys[i], color: C.series[this.seriesColor[keys[i]] % C.series.length], v: all[bestIdx].v });
     }
     if (rows.length === 0) return this.hideHover();
+    // 悬停内容结构化留存：调试接口（__xperfDebug state）直读，免解析 hoverTip HTML
+    this._hoverRows = rows;
+    this._hoverT = t;
     // 竖线
     this.hoverLine.style.display = 'block';
     this.hoverLine.style.left = x + 'px';
@@ -299,6 +563,8 @@ class LineChart {
   }
   hideHover() {
     this.hoverX = null;
+    this._hoverRows = null;
+    this._hoverT = null;
     // 取消未消费的合帧回调，防止 mouseleave 后 rAF 又把浮层显示出来
     if (this._hoverRaf) { cancelAnimationFrame(this._hoverRaf); this._hoverRaf = 0; }
     if (this.hoverLine) this.hoverLine.style.display = 'none';

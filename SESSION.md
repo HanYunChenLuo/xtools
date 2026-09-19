@@ -5,6 +5,22 @@
 > 待办事项（backlog）在 `WORKSPACE.md` 维护，本文件只做历史追溯。
 > 新会话开始时可先读本文件了解近期上下文。
 
+## 2026-09-19（晚）：I 节——GUI 可编程调试接口（默认开启）
+
+**任务**：WORKSPACE I 节候补——GUI 可编程操控/状态读取接口（agent 自助目验，免截图+模拟点击）。用户拍板修正：默认开启（含 release）、覆盖 UI 结构与几何位置的读写、axum+tokio（稳定/可靠/跨平台优先，否掉手搓 HTTP 与 WebSocket）、token 鉴权、eval 逃逸舱一期。
+
+**commit**（`feature/gui-debug-api`）：`83a2244`（docs 设计）→ `bcc5a51`（S1 scaffold：debugsrv.rs + token + 发现文件 + status/eval/ping）→ `b853582`（S2 读取：dom/state/series）→ `dcfee8c`（S3 操作：action）→ `61af344`（S4 文档+质量门）→ 收尾（S5 hover 修复 + 验收脚本入库）。
+
+**关键结论**：
+- **架构**：axum server 独立 std 线程 + current_thread tokio runtime（tokio "full" 本就在依赖树，零耦合 Tauri 内部 runtime）；前端往返 = emit `xperf-debug` → main.js 顶部钩子（早于业务 listener）→ `debug_respond` 命令回传，pending oneshot 5s 超时 504、未就绪 503（`frontend_ready` 轮询点）。不引 WS、不改 CSP
+- **安全**：仅 loopback；64-hex token（getrandom）走 `X-Xperf-Token` 头；**axum `route_layer` 不覆盖未匹配路径（404 绕过鉴权），必须 `.layer` 挂整个 Router**；发现文件 0600 原子写 + 死 pid 清扫（`utils::pid_alive`）+ 关窗清理（SIGKILL 残留下次启动收编）
+- **验收发现的真缺陷**：① LineChart 悬停在 plot 未建立（首帧绘制前）时 hideHover 清 hoverX → 单次 hover 读数永久丢失，修为记住位置待 draw 补刷；② 隐藏 tab 的 canvas 零尺寸（hover 前须切 tab，dom `visible`/`rect` 可判）；③ 物理鼠标与合成 hover 竞争（真机两轮失败根因——用户观察窗口时移动了鼠标），自动化运行须勿动鼠标，hover 宜轮询发送
+- **验收**：`scripts/gui_debug_accept.py <serial>` 全程 API 驱动（SS3 --remote 全新实例全绿）——401/就绪/dom rect/打开应用+冷启动/监控/series 增长/悬停读数（PID 11581 = 23.8%）/series tail+at/切 tab/logcat 出行+GC 过滤热切换/eval 一致性/停止停增。CGEvent/screencapture/AX 三条旧目验路径自此可弃
+- **脚本断言坑**：后端 `AppState.sessions` 首次命令触达才建（设备 tab 纯前端概念）；logcat ring buffer 保留过滤前行（断言只看最后 respawn 标记后）；「打开应用」total:0 = 应用已在前台（预期语义）；停止后在途事件可再到一个节拍（观察窗须错开）
+- **测试**：GUI 16（+5：鉴权/404 优先/eval 校验/发现文件原子写+清扫/token 格式），全量 core 166+8 / CLI 12 / GUI 16 绿，clippy + cargo doc（missing_docs 三 crate）零警告
+
+**遗留**：backlog 仅剩 I 节「命令行输入」（形态待定）。
+
 ## 2026-09-19：GUI 折线图悬停精确读数
 
 **任务**：用户反馈「CPU、显存这些从图表上只能看到大概值，无法获取准确值」——需要一种方式显示准确数据。

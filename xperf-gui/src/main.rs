@@ -11,6 +11,8 @@ use tauri::{Emitter, Manager, State};
 use xperf_core::agent::{self, AgentEvent};
 use xperf_core::{MemoryDetails, MetricFlags, SampleEvent, ThreadCpuInfo};
 
+mod debugsrv;
+
 /// AgentEvent → 前端 SampleEvent（保持与前端既有协议一致，前端零改动）。
 /// 首次见到某 PID 时先补一条 PidDiscovered。
 fn map_event(
@@ -2000,11 +2002,18 @@ fn main() {
             sessions: Mutex::new(HashMap::new()),
             agent_building: Mutex::new(HashMap::new()),
         })
+        .manage(debugsrv::DebugSlot::new(None))
         .setup(move |app| {
             // 默认窗口大小：前端加载完成后经 resize_default 命令按屏幕动态设置
             // （setup 阶段 webview 未就绪直接 set_size 会导致渲染空白，真机实测）
             // 设备热插拔监视线程（devices-changed 事件 → 前端设备 tab 动态更新）
             spawn_device_monitor(app.handle().clone());
+            // 可编程调试接口（默认开启，XPERF_GUI_DEBUG=0 关闭）：
+            // loopback HTTP + token，agent 目验用（docs/DESIGN-gui-debug.md）
+            {
+                let slot = app.state::<debugsrv::DebugSlot>();
+                debugsrv::start(app.handle(), &slot);
+            }
             // auto_start：设备前置解析通过（--device 或单台自动）才自动启动采样；
             // 多台未指定时为 false（eprintln 已提示），前端保持空闲态等用户在设备页开始
             if auto_start {
@@ -2097,7 +2106,9 @@ fn main() {
             add_ssh_host,
             connect_remote,
             remote_status,
-            resize_default
+            resize_default,
+            debugsrv::debug_respond,
+            debugsrv::debug_frontend_ready
         ])
         .on_window_event(|window, event| {
             // 关窗时停止全部设备采样：各会话 running 置 false，采样线程在下一轮
@@ -2154,6 +2165,8 @@ fn main() {
                 }
                 // 关窗收尾远程后端：清理 forward 规则 + 关隧道（R9/R10）
                 xperf_core::shutdown_remote();
+                // 调试接口发现文件清理（server 线程随进程退出即收）
+                debugsrv::cleanup_files(&window.state::<debugsrv::DebugSlot>());
             }
         })
         .run(tauri::generate_context!())
