@@ -21,6 +21,8 @@
 
 **遗留**：backlog 仅剩 I 节「命令行输入」（形态待定）。
 
+**追记（独立 review follow-up，`5731dfb`）**：子代理干净上下文审 6a93a44..f0e6ae8（指令声明抽查 file:line 抑制幻觉引用——本轮引用全实）。结论 **LGTM 无严重**；4 一般全修——G1 logcat_tail=0 返回全量（JS `slice(-0)`≡`slice(0)` 陷阱）、G2 scroll 的 x/y 与定位坐标语义混淆（独立 scrollX/scrollY）、G3 status 设备项补 platform + 设计文档对齐（tap_xy/字段清单）、G4 验收脚本 remote 断言与 docstring 自洽；顺手修 O5（hasOwn 防原型链穿透）/O4（panic 隔离文档措辞）/O11。观察项 O1/O2/O3/O6-O10 评估后接受为残余（发现文件先于 spawn 确认、pending 泄漏边角、Query 400 非信封等）。修复后 GUI 16 绿 + 验收脚本全绿复跑。
+
 ## 2026-09-19：GUI 折线图悬停精确读数
 
 **任务**：用户反馈「CPU、显存这些从图表上只能看到大概值，无法获取准确值」——需要一种方式显示准确数据。
