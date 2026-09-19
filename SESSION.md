@@ -5,6 +5,22 @@
 > 待办事项（backlog）在 `WORKSPACE.md` 维护，本文件只做历史追溯。
 > 新会话开始时可先读本文件了解近期上下文。
 
+## 2026-09-19：GUI 折线图悬停精确读数
+
+**任务**：用户反馈「CPU、显存这些从图表上只能看到大概值，无法获取准确值」——需要一种方式显示准确数据。
+
+**结论（先勘察后动手）**：图表链路无估算逻辑——每个点都是 agent 设备端实测 + 设备时间戳，GUI 仅 ≤150ms 渲染合帧。真实缺口是**无法从图上读到某时刻的精确数值**（折线只能目测）。各指标有效周期地板（FPS≥500ms、内存明细≥500ms、温度≥2s、显存≥1s、SS3/SS4 GPU busy≈5s）是数据源成本硬限制，与本次需求无关。
+
+**commit**：`feat/chart-hover-values`（4eeaad6，--no-ff 合 main）：
+- LineChart 悬停 crosshair + tooltip：竖线 + 浮层列该时刻各序列准确值与毫秒时间戳；**DOM overlay**（canvas 每 150ms 重绘会抹掉画在 canvas 上的游标）；draw() 记录 plot 几何，悬停中重绘后按新几何刷新（follow 模式读数随采样滚动）
+- 取数在**完整序列**上二分最近点（不受绘制 stride 抽稀影响）；窗口外序列（已停止 PID）不读数；右缘 tooltip 自动左翻；垂直钳在图框内
+- >5 序列（8 核频率图）浮层两列排布（单列高过图框被 `.chart` overflow:hidden 裁剪——目验发现并修复）
+- 序列名 HTML 转义（图层名来自设备 dumpsys）；fmtChartVal 兜住 mem/freq 原始浮点（最多两位小数去尾零）
+
+**真机目验**（--remote hppc SS3 gltf，CGEvent 鼠标模拟 + screencapture 区域截图）：CPU 单序列 25.25%、内存 647.83MB、频率 8 核两列全部可见、右缘翻转、移出隐藏、采样中 overlay 存活 ✓
+
+**遗留**：无。悬浮读数用的是前端 series（超 30k 点抽稀口径），全分辨率数据仍在落盘 CSV。
+
 ## 2026-09-18（深夜·三）：D 节勾销——GUI 开发运行 agent 构建反馈缺口
 
 **任务**：用户确认 D 节遗留后拍板「顺手做掉」——① Finder 启动的开发 GUI 构建 agent 期间无任何 UI 反馈（~1-2min「点了没反应」）；② `Command::new("cargo")` 依赖 PATH，Finder 最小 PATH 下找不到 cargo。

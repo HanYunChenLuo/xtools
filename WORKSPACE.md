@@ -2,7 +2,7 @@
 
 > 本文件记录跨会话的待办事项（backlog）。每次会话的历史总结见 `SESSION.md`。
 > 完成一项就把状态改为 ✅ 并注明完成的 commit；新增想法随时追加。
-> 最后更新：2026-09-18 深夜·三：D 节 GUI agent 构建反馈缺口完成（`fix/gui-dev-agent-build-feedback`：agent-build 事件 + agent_building 回查 + cargo 解析链 XPERF_CARGO）；前序：J 节全部收官（会话 5 merge 2409341 + 5c29971 回填）
+> 最后更新：2026-09-19：D 节 GUI 折线图悬停精确读数完成（`feat/chart-hover-values` 合 main，4eeaad6）；前序：J 节全部收官（会话 5 merge 2409341 + 5c29971 回填）
 
 ## 当前状态速览
 
@@ -47,6 +47,7 @@
 
 ## D. 结构改进（下轮候补）
 
+- [x] ~~**GUI 折线图悬停精确读数**~~（**已完成**，2026-09-19，`feat/chart-hover-values` 合 main，4eeaad6）：图表只能目测大概值 → 悬停显示 crosshair + tooltip（各序列准确值 + 毫秒时间戳）；DOM overlay 不随 150ms 重绘抹掉，draw 后按新几何刷新；取数在完整序列二分最近点不受绘制抽稀影响；窗口外序列不读数、右缘左翻、>5 序列两列防 overflow 裁剪、序列名 HTML 转义。真机目验（--remote hppc SS3 gltf，CGEvent 鼠标模拟 + screencapture）：CPU 单序列 25.25%、内存 647.83MB（原始浮点格式化）、频率 8 核两列无裁剪、右缘翻转、移出隐藏
 - [x] ~~**GUI 开发运行的 agent 构建反馈缺口**~~（**已完成**，2026-09-18 深夜，`fix/gui-dev-agent-build-feedback` 合 main）：① 构建期无 UI 反馈 → `bundled_agent_path` 在需构建时 emit `agent-build {serial, stage: building|done}` 事件 + `AppState.agent_building` 状态集 + `agent_building` 命令（**命令行自动启动时构建早于前端事件监听就绪，事件会丢——前端 `applyStartupArgs` 回查补偿**；手动开始走事件+`agentBuilding` 标志守卫，三处乐观「监控中」setStatus 让位，两种事件时序都安全）；② cargo 裸 `Command::new` 依赖 PATH → core `host_cargo_path()` 解析链（`XPERF_CARGO`→PATH→`~/.cargo/bin`→Homebrew，adb/ssh 同套路）+ `agent_binary_needs_build()` 从 `ensure_agent_built` 拆出。**真机验证**：`env -i`（最小 PATH + SSH_AUTH_SOCK）模拟 Finder 启动 + fake-cargo 包装器（sleep 45 + exec 真 cargo，顺带验证 XPERF_CARGO 覆盖）——构建中状态栏显示「首次构建 Android agent 中…」截图实证，构建完成 → 恢复采样图表（SS3 --remote hppc 全链）。修复过程发现两个坑：cargo Fresh 重硬链旧 inode（mtime 不变，构建太快截不到图 → 引入 sleep 包装器）；后台 GUI 进程需 nohup+disown 防 harness 会话清理误杀。单测 +1（host_cargo_path 解析链），全量 core 166+8 / CLI 12 / GUI 11 绿，clippy/doc 零警告。**独立 review follow-up（merge 3669412）**：复审结论 LGTM 无严重；修 2 一般——①构建中点「停止」后 done 事件无条件覆盖状态栏（done 加 samplingRunning 守卫）②agent_building 裸 HashSet 无计数（构建窗口内 restart 并发构建者配对错位 → HashMap 计数，归零才 emit done）；顺手 4 观察项（applyStartupArgs 补 .catch、start() catch 清标志、XPERF_CARGO 空串显式过滤、build_session_summary docstring 口径）；fake-cargo 复测主链路无回归。残余接受：回查 stale-true ms 级窗口（下一事件自愈）、构建 <1s 秒失败时 building/done 均丢的假「监控中」（pre-existing 事件丢失类边界）
 - [x] ~~内存 Private Other 拆分 DMA-BUF 分类~~（**已完成**，2026-09-11，`feat/dmabuf-split` 合 main，e5071da，协议 v8）：Private Other 是无语义兜底桶（真机根因 = 114 个 `/dmabuf:` VMA 共 614MB PSS；Graphics 桶只按 kgsl/drm 设备节点名匹配，dmabuf 不命中；内核 `/proc/<pid>/dmabuf` 此 GVM 未编译）。落地：agent Full 模式 root 下扫 smaps 按 VMA 名（`/dmabuf`/`[anon:dmabuf`）聚合 Pss 单列 `dmabuf`，other 扣减（稳态 8 分类合计恒等 PSS；分配剧变期两次快照不同步可暂超，如实不钳制——见 CLAUDE.md 内存采样节）；Smaps/DumpsysFallback/非 root dmabuf=0。mem 事件增字段（serde(default) 双向兼容）；CLI 打印/图表、GUI 面板（└ DMA-BUF + Private Other 改「其他」）、CSV（DMA-BUF (MB) 列）全链路。parse_dmabuf_pss 头行按字段解析（弃固定列切片）。真机：SS4 gltf DMA-BUF 615.6MB/Other 9.0MB 稳态合计=PSS；SS3 533.9MB 回归；非 root SS2MAX dmabuf=0 七类合计=PSS；100ms smaps 路径 0 值正常。测试：agent 32（设备）+ host 95+8+5+2 全绿，clippy/doc 零警告
 - ~~SS4 FPS 数据源升级候选：getfps -w~~（**已核销**，2026-09-10 晚）：getfps 逆向发现其底层即 `dumpsys SurfaceFlinger --latency`，价值是揭示了 SS4/A16 的图层名须带 `<hex> ` 别名前缀——agent v5 据此修复查询名，设备端 per-layer 路径恢复（见 E 节 FPS 条目终态）
