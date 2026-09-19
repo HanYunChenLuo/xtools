@@ -7,6 +7,50 @@ const { listen } = window.__TAURI__.event;
 const { invoke } = window.__TAURI__.core;
 _diag('__TAURI__ ok');
 
+// ---------- 调试接口钩子（docs/DESIGN-gui-debug.md；默认开启，XPERF_GUI_DEBUG=0 关闭） ----------
+// 后端经 'xperf-debug' 事件下发 {id, op, params}，结果经 debug_respond 命令回传。
+// 注册在一切业务代码之前，消除「请求早于 listener」窗口；server 禁用时不发事件、零开销。
+const __xperfDebug = {
+  // JSON 安全序列化：undefined→null，循环引用/函数/DOM 元素转占位字符串
+  stringify(v) {
+    const seen = new WeakSet();
+    return JSON.parse(JSON.stringify(v === undefined ? null : v, (k, x) => {
+      if (typeof x === 'function') return '[Function ' + (x.name || 'anonymous') + ']';
+      if (typeof x === 'bigint') return x.toString();
+      if (x instanceof Element) return '[Element <' + x.tagName.toLowerCase() + '>]';
+      if (typeof x === 'object' && x !== null) {
+        if (seen.has(x)) return '[Circular]';
+        seen.add(x);
+      }
+      return x;
+    }));
+  },
+  async exec(op, p) {
+    if (op === 'ping') return 'pong';
+    if (op === 'eval') {
+      if (typeof p.expr !== 'string' || !p.expr.trim()) {
+        throw Object.assign(new Error('expr 必填'), { kind: 'bad_params' });
+      }
+      // direct eval：表达式可访问本脚本顶层作用域（app/DeviceSession 等）
+      let v = eval(p.expr);
+      if (v && typeof v.then === 'function') v = await v; // async 表达式自动 await
+      return this.stringify(v);
+    }
+    throw Object.assign(new Error('未知 op: ' + op), { kind: 'bad_params' });
+  },
+};
+listen('xperf-debug', async (e) => {
+  const { id, op, params } = e.payload || {};
+  let result;
+  try {
+    result = { ok: true, data: await __xperfDebug.exec(op, params || {}) };
+  } catch (err) {
+    result = { ok: false, error: String(err && err.message ? err.message : err), kind: (err && err.kind) || 'js_error' };
+  }
+  try { await invoke('debug_respond', { id, result }); } catch (_) { /* server 已禁用时丢弃 */ }
+});
+invoke('debug_frontend_ready').catch(() => {});
+
 // ---------- 轻量 Canvas 折线图（替代 ECharts，无外部依赖） ----------
 // 主题色从 CSS 变量动态读取（data-theme 切换后 draw/redraw 自动跟随）。
 // 按主题缓存：getComputedStyle 每次 draw 调用太贵（绘制频率可达每秒数百次），

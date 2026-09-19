@@ -332,6 +332,17 @@ pub fn is_interrupted() -> bool {
     INTERRUPT_FLAG.load(AtomicOrdering::SeqCst)
 }
 
+/// 进程是否存活（`kill(pid, 0)` 语义：存活或有权限问题视为存活，ESRCH 视为死亡）。
+/// 用于 GUI 调试接口发现文件的陈旧条目清扫。
+pub fn pid_alive(pid: u32) -> bool {
+    let ret = unsafe { libc::kill(pid as libc::pid_t, 0) };
+    if ret == 0 {
+        return true;
+    }
+    std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+}
+
+
 /// 集成测试环境注入（`#[ignore]` 测试手动跑时读取——多人维护各自环境，不硬编码主机）：
 /// - `XPERF_IT_SSH_HOST`：SSH 目标（ssh config 别名或 `user@host`），须免密可达
 /// - `XPERF_IT_SSH_ADB`：远端 adb 路径（可选；默认 `adb`，establish 预检自动退
