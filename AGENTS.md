@@ -6,13 +6,20 @@ internals see `CLAUDE.md`; this file is about **using** the tool.
 
 ## Install / locate the binary
 
-Release archives (internal GitLab Releases page) contain exactly two files —
-keep them together:
+Release archives (internal GitLab Releases page) unpack to:
 
 ```
-xperf-cli            # host CLI
-agent/xperf-agent    # on-device sampler (aarch64 Android, pushed automatically)
+xperf-cli               # host CLI
+agent/xperf-agent       # on-device sampler (aarch64 Android, pushed automatically)
+AGENTS.md               # this file
+skills/xperf/SKILL.md   # Claude Code / siada skill — install into the agent's
+                        # skill root (e.g. ~/.siada-cli/skills/xperf/) so the
+                        # agent discovers this capability from task descriptions
+README.md, README_zh.md, LICENSE, CHANGELOG.md
 ```
+
+The two binaries must stay together (see resolution order below); the docs are
+reference copies — this file is also readable in the source repo.
 
 Resolution order: `XPERF_AGENT_BIN` env override → `agent/xperf-agent` next to
 the `xperf-cli` binary → dev-checkout auto cross-build (needs Rust + NDK).
