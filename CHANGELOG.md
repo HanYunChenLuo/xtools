@@ -4,6 +4,8 @@
 
 ## [Unreleased]
 
+## [v0.3.0] - 2026-09-19
+
 ### 新增
 
 - **GUI 可编程调试接口**（默认开启，`XPERF_GUI_DEBUG=0` 关闭）：GUI 进程内嵌 loopback HTTP 接口（axum，随机端口 + token 鉴权，发现文件 `~/.config/xperf/gui-debug-<pid>.json`），供脚本/AI agent 自动化目验 GUI——读取 UI 结构与元素位置（`/api/dom`，含 bounding rect）、监控状态（`/api/status`/`/api/state`，含图表 series 摘要、悬停 tooltip、logcat 行、实时数值面板）、单图表全分辨率读数（`/api/series`）、注入操作（`/api/action`：click/input/select/check/hover/scroll/key，真实 DOM 事件序列）、任意 JS 逃逸舱（`/api/eval`）。
@@ -84,5 +86,6 @@ CPU（单核口径，与 `adb top` 一致）、内存（App Summary 分类明细
 - 首次提供预编译发布包：Linux x86_64（CLI + 预编译 Android agent）与 macOS（arm64 / x86_64，本机构建上传），tag 触发 GitLab CI 自动出包挂 Release。
 - GUI 发布形态：Linux x86_64 AppImage（Ubuntu 22.04+，WebKitGTK 4.1）与 macOS arm64/x86_64 DMG；GUI 资源内置预编译 Android agent，运行时不调用 Cargo/NDK。GUI 资产随 `v0.2.1` 发布。
 
+[v0.3.0]: https://gitlab.chehejia.com/ligraphic/xperf/-/releases/v0.3.0
 [v0.2.1]: https://gitlab.chehejia.com/ligraphic/xperf/-/releases/v0.2.1
 [v0.2.0]: https://gitlab.chehejia.com/ligraphic/xperf/-/releases/v0.2.0
