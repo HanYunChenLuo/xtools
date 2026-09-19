@@ -19,6 +19,8 @@
 
 **真机目验**（--remote hppc SS3 gltf，CGEvent 鼠标模拟 + screencapture 区域截图）：CPU 单序列 25.25%、内存 647.83MB、频率 8 核两列全部可见、右缘翻转、移出隐藏、采样中 overlay 存活 ✓
 
+**独立 review 修复**（15bef72，复审 LGTM 无严重）：修 2 一般——①tooltip 色点与折线错位（draw 按窗口过滤后行下标取色 vs tooltip 全量下标；根治为序列创建时分配稳定色板序号 seriesColor，顺带消除既有「序列滑出窗口折线整体变色」）②多序列浮层超高被 overflow 裁剪（列数分档 >5 两列/>12 三列 + max 宽高兜底）；顺手 3 观察——resetSessionData 清 hover 残留、分档阈值注释、超长图层名 ellipsis。接受残余：mousemove 不节流（60Hz 可接受）、左缘 1-2px 缺行。真机复验：频率 8 核配色与图例一致、FPS 长图层名截断值可读。
+
 **遗留**：无。悬浮读数用的是前端 series（超 30k 点抽稀口径），全分辨率数据仍在落盘 CSV。
 
 ## 2026-09-18（深夜·三）：D 节勾销——GUI 开发运行 agent 构建反馈缺口
