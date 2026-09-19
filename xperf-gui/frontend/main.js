@@ -71,6 +71,9 @@ class LineChart {
     this.dirty = false; // 有待绘制数据（requestDraw 置位，flushCharts 统一绘制）
     this.plot = null;   // 最近一次 draw 的绘图区几何（悬停读数用；无数据时为 null）
     this.hoverX = null; // 悬停中的 canvas 内 x（CSS px）；draw 完成后按新几何刷新读数
+    this._hoverPX = 0;  // rAF 合帧的待处理 x
+    this._hoverRaf = 0; // 已预约的 rAF id（0=无）
+    this._tipHtml = ''; // 浮层内容签名：不变则跳过 innerHTML 重写（避免强制同步布局）
     // 悬停读数 overlay（DOM 实现：采样中 canvas 每 150ms 重绘，画在 canvas 上的游标会被抹掉）
     this.hoverLine = document.createElement('div');
     this.hoverLine.className = 'chart-hover-line';
@@ -226,7 +229,14 @@ class LineChart {
   // 取数与绘制无关（不受绘制 stride 抽稀影响）：按 hovered 时间在完整序列上二分最近点
   onHover(e) {
     const r = this.canvas.getBoundingClientRect();
-    this.showHover(e.clientX - r.left);
+    this._hoverPX = e.clientX - r.left;
+    // rAF 合帧：高轮询率鼠标下每帧最多一次取数与 DOM 更新（原实现每事件重建 innerHTML + 读布局尺寸）
+    if (!this._hoverRaf) {
+      this._hoverRaf = requestAnimationFrame(() => {
+        this._hoverRaf = 0;
+        this.showHover(this._hoverPX);
+      });
+    }
   }
   showHover(x) {
     const p = this.plot;
@@ -242,13 +252,19 @@ class LineChart {
     for (let i = 0; i < keys.length; i++) {
       const all = this.series[keys[i]];
       if (!all || all.length === 0) continue;
-      // 二分第一个 >= t 的点，与其前驱取较近者
-      let lo = 0, hi = all.length;
+      // 可见范围与 draw 同口径：窗口起点前一点也参与取数（draw 用它保持折线左边界连续，
+      // 图上有线就应有读数，左缘不再缺行）；整条序列在窗口前结束（已停止的 PID）图上无线，不读数
+      let lo0 = 0, hi0 = all.length;
+      while (lo0 < hi0) { const mid = (lo0 + hi0) >> 1; if (all[mid].t < p.tMin) lo0 = mid + 1; else hi0 = mid; }
+      if (lo0 >= all.length) continue;
+      // 可见范围 [start, len) 内二分 hovered t 的最近点
+      const start = lo0 > 0 ? lo0 - 1 : 0;
+      let lo = start, hi = all.length;
       while (lo < hi) { const mid = (lo + hi) >> 1; if (all[mid].t < t) lo = mid + 1; else hi = mid; }
-      let best = lo < all.length ? all[lo] : null;
-      if (lo > 0 && (!best || t - all[lo - 1].t <= best.t - t)) best = all[lo - 1];
-      if (!best || best.t < p.tMin || best.t > p.tMax) continue; // 窗口外（如已停止的 PID）不读数
-      rows.push({ name: keys[i], color: C.series[this.seriesColor[keys[i]] % C.series.length], v: best.v });
+      let bestIdx = lo < all.length ? lo : -1;
+      if (lo > start && (bestIdx < 0 || t - all[lo - 1].t <= all[lo].t - t)) bestIdx = lo - 1;
+      if (bestIdx < 0) continue;
+      rows.push({ name: keys[i], color: C.series[this.seriesColor[keys[i]] % C.series.length], v: all[bestIdx].v });
     }
     if (rows.length === 0) return this.hideHover();
     // 竖线
@@ -265,11 +281,16 @@ class LineChart {
         + escHtml(row.name) + '</span><span class="ht-val">' + fmtChartVal(row.v) + ' ' + escHtml(this.unit) + '</span></div>';
     }
     html += '</div>';
-    this.hoverTip.innerHTML = html;
-    // 列数分档（行高约 18px，图框 min-height 120px）：>5 序列（如 8 核频率图）两列、
-    // >12（真实设备温度传感器可达 10~30 个）三列，避免浮层高出图框被 overflow 裁剪
-    this.hoverTip.classList.toggle('cols2', rows.length > 5 && rows.length <= 12);
-    this.hoverTip.classList.toggle('cols3', rows.length > 12);
+    // 内容签名不变则不重写 innerHTML、不动布局类（采样中 draw 每 150ms 刷新本浮层，
+    // 值多数时候未变；重写会让紧随其后的 offsetWidth/offsetHeight 读取强制同步布局）
+    if (html !== this._tipHtml) {
+      this._tipHtml = html;
+      this.hoverTip.innerHTML = html;
+      // 列数分档（行高约 18px，图框 min-height 120px）：>5 序列（如 8 核频率图）两列、
+      // >12（真实设备温度传感器可达 10~30 个）三列，避免浮层高出图框被 overflow 裁剪
+      this.hoverTip.classList.toggle('cols2', rows.length > 5 && rows.length <= 12);
+      this.hoverTip.classList.toggle('cols3', rows.length > 12);
+    }
     this.hoverTip.style.display = 'block';
     // 定位：右侧放不下则翻到光标左边；垂直钳在图框内
     const tipW = this.hoverTip.offsetWidth, tipH = this.hoverTip.offsetHeight;
@@ -278,6 +299,8 @@ class LineChart {
   }
   hideHover() {
     this.hoverX = null;
+    // 取消未消费的合帧回调，防止 mouseleave 后 rAF 又把浮层显示出来
+    if (this._hoverRaf) { cancelAnimationFrame(this._hoverRaf); this._hoverRaf = 0; }
     if (this.hoverLine) this.hoverLine.style.display = 'none';
     if (this.hoverTip) this.hoverTip.style.display = 'none';
   }
