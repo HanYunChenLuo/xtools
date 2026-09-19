@@ -23,6 +23,8 @@
 
 **追记（独立 review follow-up，`5731dfb`）**：子代理干净上下文审 6a93a44..f0e6ae8（指令声明抽查 file:line 抑制幻觉引用——本轮引用全实）。结论 **LGTM 无严重**；4 一般全修——G1 logcat_tail=0 返回全量（JS `slice(-0)`≡`slice(0)` 陷阱）、G2 scroll 的 x/y 与定位坐标语义混淆（独立 scrollX/scrollY）、G3 status 设备项补 platform + 设计文档对齐（tap_xy/字段清单）、G4 验收脚本 remote 断言与 docstring 自洽；顺手修 O5（hasOwn 防原型链穿透）/O4（panic 隔离文档措辞）/O11。观察项 O1/O2/O3/O6-O10 评估后接受为残余（发现文件先于 spawn 确认、pending 泄漏边角、Query 400 非信封等）。修复后 GUI 16 绿 + 验收脚本全绿复跑。
 
+**追记（agent skill + 发版 v0.3.0，`faf9536`/`9148b81` + tag）**：① 新增 `skills/xperf-gui-debug/SKILL.md`（与 CLI skill 触发域分离：GUI 目验/驱动 vs 性能采集；已装 `~/.siada-cli/skills/`）② 发版：根 Cargo.toml bump **v0.3.0**（CHANGELOG [Unreleased] 定版，minor 位对齐三周功能面）→ hppc 两跳推 GitLab main + tag → CI 流水线 1413940 全绿（validate:tag 15s / test:linux 98s / build:linux 111s / gui:linux 525s / release success）→ `release-macos.sh` 双架构 CLI tar + DMG 上传，Release 6 资产齐（Linux CLI/AppImage + macOS CLI×2 + DMG×2）。③ 发版工具坑：本机 OAuth 登录态 refresh_token 已 invalid_grant（需重新 `--gitlab-login`），查流水线走 hppc git-credentials PAT（feedback 会话老路）；python 临时文件写回用 `open+os.replace`（mkstemp 元组误用报 fd type 错）。
+
 ## 2026-09-19：GUI 折线图悬停精确读数
 
 **任务**：用户反馈「CPU、显存这些从图表上只能看到大概值，无法获取准确值」——需要一种方式显示准确数据。
