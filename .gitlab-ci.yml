@@ -202,6 +202,31 @@ gui:linux:
       ln -sf "$(basename "$HB")" "$APPDIR/usr/lib/libharfbuzz.so.0"
       # 质量门：注入的 harfbuzz 必须覆盖触发崩溃的符号
       nm -D "$APPDIR/usr/lib/libharfbuzz.so.0" | grep -q hb_ot_layout_get_horizontal_baseline_tag_for_script
+      # Ubuntu 24.04+ 默认 kernel.apparmor_restrict_unprivileged_userns=1，AppImage 的
+      # WebKitGTK 走 bubblewrap 沙箱（需 user namespace），而 /tmp/.mount_* 动态挂载路径
+      # 不匹配系统 AppArmor profile（只豁免 distro 安装的 webkit）→ Web 进程创建失败，
+      # UI 冻结、点击/IPC 全无响应（2026-09-20 hppc 实测）。修复：在 AppRun 启动链注入
+      # 禁用开关——必须在 exec 应用前由外部环境提供（进程内 set_var 对沙箱判定不生效，
+      # re-exec 修补在 bundle 环境实测引入点击即崩副作用，见 xperf-gui/src/main.rs 开头
+      # 注释）。hook 在运行时按内核开关条件判定：仅受限环境（Ubuntu 24.04+）禁用沙箱，
+      # 无此限制的环境（22.04 及更早、其他发行版）保留沙箱；本 webview 只加载本地打包
+      # 前端资源（自定义协议 + CSP），禁用沙箱的收益损失有限。
+      HOOK="$APPDIR/apprun-hooks/linuxdeploy-plugin-gtk.sh"
+      # 前置门：hook 必须已存在（linuxdeploy 插件机制变更导致路径漂移时 fail-fast，
+      # 而非静默创建新文件使注入失效）
+      test -f "$HOOK"
+      # heredoc 内容与 EOF 必须保持 block scalar 缩进（YAML 按首行缩进去公共前缀，
+      # 顶格写会被 YAML 截断成语法错误）
+      cat >> "$HOOK" <<'EOF'
+
+      # xperf: AppImage userns 限制适配（仅 Ubuntu 24.04+ 等受限内核禁用 WebKit 沙箱）
+      if [ "$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null)" = "1" ]; then
+          export WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS=1
+      fi
+      EOF
+      # 质量门：注入存在且 hook 语法有效（AppRun 以 set -e source 它）
+      grep -q WEBKIT_DISABLE_SANDBOX "$HOOK"
+      sh -n "$HOOK"
       # appimagetool 内嵌于 tauri 缓存的 linuxdeploy AppImage（构建期的 /tmp 解包目录随
       # linuxdeploy 退出即删，不可用）——自行 --appimage-extract 取用（无需 FUSE，免新外部依赖）
       LD_EXTRACT=$(mktemp -d)

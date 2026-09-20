@@ -1919,6 +1919,12 @@ fn main() {
     // DMABUF 场景同源）——禁用合成模式回退非合成渲染；本工具 UI 无 CSS 动画/
     // 变换，禁用的性能影响可忽略。
     std::env::set_var("WEBKIT_DISABLE_COMPOSITING_MODE", "1");
+    // 注意：AppImage 的 WebKit 沙箱禁用（Ubuntu 24.04+ AppArmor userns 限制所需）
+    // 不能在这里做——进程内 set_var 对 webkit 沙箱判定不生效（判定依赖 exec 前的
+    // 外部环境），re-exec 修补虽能拉起 Web 进程但在 bundle 环境下引入点击即崩
+    // 副作用（2026-09-20 实测；本机直连环境同代码路径则正常，机理未明）——
+    // 只能在 exec 前由外部环境注入，实现于 CI 打包链路（.gitlab-ci.yml gui:linux
+    // 向 AppRun hook 追加条件式 export，运行时按内核 userns 限制检测）。
     // 连接链路阶段计时（core utils::diag）与前端打点同写一份诊断日志，
     // 定位远程连接慢用（DMG 下 stderr 不可见，必须落文件）
     std::env::set_var("XPERF_DIAG_LOG", "/tmp/xperf_gui_diag.log");
