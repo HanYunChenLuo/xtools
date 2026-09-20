@@ -5,6 +5,22 @@
 > 待办事项（backlog）在 `WORKSPACE.md` 维护，本文件只做历史追溯。
 > 新会话开始时可先读本文件了解近期上下文。
 
+## 2026-09-20：hppc 编译修复 + AppImage Ubuntu 24.04 点击无响应修复 + v0.3.1 发版
+
+**任务**：① hppc 上 `cargo run --bin xperf-gui --release` 编译错误（Linux 直编）；② 用户实测 v0.3.0 AppImage UI 点击全无响应（如新增 SSH 登录）。
+
+**commit**：`cfa6576`（修复，4 文件 +33）→ `6610fe1`（--no-ff 合 main）→ 版本 bump commit（v0.3.1 + 本记录）。
+
+**关键结论**：
+- **hppc 编译错误根因**：`target/` 是项目改名（xtools→xperf）前迁移来的——tauri/xperf-gui 的 build script 缓存 output 固化 `/home/han/code/tools/xtools/...` 绝对路径，Cargo fingerprint 不含项目路径故判定 fresh 沿用，xtools target 被清理后即炸。修复零代码变更：`cargo clean -p`（**坑：默认只清 dev profile，release 须显式 `--release`**）清 tauri 全家+plugins+xperf-gui；另清 dev 的 xperf-core rlib（`workspace_root()` 等 `env!("CARGO_MANIFEST_DIR")` 编译期固化路径，不清会在运行时误判「发布包缺 agent」）。全量测试复跑全绿（mirror::test_record_stop_sends_sigint 首轮挂为高负载并行 flake，单跑 12 连过、复跑转绿）
+- **AppImage 点击无响应根因**（debug API + 进程勘察实证）：Ubuntu 24.04+ 默认 `kernel.apparmor_restrict_unprivileged_userns=1`，AppImage 的 WebKitGTK bubblewrap 沙箱（需 userns）因 `/tmp/.mount_*` 路径不匹配系统 AppArmor profile（只豁免 distro webkit）→ Web 进程创建失败：窗口有静态画面但点击/前端 IPC 全无响应；`WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS=1` 后 Web/Network 进程拉起、点击链路恢复
+- **代码途径三连排除（全部实证）**：① main 内 `set_var` 不生效（判定依赖 exec 前外部环境）② re-exec 虽拉起 Web 进程但 bundle 环境下**首次 click 后 Web 进程必消失**（两实例复现，无 coredump；同二进制手动 env / 本机直连 re-exec 均正常，机理未明）③ 官方 `webkit_web_context_set_sandbox_enabled` API 存在（webkit2gtk crate 有绑定）但 tauri 2.4.1/wry 0.50.5 不向应用暴露 WebContext（wry 非 incognito 每次新建、tauri 不透传）
+- **终案**：CI gui:linux 打包向 AppDir `apprun-hooks/linuxdeploy-plugin-gtk.sh` 追加**条件式** export（AppRun source 链 exec 前注入；运行时读内核开关——仅 24.04+ 受限内核禁用，22.04/其他发行版保留沙箱）+ test -f 前置门 + grep/sh -n 双质量门。验证：解包 AppDir 全形态（进程/eval/click/60s 监控）全绿，GitLab CI lint valid
+- **review 抓到 2 个自埋缺陷**：heredoc 内容顶格写在 YAML block scalar（按首行定缩进）里会被截断成语法错误；`cat >>` 对不存在的 hook 路径会静默新建致假质量门——均已修复并加注释防重踩
+
+**遗留**：macOS 资产（CLI tar + DMG 双架构）需 Mac 维护者执行 `GITLAB_TOKEN=<PAT> scripts/release-macos.sh v0.3.1` 补传。
+
+
 ## 2026-09-19（晚）：I 节——GUI 可编程调试接口（默认开启）
 
 **任务**：WORKSPACE I 节候补——GUI 可编程操控/状态读取接口（agent 自助目验，免截图+模拟点击）。用户拍板修正：默认开启（含 release）、覆盖 UI 结构与几何位置的读写、axum+tokio（稳定/可靠/跨平台优先，否掉手搓 HTTP 与 WebSocket）、token 鉴权、eval 逃逸舱一期。

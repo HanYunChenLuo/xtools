@@ -4,6 +4,12 @@
 
 ## [Unreleased]
 
+## [v0.3.1] - 2026-09-20
+
+### 修复
+
+- 修复 Linux AppImage 在 Ubuntu 24.04+ 上 UI 冻结、点击与交互全无响应：这些版本默认开启 AppArmor user namespace 限制（`kernel.apparmor_restrict_unprivileged_userns=1`），AppImage 内 WebKitGTK 以 bubblewrap 沙箱启动 Web 进程（需 user namespace），而 `/tmp/.mount_*` 动态挂载路径不匹配系统 AppArmor profile → Web 进程创建失败，窗口仅剩静态画面。修复为打包时向 AppRun 启动链注入条件式 `WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS=1`——运行时检测内核开关，仅受限环境（Ubuntu 24.04+）禁用沙箱，22.04 及更早版本与其他发行版保留沙箱。本工具 webview 只加载本地打包前端资源，禁用沙箱无实际攻击面损失。
+
 ## [v0.3.0] - 2026-09-19
 
 ### 新增
