@@ -815,14 +815,18 @@ def group_g3(c, ck, serial):
 # G4 多设备并行与故障注入（三机并行 / 连点 / 快切 / SS4 断连自愈 / 隧道重建）
 # ---------------------------------------------------------------------------
 
-SERIALS_EXTRA = ["d1f39648c1f", "localhost:5559"]  # SS2MAX / SS4（网关被过滤不出现）
+# 环境适配：附加并行设备（Mac--remote 与 hppc 本地同拓扑默认值；kong 等其它环境
+# 经 XPERF_TEST_EXTRA_SERIALS 覆盖——逗号分隔，自动过滤不在线的）
+SERIALS_EXTRA = [s for s in os.environ.get(
+    "XPERF_TEST_EXTRA_SERIALS", "d1f39648c1f,localhost:5559").split(",") if s]
 
 
 def group_g4(c, ck, serial):
     p = page(serial)
     all_serials = [serial] + [s for s in SERIALS_EXTRA
                               if s in [d["serial"] for d in c.status().get("devices", [])]]
-    ck.check("多设备在线（≥3 台）", len(all_serials) >= 3, f"{all_serials}")
+    # ≥2 即构成多设备并行语义（Mac/hppc 三台、kong 两台）；台数入详情
+    ck.check("多设备在线（≥2 台）", len(all_serials) >= 2, f"{all_serials}")
 
     # 1. 三机并行采样：各自 series 增长 + 会话隔离（切设备页 charts 互不串）
     for s_ in all_serials:
@@ -891,11 +895,17 @@ def group_g4(c, ck, serial):
         ck.check("SS4 采样恢复（series 续增）", bool(resumed))
 
     # 4. SSH 隧道重建（杀 GUI 自己的 ControlMaster → rebuild_tunnel 指数退避恢复）
-    gui_pid = c.status().get("pid")
-    sockets = [s for s in (os.path.exists(os.path.expanduser("~/.ssh/cm")) and
-                           os.listdir(os.path.expanduser("~/.ssh/cm"))) or []
-               if s.startswith(f"xperf-hppc-{gui_pid}-")]
-    ck.check("找到 GUI 自己的 control socket", bool(sockets), f"pid={gui_pid} {sockets}")
+    #    仅 ssh 模式有意义——Linux 本地直跑（hppc 直编/kong AppImage）无隧道，
+    #    该场景已在 Mac --remote 覆盖
+    if c_status_remote_mode() != "ssh":
+        ck.skip("SSH 隧道重建", "本机模式无隧道（Linux 本地直跑；Mac --remote 已覆盖）")
+        sockets = []
+    else:
+        gui_pid = c.status().get("pid")
+        sockets = [s for s in (os.path.exists(os.path.expanduser("~/.ssh/cm")) and
+                               os.listdir(os.path.expanduser("~/.ssh/cm"))) or []
+                   if s.startswith(f"xperf-hppc-{gui_pid}-")]
+        ck.check("找到 GUI 自己的 control socket", bool(sockets), f"pid={gui_pid} {sockets}")
     if sockets:
         sock_path = os.path.expanduser(f"~/.ssh/cm/{sockets[0]}")
         # 找 master 进程并 SIGKILL（模拟异常断网）。macOS 的 lsof 对该 unix socket
