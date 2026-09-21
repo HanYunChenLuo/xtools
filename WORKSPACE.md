@@ -130,6 +130,8 @@
 - [x] ~~**问题反馈（一键收集日志 → GitLab issue）**~~（**已完成**，2026-09-17，`feature/feedback`）：core `feedback.rs`（收集+打包+上传纯 Rust——tar/flate2/reqwest rustls，零系统命令依赖）+ CLI `--feedback` + GUI 顶栏「问题反馈」按钮与描述浮层。采集范围按用户拍板收敛为 **xperf 自身证据**（不含设备 logcat，issue 正文引导手动附加）：1h mtime 过滤的会话产物（排除 pftrace/mp4/html 大文件，正文列路径）+ GUI diag 尾段 + 各设备 agent.log（网关除外）+ manifest 环境信息；逐项自检清单缺失如实标注；单文件 >32MB 截尾。token：`GITLAB_TOKEN` env > `~/.config/xperf/gitlab-token`；附件 413 超限回退 package registry；labels 失败去 labels 重试；上传失败归档保留报错附路径。**真机回归全通**：本地无设备/SSH 远程 3 设备 agent 日志/采样后会话产物收集/token 缺失错误路径（exit 1）/GUI 浮层键盘驱动提交全链/**真实上传 issue #1 创建+附件回下载可解包**（测试用 token 取 hppc git-credentials）。**AX 新教训**（已入 CLAUDE.md）：本实例 WKWebView 子树冻结于启动早期快照（递归遍历也拿不到新内容），键盘驱动焦点链是可行替代；侧栏按钮点击本身未目验（走查+构造器完成佐证，留给用户一眼确认）
 - [x] ~~**截屏与录屏**~~（**已完成**，2026-09-12 主体 + 2026-09-14 并存缺陷核销，`feature/screen-capture` 合 main）：截屏=`adb exec-out screencap -p` 直写本机 PNG（PNG 魔数偏移定位剥 stdout 前缀警告——SS4 实踩）；录屏=scrcpy `--no-window --record`（复用镜像隧道双钉同号全链路；停止 SIGINT 优雅封盘 ≤3s 宽限 SIGKILL 兜底；CLI 倒计时从首帧落盘起算；产物核验防假阳性；**启动未建流自动重试一次**——设备端 server 启动偶发中止的自愈，CLI/GUI 同策略，GUI 前端 `retrying` 状态）。CLI `--screenshot`/`--record N`（独立+采样并行同窗口）；GUI 侧栏「屏幕捕获」区截屏按钮+录屏 toggle（AX 目验通过）。真机回归 SS3/SS4 全通，镜像+录屏并存 13 连过
 
+- [ ] **下一会话：GUI 完整回归与压力测试**：补齐 `xperf-gui` 的正常、异常、边界和故障注入覆盖，以 `scripts/gui_debug_accept.py` 为基础覆盖全部 Tauri command、前端按钮、事件状态机、模态 `alertBox`、多设备并行、SSH 本机/远程/临时连接、ssh config 导入、adb 设置持久化、Perfetto/Simpleperf、镜像/录屏、logcat、基线和反馈链路；增加重复点击、快速切 tab、设备断连重连、SSH 隧道重建、WebKit 子进程退出等回归场景。补充可重复压力测试：长时间采样与 logcat 洪泛、trace/stack 并发、图表高频数据、多设备页切换、浏览器按钮连点、CPU/内存/DOM 增长监测；测试启动统一使用 `setsid nohup ... </dev/null`，避免 SIGHUP 污染结果。产出自动化脚本、覆盖清单和稳定性基线，在新会话实施。
+
 ---
 
 ## J. Agent 能力提供（Claude Code / Codex，2026-09-18 review 排期）
