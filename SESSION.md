@@ -5,7 +5,25 @@
 > 待办事项（backlog）在 `WORKSPACE.md` 维护，本文件只做历史追溯。
 > 新会话开始时可先读本文件了解近期上下文。
 
-## 2026-09-20：hppc 编译修复 + AppImage Ubuntu 24.04 点击无响应修复 + v0.3.1 发版
+## 2026-09-20（下午·二）：GUI 远程下拉过滤 ssh config 主机 + 「从 ssh config 导入」选择器
+
+**任务**：用户反馈「ssh 中应该要过滤掉这种非主机名称」——kong 22.04 实测中用户在「连接」下拉误选了 `gerrit.it.chehejia.com`（ssh config 里的 Gerrit 服务别名，29418 端口）导致连接失败。用户追加需求：已有 ssh config 主机应能直接添加（免手动重填 IP/用户名/端口）。
+
+**方案（opt-in 语义）**：「非主机名称」无可靠判据（gerrit 的 HostName/端口在 ssh config 里是合法主机形态），不做黑名单猜测——连接下拉只列 remotes.json 已保存配置；ssh config 主机的入口改为「＋」表单顶部的「从 ssh config 导入」选择器：新命令 `list_ssh_host_details` 逐台 `ssh -G` 展开生效 HostName/User/Port（含 Include/通配段合并，纯文件解析做不到），选中即一键填充全部字段，已保存条目（name/host 对 alias/hostname）自动过滤。`host_ssh_path` 从 core transport 导出（GUI 与隧道栈同一条 ssh 解析链）。
+
+**表单精简（用户追加需求）**：「＋」表单只留 SSH 连接字段（名称/`user@host`/SSH 端口/密码 + 导入选择器），删 adb 路径/adb 端口及「保存到 ssh config」勾选；「连接」临时零保存，「保存并连接」写 remotes.json 且名称必填。ssh config 导入主机以别名保存，连接时继承用户已有配置；adb 设置入口移到设备页侧栏新增「远程主机」区块（仅 SSH 模式显示，`remoteUI.updateSidebars` 全局同步）：显示当前连接主机 + adb 路径/端口编辑 + 保存（全量 upsert 该主机 remotes 条目，提示重连生效；临时目标无条目时弹模态提示先在表单保存）。
+
+**验证**（当日 hppc webview 存活期仅几十秒——后证实为 SIGHUP 所致非 GPU 抢占，见下方调查条目；当时的绕行方案是验证转 kong 22.04 真机 + hppc→kong 真连接）：连接下拉只剩「本机」+ remotes.json 条目 ✓；kong 导入列表 5 台（alias → hostname 回显）✓；选中 li3d → 字段填充（10.245.17.78/li3d/22）✓；hppc 写入测试条目 kong 后重开表单被正确过滤 ✓；表单字段清单无 adb 两项 ✓；本机模式区块 hidden ✓；真实用户路径（下拉选 kong → switchTo → SSH 隧道 + 设备枚举）连接成功后区块 visible + label=kong + adb 值填充 ✓；改值保存 → remotes.json 更新（/custom/adb/5039）+ 状态提示「重连后生效」✓；切回本机区块隐藏 ✓。全量 core 166+8 / CLI 12 / GUI 16 绿，clippy/doc 零警告。
+
+**关键教训**：① hppc 上 GUI 前端验证「webview 存活期仅几十秒」——**当晚已修正归因：真凶是 SIGHUP**（经工具会话启动 GUI 时，会话清理的 SIGHUP 杀死 WebKitWebProcess——`nohup` 只保护主进程，webkit 子进程初始化时恢复默认信号处理照样中招；`setsid` 完全脱离会话后 5 分钟稳定实证。当日白天曾误归因为 Playwright/Chrome GPU 抢占，验证一律改用 `setsid` 启动即可在本机进行）；② debug API 的 `/api/dom` 是 GET（POST 405）、action/eval 须带 `Content-Type: application/json`（curl --data 默认 x-www-form-urlencoded 会被 axum Json 拒绝）；③ dom 快照只读 HTML 属性，input 的 value 须用 eval 读 DOM property。
+
+**表单交互逻辑修正（用户追加反馈×5 轮）**：① 双按钮——「连接」（临时零保存：`user@host` 原样走 `connect_remote`，后端加 `ssh_port` 参数支持临时非 22 端口）与「保存并连接」（名称必填，写 remotes.json）；② **删「保存到 ssh config」勾选**——工具不再写用户 ssh config（`add_ssh_host` 删 `save_to_ssh_config` 分支，core `save_ssh_config_host` 保留为库 API）；导入的主机以别名保存（host 栏填别名而非展开 user@IP——别名继承 config 的 HostName/User/密钥/跳板，展开反而丢配置）；③ 主机与用户名合并单栏 `user@host`（lastIndexOf('@') 拆分，后端对已含 @ 的 host 防御不重复拼）；④ SSH 端口默认 22；⑤ placeholder 精简；⑥ **校验/失败提示改模态对话框**（`alertBox` = tauri-plugin-dialog message，原生窗口占用焦点；模态只挂起触发 handler 的 await，JS 事件循环不阻塞——debug API 验证对话框期间 eval 仍响应）。**review 修复 3 项**：prev 查找按展开形态比对（`user@host` vs 已存条目——拆分后纯 host 匹配不上致重存丢 adb 自定义，密码重试路径必踩）；rfConnect 成功后清密码框；下拉 option 的 name/host 补 escHtml 转义（既有代码顺手修）；侧栏 host label 加 word-break（长 hostname 换行）。验证（debug API）：双按钮+无 checkbox 结构 ✓；`someuser@9.9.9.9` 保存 → remotes 正确且 ssh config 逐字节未动 ✓；**prev 修复：预置 adb=/custom/adb 后重存同主机 → adb/port 保留** ✓（首验失败是脚本时序——GUI 启动后才写 remotes.json，前端缓存还是空列表；真实场景配置在启动前已存在）；导入 103server → host 栏=别名 ✓；空名 → 模态对话框 + 不落盘 ✓；「连接」kong 真连接零写入 + 下拉补临时选项 + 侧栏区块 ✓。坑：debug API check op 参数是 `value` 非 `checked`；switchTo 成功后须 populate 刷新下拉。**接受残余**：连接态下侧栏 adb 输入框编辑中途遇设备热插拔会被幂等刷新重置（低频）；侧栏「未连接远程主机」防御分支保留状态栏提示（不可达路径不弹原生框）。
+
+**模态对话框推广（用户追加反馈×6）**：`alertBox`（tauri-plugin-dialog message）推广到全部「用户主动操作的直接失败」——25 处（获取 root/镜像/截屏/录屏/logcat 启动切换/应用操作×3/录制 invoke×2/开始监控 invoke/打开 UI×2/导出/基线×2/更新脚本/清理/GitLab×2/反馈提交 + 包名 guard×4 + 上一轮的远程表单类）。**分类原则**：直接操作失败 → 模态（用户在等结果）；长时异步事件流失败 → 状态栏（trace/stack 分析阶段失败已自动切页有反馈、sampling-error 可能发生在长时采样中途——模态打断用户；远程连接失败保留长诊断+密码表单接力）。验证：包名 guard 走模态（status 无旧文本）+ 对话框期间 eval 响应 ✓。`await alertBox` 的 async 合法性由 node --check 语法保证（非 async 上下文 await 即语法错）。**「打开浏览器」按钮防连点（×7）**：open-perf/open-stack 按钮加进行中 disabled（首次镜像下载可达数秒，此窗口最易连点）+ 完成后 600ms 冷却双保险——验证：假路径触发连点 3 次 → 仅第一次进入 invoke（`btnDisabled:true` + `cooled:true`，错误 alertBox 挂起期间按钮保持禁用挡住后续点击）；观测坑：_diag 在 alertBox await 之后，对话框开着时日志不落——验证守卫态须用 eval 直读。
+
+**遗留**：用户原始问题「kong 22.04 UI 无响应」仍未复现（v0.3.0/v0.3.1 在 kong 全链路正常，10×10 是无害辅助窗口的误判）；已请用户下次复现时保留现场（debug API + 进程状态即可定位）。本轮曾为疑似「X11 下窗口 10×10」实现过 X11 直调 resize 修复，kong 对照验证证伪后**已全部回滚**（正常 X11 桌面 tao/tauri resize 无问题，hppc XWayland 强制 X11 的人为场景不算数）。
+
+## 2026-09-20（上午）：hppc 编译修复 + AppImage Ubuntu 24.04 点击无响应修复 + v0.3.1 发版
 
 **任务**：① hppc 上 `cargo run --bin xperf-gui --release` 编译错误（Linux 直编）；② 用户实测 v0.3.0 AppImage UI 点击全无响应（如新增 SSH 登录）。
 

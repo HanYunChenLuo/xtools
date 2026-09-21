@@ -15,17 +15,15 @@
       </select>
       <button id="remoteAddBtn" class="small" title="新增远程连接">＋</button>
       <div id="remoteForm" class="hidden">
-        <input id="rfName" placeholder="名称（如 myserver；保存到 ssh config 时作 Host 别名）" autocomplete="off" />
-        <input id="rfHost" placeholder="主机 IP 或 hostname（也可填已有 ssh 别名）" autocomplete="off" />
+        <select id="rfImport" title="从 ~/.ssh/config 选一台已配置主机，一键填充下方字段（HostName/用户名/端口取 ssh 生效配置）"><option value="">从 ssh config 导入…</option></select>
+        <input id="rfName" placeholder="名称（保存时必填）" autocomplete="off" />
+        <input id="rfHost" placeholder="用户名@主机（可只填主机或 ssh 别名）" autocomplete="off" />
+        <input id="rfSshPort" type="number" min="1" max="65535" value="22" title="SSH 端口（默认 22）" />
+        <input id="rfPassword" type="password" placeholder="密码（空=密钥/免密）" autocomplete="new-password" title="仅本次连接内存使用，永不落盘" />
         <div class="rf-row">
-          <input id="rfUser" placeholder="用户名（可空=当前用户）" autocomplete="off" />
-          <input id="rfSshPort" placeholder="SSH 22" type="number" min="1" max="65535" title="SSH 端口（默认 22）" />
+          <button id="rfConnect" class="small flex-fill" title="仅本次连接，不保存任何配置">连接</button>
+          <button id="rfSave" class="small flex-fill" title="保存配置（名称必填）并连接">保存并连接</button>
         </div>
-        <input id="rfPassword" type="password" placeholder="密码（空=走已有密钥/ssh config 免密；仅本次连接内存使用，不落盘）" autocomplete="new-password" />
-        <label class="rf-savecfg" title="只写 HostName/用户名/端口，密码与密钥永不写入"><input id="rfSaveCfg" type="checkbox" checked /> 保存到 ~/.ssh/config（零秘密，方便后续直接选用）</label>
-        <input id="rfAdb" placeholder="远端 adb 路径（默认 adb，连接时自动探测标准 SDK 位置）" autocomplete="off" />
-        <input id="rfPort" placeholder="adb 端口 5037" type="number" min="1" max="65535" title="远端 adb server 端口（默认 5037）" />
-        <button id="rfSave" class="small">保存并连接</button>
       </div>
     </div>
     <nav id="deviceTabs"></nav>
@@ -98,6 +96,17 @@
           <button class="small flex-fill compare-baseline-btn" title="当前会话与已存基线逐指标对比（回归/改善/持平）">对比基线</button>
         </div>
         <button class="small clean-btn">清理缓存与数据</button>
+        <div class="sidebar-remote hidden">
+          <h3>远程主机</h3>
+          <div class="remote-host-label" title="当前 SSH 远程后端（本机模式不显示此区块）">—</div>
+          <label>adb 路径:
+            <input class="remote-adb-input" type="text" placeholder="adb（留空=连接时自动探测）" autocomplete="off" />
+          </label>
+          <label>adb 端口:
+            <input class="remote-port-input" type="number" min="1" max="65535" placeholder="5037" />
+          </label>
+          <button class="small remote-adb-save" title="写入该主机的已保存配置；下次连接生效">保存 adb 设置</button>
+        </div>
       </aside>
       <section class="main-area">
         <div class="tab-bar">

@@ -13,6 +13,16 @@ xperf-gui 内嵌**默认开启**的 loopback 调试接口（`XPERF_GUI_DEBUG=0` 
 AX 树（WKWebView AX 冻结于启动早期快照，不可靠）。设计与完整语义见仓库
 `docs/DESIGN-gui-debug.md` 与 CLAUDE.md「GUI 可编程调试接口」节。
 
+## 启动方式
+
+GUI 的 WebKit 子进程不能依赖当前终端会话存活。终端、SSH 或 agent shell 启动时使用独立会话，避免宿主会话结束发送 `SIGHUP` 导致主窗口保留但 DOM/点击无响应：
+
+```bash
+setsid nohup xperf-gui > /tmp/xperf-gui.log 2>&1 < /dev/null &
+```
+
+仅使用 `nohup` 不足以保护 WebKit 子进程。桌面启动器直接启动不受该问题影响。若接口突然连续返回前端超时，先检查 `WebKitWebProcess` 子进程和启动会话；不要先归因于 GPU 或 AppImage 沙箱。
+
 ## 发现与鉴权
 
 ```bash

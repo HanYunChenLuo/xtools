@@ -23,7 +23,10 @@ use anyhow::{bail, Context, Result};
 ///
 /// `XPERF_SSH` is an explicit override. Otherwise use the inherited PATH and the
 /// system/Homebrew locations commonly used on macOS.
-fn host_ssh_path() -> PathBuf {
+///
+/// Public so the GUI can spawn `ssh -G` for its "import from ssh config" picker
+/// with the same resolution order as the tunnel stack.
+pub fn host_ssh_path() -> PathBuf {
     let mut candidates = Vec::new();
     if let Some(path) = std::env::var_os("XPERF_SSH") {
         candidates.push(PathBuf::from(path));

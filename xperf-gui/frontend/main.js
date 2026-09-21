@@ -313,6 +313,9 @@ function pushCapped(arr, item) {
 
 // 悬停读数浮层用 innerHTML 拼装；序列名可能来自设备 dumpsys（图层名），须转义
 function escHtml(s) { return s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
+// 模态警告对话框（原生 tauri-plugin-dialog）：占用焦点，关闭前阻塞用户其他操作——
+// 用于表单校验类警告/失败（替代顶栏状态栏文本——非阻塞且易被后续事件覆盖）
+const alertBox = (msg, kind = 'warning') => window.__TAURI__.dialog.message(msg, { title: 'XPerformance', kind });
 // 读数格式化：最多两位小数去尾零（值在 push 时已按指标精度取整，这里只兜住 mem/freq 的原始浮点）
 function fmtChartVal(v) { return String(Number(v.toFixed(2))); }
 
@@ -743,7 +746,7 @@ class DeviceSession {
       this.setStatus(msg + '（下次采样/重连后全指标生效）');
       _diag('[' + this.serial + '] rootBtn: OK');
     } catch (e) {
-      this.setStatus('获取 root 失败: ' + (e && e.message ? e.message : e));
+      await alertBox('获取 root 失败: ' + (e && e.message ? e.message : e), 'error');
       _diag('[' + this.serial + '] rootBtn ERROR: ' + (e && e.message ? e.message : JSON.stringify(e)));
       this.updatePermBadge(); // 失败回恢复按 rooted 状态决定按钮可用性
     }
@@ -767,7 +770,7 @@ class DeviceSession {
         // 按钮复位由监护线程的 mirror exited 事件完成（进程真正退出后）
       }
     } catch (e) {
-      this.setStatus('屏幕镜像失败: ' + (e && e.message ? e.message : e));
+      await alertBox('屏幕镜像失败: ' + (e && e.message ? e.message : e), 'error');
       _diag('[' + this.serial + '] mirrorBtn ERROR: ' + (e && e.message ? e.message : JSON.stringify(e)));
       this.mirrorRunning = false;
       btn.textContent = '屏幕镜像';
@@ -805,7 +808,7 @@ class DeviceSession {
       this.setStatus('截屏已保存: ' + path);
       _diag('[' + this.serial + '] shot: ' + path);
     } catch (e) {
-      this.setStatus('截屏失败: ' + (e && e.message ? e.message : e));
+      await alertBox('截屏失败: ' + (e && e.message ? e.message : e), 'error');
       _diag('[' + this.serial + '] shot ERROR: ' + (e && e.message ? e.message : JSON.stringify(e)));
     }
     btn.disabled = false;
@@ -829,7 +832,7 @@ class DeviceSession {
         // 按钮复位由监护线程的 record 事件完成（进程封盘退出后）
       }
     } catch (e) {
-      this.setStatus('录屏失败: ' + (e && e.message ? e.message : e));
+      await alertBox('录屏失败: ' + (e && e.message ? e.message : e), 'error');
       _diag('[' + this.serial + '] record ERROR: ' + (e && e.message ? e.message : JSON.stringify(e)));
       this.recording = false;
       btn.textContent = '录屏';
@@ -894,7 +897,7 @@ class DeviceSession {
         _diag('[' + this.serial + '] logcat: stopped');
       }
     } catch (e) {
-      this.setStatus('logcat 失败: ' + (e && e.message ? e.message : e));
+      await alertBox('logcat 失败: ' + (e && e.message ? e.message : e), 'error');
       _diag('[' + this.serial + '] logcat ERROR: ' + (e && e.message ? e.message : JSON.stringify(e)));
       this.logcatRunning = false;
       btn.textContent = '开始抓取';
@@ -922,7 +925,7 @@ class DeviceSession {
       _diag('[' + this.serial + '] logcat: restarted (' + (byPkg ? 'pkg=' + pkg : 'all') + ', level=' + this.el('logcat-level').value + ', text=' + (text || '(none)') + ')');
     } catch (e) {
       // 解析失败（如 A11 按包过滤但应用未运行）：旧口径继续抓，如实提示
-      this.setStatus('logcat 切换失败（旧口径继续）: ' + (e && e.message ? e.message : e));
+      await alertBox('logcat 切换失败（旧口径继续）: ' + (e && e.message ? e.message : e), 'error');
       _diag('[' + this.serial + '] logcat restart ERROR: ' + (e && e.message ? e.message : JSON.stringify(e)));
     }
   }
@@ -1147,7 +1150,7 @@ class DeviceSession {
   // ---- 打开/重启应用（顺带测冷启动；activity 留空自动解析主入口） ----
   async launchOrRestart(kind) { // kind: '打开' | '重启'
     const pkg = this.package();
-    if (!pkg) { this.setStatus('请先填写包名'); return; }
+    if (!pkg) { await alertBox('请先填写包名', 'warning'); return; }
     const activity = this.el('activity-input').value.trim();
     const btn = this.el(kind === '打开' ? 'launch-btn' : 'restart-btn');
     btn.disabled = true;
@@ -1159,7 +1162,7 @@ class DeviceSession {
       // r 是 serde 序列化的数据对象（无 Rust 方法）；摘要前端自拼
       _diag(`[${this.serial}] ${kind}应用: ${r.activity} TotalTime=${r.total_time_ms}ms WaitTime=${r.wait_time_ms}ms`);
     } catch (e) {
-      this.setStatus(`${kind}应用失败: ${e && e.message ? e.message : e}`);
+      await alertBox(`${kind}应用失败: ${e && e.message ? e.message : e}`, 'error');
       _diag(`[${this.serial}] ${kind}应用 ERROR: ` + (e && e.message ? e.message : JSON.stringify(e)));
     } finally {
       btn.disabled = false;
@@ -1169,7 +1172,7 @@ class DeviceSession {
   // ---- 停止应用（am force-stop 清场） ----
   async stopApp() {
     const pkg = this.package();
-    if (!pkg) { this.setStatus('请先填写包名'); return; }
+    if (!pkg) { await alertBox('请先填写包名', 'warning'); return; }
     const btn = this.el('stop-app-btn');
     btn.disabled = true;
     this.setStatus(`停止应用中: ${pkg}…`);
@@ -1178,7 +1181,7 @@ class DeviceSession {
       this.setStatus(msg);
       _diag(`[${this.serial}] 停止应用: ${msg}`);
     } catch (e) {
-      this.setStatus(`停止应用失败: ${e && e.message ? e.message : e}`);
+      await alertBox(`停止应用失败: ${e && e.message ? e.message : e}`, 'error');
       _diag(`[${this.serial}] 停止应用 ERROR: ` + (e && e.message ? e.message : JSON.stringify(e)));
     } finally {
       btn.disabled = false;
@@ -1383,14 +1386,14 @@ class DeviceSession {
   // 进度在状态栏与报告区可见，done/error 时自动切到分析页）
   async startTraceRecording(seconds) {
     const pkg = this.package();
-    if (!pkg) { this.setStatus('请先填写包名'); return; }
+    if (!pkg) { await alertBox('请先填写包名', 'warning'); return; }
     try {
       await invoke('start_trace', { serial: this.serial, package: pkg, seconds });
       this.setTraceButtons(true);
       this.setStatus('Perfetto 分析录制中: ' + pkg);
       _diag('[' + this.serial + '] traceBtn: ' + pkg + ' ' + seconds + 's');
     } catch (err) {
-      this.setStatus('Perfetto 分析错误: ' + err);
+      await alertBox('Perfetto 分析错误: ' + err, 'error');
       _diag('[' + this.serial + '] traceBtn invoke ERROR: ' + JSON.stringify(err));
     }
   }
@@ -1398,14 +1401,14 @@ class DeviceSession {
   // 启动 simpleperf 录制+报告（分析页 toolbar 入口，同上）
   async startStackRecording(seconds) {
     const pkg = this.package();
-    if (!pkg) { this.setStatus('请先填写包名'); return; }
+    if (!pkg) { await alertBox('请先填写包名', 'warning'); return; }
     try {
       await invoke('start_stack', { serial: this.serial, package: pkg, seconds });
       this.setStackButtons(true);
       this.setStatus('Simpleperf 分析录制中: ' + pkg);
       _diag('[' + this.serial + '] stackBtn: ' + pkg + ' ' + seconds + 's');
     } catch (err) {
-      this.setStatus('Simpleperf 错误: ' + err);
+      await alertBox('Simpleperf 错误: ' + err, 'error');
       _diag('[' + this.serial + '] stackBtn invoke ERROR: ' + JSON.stringify(err));
     }
   }
@@ -1545,7 +1548,7 @@ class DeviceSession {
       if (!this.agentBuilding) this.setStatus('监控中: ' + f.package);
     } catch (e) {
       this.agentBuilding = false;
-      this.setStatus('错误: ' + e);
+      await alertBox('开始监控失败: ' + e, 'error');
       _diag('[' + this.serial + '] startBtn invoke ERROR: ' + JSON.stringify(e));
     }
   }
@@ -1706,16 +1709,23 @@ class DeviceSession {
       this.startTraceRecording(parseInt(this.el('trace-seconds').value, 10) || 10);
     });
     // 打开浏览器 Perfetto UI 并自动加载 trace：本地镜像 UI + 同源深链（全自动）；
-    // 离线/镜像失败自动回退拖拽方式（后端 open_perfetto_ui 处理，msg 含结果说明）
+    // 离线/镜像失败自动回退拖拽方式（后端 open_perfetto_ui 处理，msg 含结果说明）。
+    // 防连点开多个重复标签：进行中 disabled（首次镜像下载可达数秒）+ 完成后短冷却
     this.el('open-perf-btn').addEventListener('click', async () => {
-      if (!this.currentTracePath) return;
+      const btn = this.el('open-perf-btn');
+      if (!this.currentTracePath || btn.disabled) return;
+      if (Date.now() - (this._lastPerfOpen || 0) < 600) return;
+      this._lastPerfOpen = Date.now();
+      btn.disabled = true;
       try {
         const msg = await invoke('open_perfetto_ui', { tracePath: this.currentTracePath });
         this.setStatus(msg);
         _diag('[' + this.serial + '] openPerfBtn: ' + msg);
       } catch (err) {
-        this.setStatus('打开 Perfetto UI 失败: ' + err);
+        await alertBox('打开 Perfetto UI 失败: ' + err, 'error');
         _diag('[' + this.serial + '] openPerfBtn ERROR: ' + JSON.stringify(err));
+      } finally {
+        btn.disabled = false;
       }
     });
 
@@ -1724,16 +1734,22 @@ class DeviceSession {
       this.startStackRecording(parseInt(this.el('stack-seconds').value, 10) || 10);
     });
     // 打开浏览器火焰图：report_html.py 渲染 .data 为单文件 HTML（首次自动下载 AOSP
-    // 脚本 ~10MB，需 python3）；HTML 新于 .data 时复用不重渲染
+    // 脚本 ~10MB，需 python3）；HTML 新于 .data 时复用不重渲染。防连点同上
     this.el('open-stack-btn').addEventListener('click', async () => {
-      if (!this.currentStackPath) return;
+      const btn = this.el('open-stack-btn');
+      if (!this.currentStackPath || btn.disabled) return;
+      if (Date.now() - (this._lastStackOpen || 0) < 600) return;
+      this._lastStackOpen = Date.now();
+      btn.disabled = true;
       try {
         const msg = await invoke('open_stack_html', { dataPath: this.currentStackPath });
         this.setStatus(msg);
         _diag('[' + this.serial + '] openStackBtn: ' + msg);
       } catch (err) {
-        this.setStatus('打开火焰图失败: ' + err);
+        await alertBox('打开火焰图失败: ' + err, 'error');
         _diag('[' + this.serial + '] openStackBtn ERROR: ' + JSON.stringify(err));
+      } finally {
+        btn.disabled = false;
       }
     });
 
@@ -1744,7 +1760,7 @@ class DeviceSession {
         const dir = await invoke('export_csv', { serial: this.serial });
         this.setStatus('已导出: ' + dir);
       } catch (e) {
-        this.setStatus('导出失败: ' + e);
+        await alertBox('导出失败: ' + e, 'error');
       }
     });
     this.el('save-baseline-btn').addEventListener('click', async () => {
@@ -1755,7 +1771,7 @@ class DeviceSession {
         const path = await invoke('save_baseline', { package: pkg, intervalMs, cpu: d.cpu, mem: d.mem, fps: d.fps, gpu: d.gpu, io: d.io, net: d.net });
         this.setStatus('基线已保存（覆盖旧基线）: ' + path);
       } catch (e) {
-        this.setStatus('基线保存失败: ' + e);
+        await alertBox('基线保存失败: ' + e, 'error');
       }
     });
     this.el('compare-baseline-btn').addEventListener('click', async () => {
@@ -1768,7 +1784,7 @@ class DeviceSession {
         this.el('panel-baseline').classList.remove('hidden');
         this.setStatus('基线对比完成');
       } catch (e) {
-        this.setStatus('基线对比失败: ' + e);
+        await alertBox('基线对比失败: ' + e, 'error');
       }
     });
     // 更新火焰图脚本：从 AOSP 强制重新拉取 vendor 文件（覆盖后 git 提交同步到其他机器）
@@ -1779,7 +1795,7 @@ class DeviceSession {
         this.setStatus(msg);
         _diag('[' + this.serial + '] updateScripts: OK');
       } catch (err) {
-        this.setStatus('更新火焰图脚本失败: ' + err);
+        await alertBox('更新火焰图脚本失败: ' + err, 'error');
         _diag('[' + this.serial + '] updateScripts ERROR: ' + JSON.stringify(err));
       }
     });
@@ -1797,9 +1813,24 @@ class DeviceSession {
         this.setStatus(msg);
         _diag('cleanBtn: ' + msg);
       } catch (err) {
-        this.setStatus('清理失败: ' + err);
+        await alertBox('清理失败: ' + err, 'error');
         _diag('cleanBtn ERROR: ' + JSON.stringify(err));
       }
+    });
+    // 远程主机 adb 设置：写入当前连接主机的已保存配置（下次连接生效）。
+    // 区块仅 ssh 模式可见（remoteUI.updateSidebars 控制），全局状态每设备页同份。
+    this.el('remote-adb-save').addEventListener('click', async () => {
+      const host = remoteUI.connectedHost;
+      if (!host) { this.setStatus('未连接远程主机'); return; }
+      const r = (remoteUI.remotes || []).find(x => x.host === host || x.name === host);
+      if (!r) { await alertBox('该远程是临时目标（未保存配置），先在「＋」表单保存后才能改 adb 设置', 'warning'); return; }
+      const adb = this.el('remote-adb-input').value.trim() || 'adb';
+      const port = parseInt(this.el('remote-port-input').value, 10) || 5037;
+      try {
+        await invoke('save_remote', { cfg: { ...r, adb_path: adb, remote_port: port } });
+        remoteUI.remotes = await invoke('list_remotes');
+        this.setStatus('adb 设置已保存，重连 ' + host + ' 后生效');
+      } catch (e) { await alertBox('保存失败: ' + e, 'error'); }
     });
   }
 }
@@ -1822,6 +1853,9 @@ const app = {
     const s = new DeviceSession(info.serial, info);
     this.sessions.set(info.serial, s);
     s.loadPackages();
+    // 新设备页的侧栏「远程主机」区块默认隐藏，按当前全局连接状态幂等补齐
+    // （热插拔在 ssh 模式下新建页时也正确显示）
+    remoteUI.updateSidebars();
     if (this.active === null) this.switchDevice(info.serial);
     this.refreshTabLabels();
     return s;
@@ -2041,16 +2075,15 @@ const remoteUI = {
 
   async populate(currentHost) {
     const sel = document.getElementById('remoteSelect');
-    let remotes = [], sshHosts = [];
+    let remotes = [];
     try { remotes = await invoke('list_remotes'); } catch (e) { _diag('list_remotes ERROR: ' + JSON.stringify(e)); }
-    this.remotes = remotes; // 供 reopenForPassword 查找回填
-    try { sshHosts = await invoke('list_ssh_hosts'); } catch (e) { _diag('list_ssh_hosts ERROR: ' + JSON.stringify(e)); }
-    // 已保存配置优先；ssh_config 主机补充（跳过与已保存条目同 host/name 的）
-    const savedKeys = new Set(remotes.flatMap(r => [r.host, r.name]));
-    const extra = sshHosts.filter(h => !savedKeys.has(h));
+    this.remotes = remotes; // 供 reopenForPassword / refreshImportList 查回填
+    // 下拉只列已保存配置（remotes.json）——ssh config 主机不自动进入：其中混有
+    // Gerrit/GitLab 等服务别名（如 29418 端口的 gerrit），无可靠判据区分「真机
+    // 后端」，自动列出只会制造误选（2026-09-20 用户实测踩坑）。ssh config 主机
+    // 的入口改为「＋」表单的「从 ssh config 导入」选择器（refreshImportList）。
     sel.innerHTML = '<option value="">本机</option>' +
-      remotes.map(r => `<option value="${r.host}">${r.name}</option>`).join('') +
-      extra.map(h => `<option value="${h}">${h}（ssh）</option>`).join('');
+      remotes.map(r => `<option value="${escHtml(r.host)}">${escHtml(r.name)}</option>`).join('');
     sel.value = currentHost || '';
     if (currentHost && sel.value !== currentHost) {
       // 未保存的临时目标（--remote 启动）：补一个选项显示
@@ -2062,8 +2095,24 @@ const remoteUI = {
     }
   },
 
-  // 认证失败重试：预填表单（只欠输密码）。target 可能是 remotes.json 的
-  // name/host（可全量预填），也可能是 ssh config 来源的下拉项（无保存配置，
+  // 「＋」表单的「从 ssh config 导入」选择器：列出未保存过的 ssh config 主机
+  // （alias → hostname），选中即填充全部字段（端口/用户名取 ssh -G 生效配置，
+  // 含 Include/通配段合并——手动抄 config 拿不到这些）。
+  async refreshImportList() {
+    const sel = document.getElementById('rfImport');
+    let details = [];
+    try { details = await invoke('list_ssh_host_details'); } catch (e) { _diag('list_ssh_host_details ERROR: ' + JSON.stringify(e)); }
+    this.sshDetails = details; // change 事件取结构化数据
+    const saved = new Set((this.remotes || []).flatMap(r => [r.name, r.host]));
+    const opts = details.filter(d => !saved.has(d.alias) && !saved.has(d.hostname));
+    sel.innerHTML = '<option value="">' +
+      (opts.length ? `从 ssh config 导入…（${opts.length} 台可选）` : '从 ssh config 导入…（无可用主机）') +
+      '</option>' +
+      opts.map(d => `<option value="${escHtml(d.alias)}">${escHtml(d.alias)} → ${escHtml(d.hostname)}</option>`).join('');
+  },
+
+  // 认证失败重试：预填表单（只欠输密码）。target 是 remotes.json 的
+  // name/host（可全量预填）或临时目标（--remote 启动，无保存配置，
   // 仅预填目标本身）
   reopenForPassword(target) {
     const form = document.getElementById('remoteForm');
@@ -2071,25 +2120,46 @@ const remoteUI = {
     if (r) {
       document.getElementById('rfName').value = r.name;
       document.getElementById('rfHost').value = r.host;
-      document.getElementById('rfAdb').value = r.adb_path || '';
-      document.getElementById('rfPort').value = r.remote_port || 5037;
-      if (r.ssh_port) document.getElementById('rfSshPort').value = r.ssh_port;
+      document.getElementById('rfSshPort').value = r.ssh_port || 22;
     } else {
       document.getElementById('rfName').value = target;
       document.getElementById('rfHost').value = target;
+      document.getElementById('rfSshPort').value = 22;
     }
     form.classList.remove('hidden');
+    this.refreshImportList();
     document.getElementById('rfPassword').focus();
   },
 
-  async switchTo(host, password) {
+  // 设备页侧栏「远程主机」区块同步：仅 SSH 远程模式显示，填充当前连接主机与
+  // 已保存的 adb 设置（连接状态是全局单例，遍历所有设备页统一刷新——含
+  // 热插拔新建页，addDevice 后也会调本方法幂等补齐）
+  updateSidebars() {
+    const host = this.connectedHost || null;
+    document.querySelectorAll('.sidebar-remote').forEach(box => {
+      box.classList.toggle('hidden', !host);
+      if (!host) return;
+      box.querySelector('.remote-host-label').textContent = host;
+      const r = (this.remotes || []).find(x => x.host === host || x.name === host);
+      box.querySelector('.remote-adb-input').value = r ? r.adb_path : '';
+      box.querySelector('.remote-port-input').value = r ? r.remote_port : '';
+    });
+  },
+
+  // 切换远程目标：host 为 remotes 条目（name/host）、ssh 别名或 `user@host` 临时目标。
+  // sshPort 仅临时目标生效（无 remotes 配置时的非 22 端口；已保存配置以配置为准）
+  async switchTo(host, password, sshPort) {
     const sel = document.getElementById('remoteSelect');
     sel.disabled = true;
     this.setGlobalStatus(host ? '正在连接 ' + host + '…' : '正在切回本机…');
     try {
-      const r = await invoke('connect_remote', { host: host || null, password: password || null });
+      const r = await invoke('connect_remote', { host: host || null, password: password || null, sshPort: sshPort || null });
       this.rebuildDevices(r.devices || []);
       this.setGlobalStatus(host ? '已连接远程: ' + host : '本机');
+      this.connectedHost = host || null;
+      // 刷新下拉选中态（临时目标 populate 会补选项显示）；侧栏「远程主机」区块同步
+      await this.populate(host || null);
+      this.updateSidebars();
     } catch (e) {
       const msg = (e && e.toString()) || '连接失败';
       // 密码主机重连（密码不落盘 → 每个新会话都要重输一次）：表单预填重开，只欠输密码
@@ -2097,6 +2167,8 @@ const remoteUI = {
       // init_remote 失败时 core 已保持本机传输；不要再次调用 connect_remote(null)，
       // 否则真实错误会被“已切回本机”覆盖，DMG/Finder 启动时尤其难以诊断。
       sel.value = '';
+      this.connectedHost = null;
+      this.updateSidebars();
       try {
         const r = await invoke('list_devices');
         this.rebuildDevices(r.devices || []);
@@ -2121,34 +2193,73 @@ const remoteUI = {
       const st = await invoke('remote_status');
       if (st.mode === 'ssh') currentHost = st.host;
     } catch (e) { _diag('remote_status ERROR: ' + JSON.stringify(e)); }
+    this.connectedHost = currentHost;
     await this.populate(currentHost);
+    this.updateSidebars();
 
     sel.addEventListener('change', () => this.switchTo(sel.value || null));
 
     const form = document.getElementById('remoteForm');
-    document.getElementById('remoteAddBtn').addEventListener('click', () => form.classList.toggle('hidden'));
+    const addBtn = document.getElementById('remoteAddBtn');
+    addBtn.addEventListener('click', () => {
+      const opening = form.classList.contains('hidden');
+      form.classList.toggle('hidden');
+      // 每次打开刷新导入列表（已保存过滤 + ssh config 变更都实时反映）
+      if (opening) this.refreshImportList();
+    });
+    document.getElementById('rfImport').addEventListener('change', (e) => {
+      const d = (this.sshDetails || []).find(x => x.alias === e.target.value);
+      if (!d) return;
+      document.getElementById('rfName').value = d.alias;
+      // 主机栏填别名（用户 ssh config 已有 Host 条目——连接自动继承其
+      // HostName/User/Port/密钥/跳板配置，比展开成 user@IP 更完整）
+      document.getElementById('rfHost').value = d.alias;
+      document.getElementById('rfSshPort').value = d.port || 22;
+    });
+    // 双按钮：「连接」= 临时零保存；「保存并连接」= 写 remotes.json（名称必填）
+    // 后连接。不写用户 ssh config（remotes.json 已含全部连接信息，工具不碰
+    // 用户配置文件；ssh config 导入的主机以别名保存、连接时继承其配置）
+    const nameInput = document.getElementById('rfName');
+    document.getElementById('rfConnect').addEventListener('click', async () => {
+      // 临时连接：不写 remotes.json，user@host 原样交给 connect_remote
+      const hostRaw = document.getElementById('rfHost').value.trim();
+      const sshPort = parseInt(document.getElementById('rfSshPort').value, 10) || 22;
+      const password = document.getElementById('rfPassword').value;
+      if (!hostRaw) { await alertBox('主机不能为空', 'warning'); return; }
+      document.getElementById('remoteForm').classList.add('hidden');
+      document.getElementById('rfPassword').value = '';
+      await this.switchTo(hostRaw, password || null, sshPort);
+    });
     document.getElementById('rfSave').addEventListener('click', async () => {
-      const name = document.getElementById('rfName').value.trim();
-      const host = document.getElementById('rfHost').value.trim();
-      const user = document.getElementById('rfUser').value.trim();
-      const sshPort = parseInt(document.getElementById('rfSshPort').value, 10) || null;
+      let name = nameInput.value.trim();
+      // 主机栏支持 user@host 合并格式（ssh 惯例）；无 @ 时用户名留空=当前用户
+      const hostRaw = document.getElementById('rfHost').value.trim();
+      const at = hostRaw.lastIndexOf('@');
+      const user = at > 0 ? hostRaw.slice(0, at) : '';
+      const host = at > 0 ? hostRaw.slice(at + 1) : hostRaw;
+      const sshPort = parseInt(document.getElementById('rfSshPort').value, 10) || 22;
       const password = document.getElementById('rfPassword').value; // 不落盘，仅随连接走内存
-      const saveCfg = document.getElementById('rfSaveCfg').checked;
-      const adb = document.getElementById('rfAdb').value.trim() || 'adb';
-      const port = parseInt(document.getElementById('rfPort').value, 10) || 5037;
-      if (!name || !host) { this.setGlobalStatus('远程配置：名称与主机不能为空'); return; }
+      if (!name) { await alertBox('保存需要名称（remotes 配置名）', 'warning'); return; }
+      // adb 设置不在本表单（仅 SSH 连接信息）：同名已有条目沿用，新增默认
+      // adb/5037（预检自动探测远端 SDK 位置）；调整入口在设备页侧栏「远程主机」区块。
+      // 已存条目的 host 是展开形式（user@host 或别名），按展开后形态比对防误覆盖
+      const effectiveLookup = user ? `${user}@${host}` : host;
+      const prev = (this.remotes || []).find(r => r.name === name || r.host === effectiveLookup);
+      const adb = prev ? prev.adb_path : 'adb';
+      const port = prev ? prev.remote_port : 5037;
+      if (!host) { await alertBox('主机不能为空', 'warning'); return; }
       try {
-        // 保存（可选写 ssh config）→ 立即连接（密码随行，仅内存驻留）
+        // 保存（remotes.json，不写用户 ssh config）→ 立即连接（密码随行，仅内存驻留）
         const effective = await invoke('add_ssh_host', {
           cfg: { name, host, user: user || null, ssh_port: sshPort,
-                 adb_path: adb, remote_port: port, save_to_ssh_config: saveCfg },
+                 adb_path: adb, remote_port: port },
         });
         form.classList.add('hidden');
         document.getElementById('rfPassword').value = '';
         await this.populate(null);
         await this.switchTo(effective, password || null);
       } catch (e) {
-        this.setGlobalStatus('保存失败: ' + e);
+        await alertBox('保存失败: ' + e, 'error');
       }
     });
 
@@ -2218,7 +2329,7 @@ const feedbackUI = {
         const who = await invoke('gitlab_login');
         _diag('gitlab_login OK: ' + who);
       } catch (e) {
-        remoteUI.setGlobalStatus('GitLab 登录失败: ' + (e && e.toString()));
+        await alertBox('GitLab 登录失败: ' + (e && e.toString()), 'error');
         _diag('gitlab_login ERROR: ' + JSON.stringify(e));
       } finally {
         loginBtn.disabled = false;
@@ -2229,7 +2340,7 @@ const feedbackUI = {
       try {
         await invoke('gitlab_logout');
       } catch (e) {
-        remoteUI.setGlobalStatus('退出登录失败: ' + (e && e.toString()));
+        await alertBox('退出登录失败: ' + (e && e.toString()), 'error');
       }
       this.refreshAuth();
     });
@@ -2246,7 +2357,7 @@ const feedbackUI = {
         _diag('feedback OK: ' + url);
       } catch (e) {
         const msg = (e && e.toString()) || '未知错误';
-        remoteUI.setGlobalStatus('反馈提交失败: ' + msg);
+        await alertBox('反馈提交失败: ' + msg, 'error');
         _diag('feedback ERROR: ' + msg);
       } finally {
         submitBtn.disabled = false;

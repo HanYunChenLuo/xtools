@@ -58,7 +58,9 @@
 
 ## E. 已知遗留（评估过，低风险不阻塞）
 
+
 - **AppImage 内 libcups 引用 GLIBC_2.36 符号**（2026-09-16 harfbuzz 修复审计发现）：bundle 内 bookworm libcups 2.4.x 引用 `arc4random@GLIBC_2.36`，jammy 仅 2.35——PLT 惰性绑定，启动不受影响（A/B 实测），仅在 jammy 上走到打印路径才会 symbol lookup error；GUI 无打印功能入口，记录不修（若未来暴露打印，方案 = 同 harfbuzz 把 libcups 也排出 bundle 用系统版，或接受 jammy 打印崩）。
+- **GUI 终端启动的 WebKit 子进程会被 SIGHUP 误杀**（2026-09-20 实测）：从 `run_cmd`/终端/SSH 会话直接启动 GUI，宿主会话清理时 `SIGHUP` 可杀 `WebKitWebProcess`，主窗口保留但点击/DOM/API 全无响应；`nohup` 不足，`setsid nohup ... </dev/null` 脱离会话后 5 分钟/60 次探活稳定。属于启动方式约束，不是 AppImage/Ubuntu 沙箱根因；GUI 调试与验收统一使用独立会话或桌面启动器。
 
 - ~~SS4 FPS 无数据源~~（**已解决并二次修正**，终态 2026-09-10 晚 agent v5 / 1486463）：v4 曾误判"QCM 构建阉割 --latency"绕道 host frametimeline 通道（7a3e9fb）；**用户指点 getfps -w 后逆向确认真因：A16 SF 的 --latency 只认 `--list` 原始行的 `<hex> <name>` 别名形态**（带前缀 65 行真数据 vs 干净名 1 行刷新周期）——agent fps.rs 查询名双轨（A16 保留前缀/旧平台干净名），设备端 per-layer 路径恢复（协议 v5，SS4 短路撤销、host frametimeline 通道删除），真机 59-61fps + 杀进程重发现（#549→#579）+ SS2MAX/SS3 回归全通
 - SS2MAX GPU 显存无数据源（2026-09-07 root 下全路径确证：dumpsys gpu 无 Memory snapshot 段 + /sys/kernel/debug 未编译进内核 + /proc/kgsl 不存在，平台限制）

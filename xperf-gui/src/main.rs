@@ -1458,6 +1458,64 @@ fn list_ssh_hosts() -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// 「从 ssh config 导入」选择器的一台主机条目：`ssh -G <alias>` 解析出的
+/// 生效配置（含 `Include`/通配 `Host` 段合并结果，纯文件解析做不到）。
+#[derive(serde::Serialize)]
+struct SshHostDetail {
+    /// `~/.ssh/config` 的 Host 别名（导入后作远程配置名称）
+    alias: String,
+    /// 生效 HostName（IP 或域名；无 HostName 时等于别名本身）
+    hostname: String,
+    /// 生效用户名（未配置时为空串）
+    user: String,
+    /// 生效 SSH 端口（未配置时为 22）
+    port: u16,
+}
+
+/// `ssh -G <alias>` 解析单台主机的生效 HostName/User/Port。
+/// `ssh -G` 是纯本地配置展开（不发起网络连接），失败（无 ssh 可执行/输出异常）
+/// 返回 `None`，调用方跳过该台。
+fn ssh_g_resolve(alias: &str) -> Option<SshHostDetail> {
+    let out = std::process::Command::new(xperf_core::transport::host_ssh_path())
+        .args(["-G", alias])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut hostname = None;
+    let mut user = String::new();
+    let mut port = 22u16;
+    for line in text.lines() {
+        let mut it = line.split_whitespace();
+        let (Some(k), Some(v)) = (it.next(), it.next()) else { continue };
+        match k {
+            "hostname" => hostname = Some(v.to_string()),
+            "user" => user = v.to_string(),
+            "port" => port = v.parse().unwrap_or(22),
+            _ => {}
+        }
+    }
+    Some(SshHostDetail {
+        alias: alias.to_string(),
+        hostname: hostname.unwrap_or_else(|| alias.to_string()),
+        user,
+        port,
+    })
+}
+
+/// `~/.ssh/config` 全部主机的生效配置（「＋」表单「从 ssh config 导入」数据源；
+/// `list_ssh_hosts` 仅别名列表，这里经 `ssh -G` 逐台展开 HostName/User/Port，
+/// 供前端选中后一键填充表单）。解析失败的主机跳过。
+#[tauri::command]
+fn list_ssh_host_details() -> Vec<SshHostDetail> {
+    list_ssh_hosts()
+        .into_iter()
+        .filter_map(|alias| ssh_g_resolve(&alias))
+        .collect()
+}
+
 /// 增/改远程连接配置（按 name upsert 后落盘）
 #[tauri::command]
 fn save_remote(cfg: RemoteConfig) -> Result<(), String> {
@@ -1476,28 +1534,26 @@ fn save_remote(cfg: RemoteConfig) -> Result<(), String> {
 }
 
 /// 「添加主机」表单参数（密码只用于本次连接的内存驻留，**永不落盘**——
-/// 不落 remotes.json、不落 ssh config、不进 diag/日志）。
+/// 不落 remotes.json、不进 diag/日志）。
 #[derive(serde::Deserialize)]
 pub struct NewSshHost {
-    /// 别名（勾保存时成为 ssh config 的 `Host` 行；同时是 remotes.json 的 name）
+    /// 配置名（remotes.json 的唯一键与下拉显示文本）
     name: String,
-    /// 主机名或 IP
+    /// 主机名或 IP（也可为 ssh config 别名——连接自动继承其 HostName/User/Port）
     host: String,
     /// 登录用户名（空 = 当前用户/ssh config 默认）
     user: Option<String>,
-    /// SSH 端口（None/22 = 默认，省略 Port 行）
+    /// SSH 端口（None/22 = 默认）
     ssh_port: Option<u16>,
     /// 远端 adb 路径（空 = 自动探测）
     adb_path: Option<String>,
     /// 远端 adb server 端口（None = 5037）
     remote_port: Option<u16>,
-    /// 是否把 Host 条目追加到 ~/.ssh/config（无秘密——密码与密钥永不写入）
-    save_to_ssh_config: bool,
 }
 
-/// 添加 SSH 主机：校验 → 可选写 ssh config → 落 remotes.json。
-/// 返回前端应使用的连接目标（写了 config 用别名，否则 `user@host` 形式）。
-/// 密码不在此处理——连接密码由 `connect_remote` 的 password 参数走内存通道。
+/// 添加 SSH 主机：校验 → 落 remotes.json（**不写用户 ssh config**——remotes.json
+/// 已含全部连接信息；ssh config 导入的主机以别名保存、连接时继承其配置）。
+/// 返回前端应使用的连接目标（`user@host` 直写形式，或别名原样）。
 #[tauri::command]
 fn add_ssh_host(cfg: NewSshHost) -> Result<String, String> {
     let name = cfg.name.trim();
@@ -1505,21 +1561,10 @@ fn add_ssh_host(cfg: NewSshHost) -> Result<String, String> {
     if name.is_empty() || host.is_empty() {
         return Err("名称与主机不能为空".into());
     }
-    // 写了 ssh config 后连接目标用别名（Host 条目生效）；否则用 user@host 直写形式
-    let effective_host = if cfg.save_to_ssh_config {
-        xperf_core::save_ssh_config_host(
-            name,
-            host,
-            cfg.user.as_deref(),
-            cfg.ssh_port,
-        )
-        .map(|_| name.to_string())
-        .map_err(|e| format!("{e:#}"))?
-    } else {
-        match cfg.user.as_deref().map(str::trim).filter(|u| !u.is_empty()) {
-            Some(u) => format!("{u}@{host}"),
-            None => host.to_string(),
-        }
+    // 连接目标：带用户名展开为 user@host；否则 host 原样（可为 ssh config 别名）
+    let effective_host = match cfg.user.as_deref().map(str::trim).filter(|u| !u.is_empty()) {
+        Some(u) if !host.contains('@') => format!("{u}@{host}"),
+        _ => host.to_string(),
     };
     save_remote(RemoteConfig {
         name: name.to_string(),
@@ -1560,6 +1605,7 @@ async fn connect_remote(
     state: State<'_, AppState>,
     host: Option<String>,
     password: Option<String>,
+    ssh_port: Option<u16>,
 ) -> Result<serde_json::Value, String> {
     let emit = |state_s: &str, host: Option<&str>, message: String| {
         let _ = app.emit(
@@ -1587,7 +1633,8 @@ async fn connect_remote(
 
     emit("connecting", Some(&host), format!("正在连接 {host}…"));
     let t_connect = std::time::Instant::now();
-    // 配置查找（按 name 或 host 匹配）；未保存的临时目标用默认 adb 路径/端口
+    // 配置查找（按 name 或 host 匹配）；未保存的临时目标用默认 adb 路径/端口，
+    // 非默认 SSH 端口经 ssh_port 参数传入（表单「连接」= 零保存路径）
     let cfg = load_remotes()
         .into_iter()
         .find(|r| r.name == host || r.host == host);
@@ -1599,6 +1646,8 @@ async fn connect_remote(
         if let Some(p) = c.ssh_port {
             target = target.with_ssh_port(p);
         }
+    } else if let Some(p) = ssh_port.filter(|p| *p != 22) {
+        target = target.with_ssh_port(p);
     }
     match xperf_core::init_remote(target) {
         Ok(devices) => {
@@ -2108,6 +2157,7 @@ fn main() {
             list_devices,
             list_remotes,
             list_ssh_hosts,
+            list_ssh_host_details,
             save_remote,
             add_ssh_host,
             connect_remote,
