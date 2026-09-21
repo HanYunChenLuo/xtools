@@ -1,13 +1,14 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "默认权限：允许前端调用 invoke 命令和监听事件",
+  "description": "默认权限：允许前端调用 invoke 命令和监听事件。core:window:allow-set-focus 放行给调试接口的 eval 逃生舱：GUI 自动化回归须能把被遮挡的窗口拉回前台——macOS 对全遮挡窗口冻结 WebKit 的 requestAnimationFrame，悬停读数的 rAF 合帧永不执行（2026-09-21 GUI 回归实测锁定；锁屏场景仍无法恢复，测试侧经 SKIP 降级）",
   "windows": ["main"],
   "permissions": [
     "core:default",
     "core:event:default",
     "core:event:allow-listen",
     "core:event:allow-emit",
+    "core:window:allow-set-focus",
     "dialog:default"
   ]
 }

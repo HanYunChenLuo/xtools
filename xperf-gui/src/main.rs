@@ -922,20 +922,29 @@ async fn update_simpleperf_scripts(app: tauri::AppHandle) -> Result<String, Stri
 /// 在浏览器打开 Perfetto UI 并自动加载 trace。
 /// 优先本地镜像 UI + 同源加载（全自动，首次使用需联网镜像约 20 个资源）；
 /// 失败（离线/无 Chrome/无法访问 ui.perfetto.dev）自动回退拖拽方式。
+///
+/// 须为 async + `spawn_blocking`：首用镜像要跑 headless Chrome 抓资源清单并逐个下载
+/// （实测 ~1 分钟）。同步命令跑在主线程，期间 webview 事件循环全停——界面冻结、
+/// 点击无响应（2026-09-21 GUI 回归实测锁定）；放后台线程后仅状态栏等待。
 #[tauri::command]
-fn open_perfetto_ui(trace_path: String) -> Result<String, String> {
-    let path = std::path::PathBuf::from(&trace_path);
-    if !path.is_file() {
-        return Err(format!("trace 文件不存在: {}", trace_path));
-    }
-    match xperf_core::trace::open_trace_in_local_ui(&path) {
-        Ok(msg) => Ok(msg),
-        Err(e) => {
-            eprintln!("[trace] 自动加载不可用，回退拖拽: {}", e);
-            let msg = xperf_core::trace::reveal_trace_and_open_ui(&path).map_err(|e| e.to_string())?;
-            Ok(format!("自动加载不可用（{}）。{}", e, msg))
+async fn open_perfetto_ui(trace_path: String) -> Result<String, String> {
+    tokio::task::spawn_blocking(move || -> Result<String, String> {
+        let path = std::path::PathBuf::from(&trace_path);
+        if !path.is_file() {
+            return Err(format!("trace 文件不存在: {}", trace_path));
         }
-    }
+        match xperf_core::trace::open_trace_in_local_ui(&path) {
+            Ok(msg) => Ok(msg),
+            Err(e) => {
+                eprintln!("[trace] 自动加载不可用，回退拖拽: {}", e);
+                let msg = xperf_core::trace::reveal_trace_and_open_ui(&path)
+                    .map_err(|e| e.to_string())?;
+                Ok(format!("自动加载不可用（{}）。{}", e, msg))
+            }
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// 诊断命令：前端 JS 执行时调用，把消息写到 /tmp/xperf_gui_diag.log。
