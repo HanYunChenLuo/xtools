@@ -1534,22 +1534,31 @@ class DeviceSession {
     this.el('baseline-report').textContent = '';
   }
   async start() {
-    _diag('[' + this.serial + '] startBtn CLICKED');
-    const f = this.currentFlags();
-    this.resetSessionData();
-    this.renderPidList();
+    // 防重入：双击的第二次落在首次 invoke pending 窗口内（disabled 要等 invoke
+    // 返回才置位拦不住）——双发 start_sampling 会报「已在监控中」弹错误框，且
+    // 第二次的 resetSessionData 已把首次的图表数据清掉
+    if (this._startPending || this.samplingRunning) return;
+    this._startPending = true;
     try {
-      _diag('[' + this.serial + '] invoking start_sampling: pkg=' + f.package + ' interval=' + f.interval);
-      await invoke('start_sampling', { ...f, fresh: true });
-      _diag('[' + this.serial + '] start_sampling RETURNED OK');
-      this.samplingRunning = true;
-      this.el('start-btn').disabled = true;
-      this.el('stop-btn').disabled = false;
-      if (!this.agentBuilding) this.setStatus('监控中: ' + f.package);
-    } catch (e) {
-      this.agentBuilding = false;
-      await alertBox('开始监控失败: ' + e, 'error');
-      _diag('[' + this.serial + '] startBtn invoke ERROR: ' + JSON.stringify(e));
+      _diag('[' + this.serial + '] startBtn CLICKED');
+      const f = this.currentFlags();
+      this.resetSessionData();
+      this.renderPidList();
+      try {
+        _diag('[' + this.serial + '] invoking start_sampling: pkg=' + f.package + ' interval=' + f.interval);
+        await invoke('start_sampling', { ...f, fresh: true });
+        _diag('[' + this.serial + '] start_sampling RETURNED OK');
+        this.samplingRunning = true;
+        this.el('start-btn').disabled = true;
+        this.el('stop-btn').disabled = false;
+        if (!this.agentBuilding) this.setStatus('监控中: ' + f.package);
+      } catch (e) {
+        this.agentBuilding = false;
+        await alertBox('开始监控失败: ' + e, 'error');
+        _diag('[' + this.serial + '] startBtn invoke ERROR: ' + JSON.stringify(e));
+      }
+    } finally {
+      this._startPending = false;
     }
   }
   async stop() {
