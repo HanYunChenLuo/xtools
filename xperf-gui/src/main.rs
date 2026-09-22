@@ -2092,6 +2092,15 @@ fn main() {
         })
         .manage(debugsrv::DebugSlot::new(None))
         .setup(move |app| {
+            // 随包脚本集（火焰图 report_html.py + 主机平台 report 库）：Tauri 资源目录
+            // 不在可执行文件旁（Linux bundle 在挂载点 usr/share/<app>），显式注入 core
+            // 的解析链；未随包分发/不齐全时自动落到后续候选（见 simpleperf::scripts_dir）
+            if let Ok(resource_dir) = app.path().resource_dir() {
+                let bundled_scripts = resource_dir.join("simpleperf_scripts");
+                if bundled_scripts.is_dir() {
+                    xperf_core::simpleperf::set_bundled_scripts_dir(&bundled_scripts);
+                }
+            }
             // 默认窗口大小：前端加载完成后经 resize_default 命令按屏幕动态设置
             // （setup 阶段 webview 未就绪直接 set_size 会导致渲染空白，真机实测）
             // 设备热插拔监视线程（devices-changed 事件 → 前端设备 tab 动态更新）

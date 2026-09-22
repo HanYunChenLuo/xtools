@@ -4,6 +4,11 @@
 
 ## [Unreleased]
 
+### 修复
+
+- 修复**发布产物（Linux AppImage / macOS DMG）里「在浏览器打开火焰图」必失败**：脚本集目录此前取编译期 `CARGO_MANIFEST_DIR`，把构建机路径烤进二进制（CI 产物指向容器内 `/builds/...`，用户机不存在且不可写，连 AOSP 引导下载的兜底也一起失败；本机/直编环境恰好存在所以测不出）。改为解析链：`XPERF_SIMPLEPERF_SCRIPTS` 显式覆盖 → 随产物分发（GUI 的 Tauri 资源目录 / CLI tarball 里 `xperf-cli` 旁 `simpleperf_scripts/`）→ 源码检出的仓库 vendor 目录（存在才用，git 同步 vendor 的语义不变）→ `~/.cache/xperf/simpleperf_scripts/` 可写缓存；下载前建目录。发布产物随包附脚本集（按主机平台带 report 库，Linux +~7MB / macOS +~24MB，换取零网络可用）；`--update-simpleperf-scripts` 遇只读随包资源如实拒绝而非静默改写；`--clean-cache` 不再触碰发布包内置脚本集；每次打开火焰图在 stderr 打一行实际使用的目录便于排障。
+- 「清理缓存与数据」与 `--clean-cache` 的火焰图脚本项口径同上更新（源码检出的 vendor 目录 + 用户缓存）。
+
 ### 变更
 
 - GUI「＋」新增远程表单精简：只保留 SSH 连接相关字段（名称/主机/用户名/SSH 端口/密码），移除 adb 路径与 adb 端口两项——新增时用默认值（`adb`/5037，连接预检自动探测远端标准 SDK 位置），已有同名配置则沿用其值。adb 设置的调整入口移至设备页侧栏新增「远程主机」区块（仅 SSH 远程模式显示）：展示当前连接主机，可修改 adb 路径/端口并保存到该主机的已保存配置（下次连接生效）。

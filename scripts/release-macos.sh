@@ -35,7 +35,7 @@ GUI_CONFIG="tauri.release.json"
 GUI_RESOURCES="xperf-gui/release-resources"
 trap 'rm -rf "$GUI_RESOURCES"' EXIT
 
-prepare_gui_agent() {
+prepare_gui_resources() {
     if ! cargo tauri --version >/dev/null 2>&1; then
         echo "==> 安装 cargo-tauri 2.4.1"
         cargo install tauri-cli --version 2.4.1 --locked
@@ -44,6 +44,9 @@ prepare_gui_agent() {
     mkdir -p "$GUI_RESOURCES/agent"
     cp target/aarch64-linux-android/release/xperf-agent "$GUI_RESOURCES/agent/xperf-agent"
     chmod 755 "$GUI_RESOURCES/agent/xperf-agent"
+    # 随包火焰图脚本集（DMG 内 Resources/simpleperf_scripts，GUI 启动时经 resource_dir
+    # 注入 core 解析链）；dylib 为 universal 24MB，是 DMG 体积的主要增项——换取零网络可用
+    bash scripts/stage_simpleperf_scripts.sh "$GUI_RESOURCES/simpleperf_scripts" darwin/x86_64
 }
 
 validate_dmg() {
@@ -85,13 +88,15 @@ build() {  # build <apple 三元组> <包架构名>
     cp target/aarch64-linux-android/release/xperf-agent "artifacts/$pkg/agent/"
     cp README.md README_zh.md LICENSE CHANGELOG.md AGENTS.md "artifacts/$pkg/"
     cp -R skills "artifacts/$pkg/"  # skills/xperf/SKILL.md——编码 agent 的能力发现入口
+    # 火焰图脚本集与 xperf-cli 并排分发（运行时解析链的「可执行文件旁」候选）
+    bash scripts/stage_simpleperf_scripts.sh "artifacts/$pkg/simpleperf_scripts" darwin/x86_64
     # COPYFILE_DISABLE=1：bsdtar 默认写入 ._ AppleDouble 元数据文件与 xattr，污染包
     COPYFILE_DISABLE=1 tar -C artifacts -czf "artifacts/$pkg.tar.gz" "$pkg"
 }
 
 echo "==> cargo build --release -p xperf-agent --target aarch64-linux-android"
 cargo build -p xperf-agent --target aarch64-linux-android --release
-prepare_gui_agent
+prepare_gui_resources
 
 build aarch64-apple-darwin arm64
 build x86_64-apple-darwin x86_64

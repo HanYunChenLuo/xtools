@@ -335,13 +335,172 @@ fn squeeze_spaces(text: &str) -> String {
 
 // ==================== 浏览器火焰图（report_html.py） ====================
 
-/// 脚本集目录：**vendor 进仓库**（`xperf-core/simpleperf_scripts/`，git 管理）：
-/// `report_html.py` 及其依赖 + 主机平台 report 库。布局对齐上游 `get_script_dir()`/
-/// `get_host_binary_path()` 的相对定位规则（`bin/<os>/<arch>/<lib>`）。
-/// 随代码分发、离线即用；更新走 `update_simpleperf_scripts`（CLI
-/// `--update-simpleperf-scripts` / GUI「更新火焰图脚本」按钮），覆盖后经 git 提交同步。
-fn scripts_dir() -> PathBuf {
+/// 脚本集目录解析链（开发检出与发布产物通用入口，内核为纯函数 [`pick_scripts_dir`]）：
+/// 1. `XPERF_SIMPLEPERF_SCRIPTS` 显式覆盖（目录不存在则报错**不回退**，空串视同未设置——
+///    与 `XPERF_AGENT_BIN` 同语义）；
+/// 2. 随产物分发的脚本集：宿主注入的 Tauri 资源目录（GUI 启动时
+///    [`set_bundled_scripts_dir`]）或可执行文件旁 `simpleperf_scripts/`（CLI tarball 布局，
+///    与 `agent/xperf-agent` 并排）；
+/// 3. 开发检出的仓库 vendor 目录 `xperf-core/simpleperf_scripts/`（git 管理，**文件齐全
+///    时零网络**；更新走 [`update_simpleperf_scripts`]，覆盖后经 git 提交同步到其他机器）；
+/// 4. 用户可写缓存 `~/.cache/xperf/simpleperf_scripts/`（缺项从 AOSP 引导下载补齐）。
+///
+/// **为什么不直接用编译期路径**：`env!("CARGO_MANIFEST_DIR")` 是**构建机**的目录，烤进
+/// 二进制后在用户机上必然不存在（CI 产物 = 容器内 `/builds/...`），而其父目录通常不可写
+/// → 连「缺项时下载补齐」的兜底也一起失败（v0.3.1 AppImage 实测：火焰图按钮报
+/// `创建 /builds/ligraphic/xperf/xperf-core/simpleperf_scripts/report_html.py.dl-tmp 失败`）。
+/// 开发机上该路径恰好存在，故直编环境永远测不出——发布产物须单独验（GUI-TEST-PLAN #10）。
+///
+/// 布局对齐上游 `get_script_dir()`/`get_host_binary_path()` 的相对定位规则
+/// （`bin/<os>/<arch>/<lib>`），所以整目录搬运即可用。
+fn scripts_dir() -> Result<PathBuf> {
+    Ok(scripts_pick()?.path().to_path_buf())
+}
+
+/// [`scripts_dir`] 的解析结果。区分变体只为把「`XPERF_SIMPLEPERF_SCRIPTS` 指向的目录
+/// 不存在」如实报错（其余候选都是解析链自己筛出来的，不存在即跳过）。
+#[derive(Debug, PartialEq, Eq)]
+enum ScriptsPick {
+    /// `XPERF_SIMPLEPERF_SCRIPTS` 显式指定（由 [`scripts_pick`] 校验目录存在性）
+    Explicit(PathBuf),
+    /// 随发布产物分发的脚本集（GUI 资源目录 / CLI 可执行文件旁）
+    Bundled(PathBuf),
+    /// 开发检出里的仓库 vendor 目录（git 管理）
+    Dev(PathBuf),
+    /// 用户可写缓存（缺项时从 AOSP 引导下载）
+    Cache(PathBuf),
+}
+
+impl ScriptsPick {
+    fn path(&self) -> &Path {
+        match self {
+            ScriptsPick::Explicit(p)
+            | ScriptsPick::Bundled(p)
+            | ScriptsPick::Dev(p)
+            | ScriptsPick::Cache(p) => p,
+        }
+    }
+}
+
+fn scripts_pick() -> Result<ScriptsPick> {
+    let exe_sibling = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join("simpleperf_scripts")));
+    let pick = pick_scripts_dir(
+        scripts_dir_env(),
+        host_bundled_scripts_dir(),
+        exe_sibling,
+        &workspace_scripts_dir(),
+        &cache_scripts_dir(),
+        &scripts_usable,
+    );
+    if let ScriptsPick::Explicit(p) = &pick {
+        if !p.is_dir() {
+            bail!(
+                "XPERF_SIMPLEPERF_SCRIPTS 指向的目录不存在: {}",
+                p.display()
+            );
+        }
+    }
+    Ok(pick)
+}
+
+/// [`scripts_pick`] 的解析内核（纯函数，单测锁优先级）。`usable(dir)` = 脚本集齐全 **或**
+/// 目录可写——只读 bundle 只有在齐全时才有意义（缺项没有地方补）。
+fn pick_scripts_dir(
+    env: Option<PathBuf>,
+    host_bundled: Option<PathBuf>,
+    exe_sibling: Option<PathBuf>,
+    workspace: &Path,
+    cache: &Path,
+    usable: &dyn Fn(&Path) -> bool,
+) -> ScriptsPick {
+    if let Some(p) = env {
+        return ScriptsPick::Explicit(p);
+    }
+    for dir in [host_bundled, exe_sibling].into_iter().flatten() {
+        if dir.is_dir() && usable(&dir) {
+            return ScriptsPick::Bundled(dir);
+        }
+    }
+    if workspace.is_dir() && usable(workspace) {
+        return ScriptsPick::Dev(workspace.to_path_buf());
+    }
+    ScriptsPick::Cache(cache.to_path_buf())
+}
+
+/// 编译期 workspace 的 vendor 目录（仅开发检出存在；发布产物里是一条不存在的路径）
+fn workspace_scripts_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("simpleperf_scripts")
+}
+
+/// 用户级可写缓存目录（与 perfetto UI 镜像同根，`--clean-cache` 一并清理）
+const SCRIPTS_CACHE_SUBDIR: &str = ".cache/xperf/simpleperf_scripts";
+fn cache_scripts_dir() -> PathBuf {
+    let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
+    home.join(SCRIPTS_CACHE_SUBDIR)
+}
+
+/// 读取 `XPERF_SIMPLEPERF_SCRIPTS`（空串视同未设置）
+fn scripts_dir_env() -> Option<PathBuf> {
+    std::env::var_os("XPERF_SIMPLEPERF_SCRIPTS")
+        .map(PathBuf::from)
+        .filter(|p| !p.as_os_str().is_empty())
+}
+
+/// GUI 等宿主在启动时注入**随包资源**里的脚本集目录（Tauri Linux bundle 的资源不在可
+/// 执行文件旁而在挂载点的 `usr/share/<app>/`，故须显式注入）。不存在的目录不必注入
+/// （调用方按 `is_dir()` 过滤，解析链会自然落到后续候选）。
+pub fn set_bundled_scripts_dir(dir: impl AsRef<Path>) {
+    let dir = dir.as_ref().to_path_buf();
+    if let Ok(mut slot) = HOST_SCRIPTS_DIR.lock() {
+        *slot = Some(dir);
+    }
+}
+static HOST_SCRIPTS_DIR: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
+fn host_bundled_scripts_dir() -> Option<PathBuf> {
+    HOST_SCRIPTS_DIR.lock().ok().and_then(|g| g.clone())
+}
+
+/// 候选目录是否可用：脚本集齐全（零网络即用）或目录可写（缺项能补下来）
+fn scripts_usable(dir: &Path) -> bool {
+    scripts_complete(dir) || dir_writable(dir)
+}
+
+/// 主机平台所需的脚本集是否齐全（report 库按 >1MB 判存在，见 [`script_present`]）
+fn scripts_complete(dir: &Path) -> bool {
+    match needed_files(dir) {
+        Ok(needed) => needed.iter().all(|(rel, p)| script_present(rel, p)),
+        // 主机平台无预编译 report 库（Windows 等）→ 任何目录都不算齐全，
+        // 但下载同样会失败——错误在 needed_files 的调用方如实上报
+        Err(_) => false,
+    }
+}
+
+/// 单个脚本文件是否算存在：`bin/` 下的大二进制须 >1MB——LFS 未拉取时本地是 ~130B 的
+/// 指针文本，按指针当库加载报错难懂，故判缺（重新从 AOSP 下载）
+fn script_present(rel: &str, path: &Path) -> bool {
+    if !path.is_file() {
+        return false;
+    }
+    let len = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+    if rel.starts_with("bin/") {
+        len > 1_000_000
+    } else {
+        len > 0
+    }
+}
+
+/// 目录可写探针（在其中创建再删除一个临时文件）
+fn dir_writable(dir: &Path) -> bool {
+    let probe = dir.join(".xperf-write-probe");
+    match std::fs::File::create(&probe) {
+        Ok(_) => {
+            let _ = std::fs::remove_file(&probe);
+            true
+        }
+        Err(_) => false,
+    }
 }
 /// gitiles blob 下载基址。**+archive 不支持多级子路径**（实测 `+archive/main/simpleperf/
 /// scripts/simpleperf.tar.gz` 返回 INVALID_ARGUMENT；整仓 tarball 80MB 太重）→ 逐文件
@@ -552,34 +711,26 @@ fn download_scripts(needed: &[(String, PathBuf)]) -> Result<()> {
         {
             continue;
         }
+        // 缓存目录（解析链末位）可能尚未建立，bin/<os>/<arch> 子目录同理
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("创建脚本目录 {} 失败", parent.display()))?;
+        }
         fetch_aosp_blob(rel, dest, None)?;
     }
     Ok(())
 }
 
-/// 确保 `report_html.py` 脚本集可用。脚本集 **vendor 进仓库**（`xperf-core/simpleperf_scripts/`，
-/// git 管理随代码分发）：文件齐全时零网络直接可用；缺项（首次 clone 未含/被误删）才从
-/// AOSP 引导下载补齐。强制全量重新拉取用 `update_simpleperf_scripts`。
+/// 确保脚本集可用（返回实际使用的目录）。缺项时从 AOSP 引导下载补齐——目录由
+/// [`scripts_dir`] 解析链决定（发布产物落用户缓存，开发检出落仓库 vendor 目录）。
 fn ensure_simpleperf_scripts() -> Result<PathBuf> {
     let _guard = SCRIPTS_LOCK.lock().expect("脚本缓存锁失败");
-    let dir = scripts_dir();
+    let dir = scripts_dir()?;
+    // 用的是哪一档（随包/vendor/缓存）直接决定「为什么这台的火焰图要联网下载」这类
+    // 排障问题，且发布产物只能从 stderr 看到——每次打开火焰图一行，开销可忽略
+    eprintln!("[simpleperf] 火焰图脚本集目录: {}", dir.display());
     let needed = needed_files(&dir)?;
-    let complete = needed
-        .iter()
-        .all(|(rel, p)| {
-            if !p.is_file() {
-                return false;
-            }
-            let len = std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
-            if rel.starts_with("bin/") {
-                // report 库为大二进制（6-25MB）：LFS 未拉取时本地是 ~130B 的指针文本，
-                // 按大小判缺（重新从 AOSP 下载），避免把指针文件当库加载报错难懂
-                len > 1_000_000
-            } else {
-                len > 0
-            }
-        });
-    if complete {
+    if needed.iter().all(|(rel, p)| script_present(rel, p)) {
         return Ok(dir);
     }
     eprintln!("[simpleperf] 脚本集缺项，从 AOSP 下载补齐（~10MB）…");
@@ -608,7 +759,9 @@ pub struct ScriptsDownloadProgress {
 
 /// 强制重新下载全部脚本与 report 库（覆盖 vendor 文件）——跟进上游 simpleperf 更新用。
 /// **两个平台的 report 库都更新**（任一台机器执行，mac/linux 双端同步）；覆盖后
-/// `git status` 可见 diff，提交即分发（仓库内文件，清理缓存不触碰）。
+/// `git status` 可见 diff，提交即分发。目标目录由脚本集解析链决定（源码检出 = 仓库
+/// vendor 目录；无仓库的发布产物 = 用户缓存，只读内置资源则如实拒绝更新，见
+/// [`set_bundled_scripts_dir`]）。
 /// `progress`：每个文件内按 ~1MB 粒度回调 + 文件完成时回调（字节流式下载）。
 ///
 /// **两阶段写入**：全部文件先下载到 `*.dl-tmp` 临时文件，全部成功后一次性 rename 覆盖
@@ -618,7 +771,16 @@ pub fn update_simpleperf_scripts(
     progress: Option<&dyn Fn(&ScriptsDownloadProgress)>,
 ) -> Result<String> {
     let _guard = SCRIPTS_LOCK.lock().expect("脚本缓存锁失败");
-    let dir = scripts_dir();
+    let dir = scripts_dir()?;
+    // 写回前提：目标目录可写。发布包内置的只读脚本集（AppImage 挂载点/.app Resources）
+    // 明确拒绝而非静默改写别处——本命令的用途是跟进上游 simpleperf 并 git 提交分发，
+    // 只在源码检出（或用户自己可写的 tarball 目录）有意义。
+    if !dir_writable(&dir) {
+        bail!(
+            "脚本集目录只读，无法更新: {}（请在源码检出环境执行，或删除该缓存后由程序重新下载）",
+            dir.display()
+        );
+    }
     let mut needed = needed_files(&dir)?;
     // 另一平台（mac↔linux）的 report 库一并更新
     let other = match (std::env::consts::OS, std::env::consts::ARCH) {
@@ -721,9 +883,10 @@ fn html_path_for(data_path: &Path) -> PathBuf {
 /// 用 AOSP 官方 `report_html.py` 把 `.data` 渲染成**单文件 HTML**（含火焰图/Chart/
 /// Sample Table，实测 3.3MB data → 7.8MB html ~1.2s），再 `open`/`xdg-open` 打开。
 ///
-/// - 首次使用自动从 AOSP 引导下载脚本集到 `~/.cache/xperf/simpleperf_scripts/`
-///   （~10MB，之后离线可用）；需要 `python3`（上游 report 库 dylib 为
-///   universal 二进制，Apple Silicon 原生可用）
+/// - 脚本集目录由解析链决定（随包资源 / 可执行文件旁 / 仓库 vendor / 用户缓存，见
+///   [`set_bundled_scripts_dir`]）：随包或仓库文件齐全时**零网络**；缺项才从 AOSP
+///   引导下载补齐到可写目录（合计 ~10MB，之后离线可用）；需要 `python3`（上游 report
+///   库 dylib 为 universal 二进制，Apple Silicon 原生可用）
 /// - HTML 已存在且新于 `.data` 时直接复用（同一份数据反复查看不重渲染）
 /// - 生成带手动超时上限（300s，超大 `.data` 防挂死）与 Ctrl-C 中断响应
 ///
@@ -846,9 +1009,11 @@ fn remove_dir_counted(path: &Path) -> (u64, u64) {
     (bytes, files)
 }
 
-/// 清理全部缓存与采集数据：`~/.cache/xperf`（perfetto UI 镜像）+ `/tmp/xperf`（采集
-/// 数据目录，含 CSV/图表/trace/调用栈）+ `xperf-core/simpleperf_scripts/`（火焰图脚本
-/// 下载缓存，下次使用重新下载或经 `--update-simpleperf-scripts` 更新）。
+/// 清理全部缓存与采集数据：`~/.cache/xperf`（perfetto UI 镜像 + 火焰图脚本用户缓存）+
+/// `/tmp/xperf`（采集数据目录，含 CSV/图表/trace/调用栈）+ 源码检出下的
+/// `xperf-core/simpleperf_scripts/`（火焰图脚本 vendor 目录，下次使用重新下载或经
+/// `--update-simpleperf-scripts` 恢复）。**发布包内置的只读脚本集不动**（那是产物本体，
+/// 删了用户无从恢复）。
 /// trace_processor 官方缓存 `~/.local/share/perfetto` **不在清理范围**（属
 /// get.perfetto.dev 官方工具缓存，与 perfetto UI 镜像不同源）。
 /// 正在采样/录制时调用是安全的：文件被删后流式写入方 create/append 会按需重建，
@@ -861,7 +1026,7 @@ pub fn clean_all_caches() -> Result<CleanReport> {
     for dir in [
         home.join(".cache").join("xperf"),
         std::env::temp_dir().join("xperf"),
-        scripts_dir(),
+        workspace_scripts_dir(),
     ] {
         let (b, f) = remove_dir_counted(&dir);
         total.bytes += b;
@@ -1440,6 +1605,81 @@ mod tests {
             ..rec
         };
         assert!(analyze_and_report(&rec2, "pkg").is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 脚本集目录解析链优先级（v0.3.1 发布产物火焰图失效的根治点，见 [`scripts_dir`]）
+    #[test]
+    fn test_pick_scripts_dir_chain() {
+        let root = std::env::temp_dir().join(format!("xperf_scripts_pick_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let mk = |name: &str| {
+            let p = root.join(name);
+            std::fs::create_dir_all(&p).unwrap();
+            p
+        };
+        let bundle = mk("bundle");
+        let exe = mk("exe_sibling");
+        let workspace = mk("workspace");
+        // 缓存目录不预先创建：它是无条件兜底，不存在也要能被选中（下载时再建）
+        let cache = root.join("cache");
+        let always = &|_: &Path| true;
+        let never = &|_: &Path| false;
+
+        // 显式 env 覆盖最高优先（其余候选都可用也不例外）
+        assert_eq!(
+            pick_scripts_dir(Some(bundle.clone()), Some(exe.clone()), Some(exe.clone()), &workspace, &cache, always),
+            ScriptsPick::Explicit(bundle.clone())
+        );
+        // GUI 注入的随包资源目录优先于可执行文件旁目录
+        assert_eq!(
+            pick_scripts_dir(None, Some(bundle.clone()), Some(exe.clone()), &workspace, &cache, always),
+            ScriptsPick::Bundled(bundle.clone())
+        );
+        // 随包候选不存在 → 跳过（usable 谓词根本不参与）
+        assert_eq!(
+            pick_scripts_dir(None, Some(root.join("nope")), Some(exe.clone()), &workspace, &cache, always),
+            ScriptsPick::Bundled(exe.clone())
+        );
+        // 两个随包候选都没有 → 开发检出的仓库 vendor 目录
+        assert_eq!(
+            pick_scripts_dir(None, None, None, &workspace, &cache, always),
+            ScriptsPick::Dev(workspace.clone())
+        );
+        // 候选目录存在但不可用（缺项且只读）→ 一律跳过，落可写缓存兜底
+        assert_eq!(
+            pick_scripts_dir(None, Some(bundle), Some(exe), &workspace, &cache, never),
+            ScriptsPick::Cache(cache.clone())
+        );
+        // 连 workspace 都没有（CI 构建的编译期路径在用户机上不存在）→ 同上
+        assert_eq!(
+            pick_scripts_dir(None, None, None, &root.join("nope"), &cache, never),
+            ScriptsPick::Cache(cache)
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// report 库按 >1MB 判存在（LFS 指针文本 ~130B 不算），普通脚本按非空判
+    #[test]
+    fn test_script_present_size_rule() {
+        let dir = std::env::temp_dir().join(format!("xperf_scripts_present_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("report_html.py"), b"x").unwrap();
+        assert!(script_present("report_html.py", &dir.join("report_html.py")));
+        std::fs::write(dir.join("empty.py"), b"").unwrap();
+        assert!(!script_present("empty.py", &dir.join("empty.py")));
+        // LFS 指针文本形态的 report 库 → 判缺
+        let lib = dir.join("libsimpleperf_report.so");
+        std::fs::write(&lib, b"version https://git-lfs.github.com/spec/v1").unwrap();
+        assert!(!script_present("bin/linux/x86_64/libsimpleperf_report.so", &lib));
+        // 真库（稀疏填充即可，不实际写盘）
+        let f = std::fs::OpenOptions::new().write(true).truncate(true).open(&lib).unwrap();
+        f.set_len(1_000_001).unwrap();
+        drop(f);
+        assert!(script_present("bin/linux/x86_64/libsimpleperf_report.so", &lib));
+        assert!(!script_present("report_html.py", &dir.join("nope.py")));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

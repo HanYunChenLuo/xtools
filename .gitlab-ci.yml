@@ -154,6 +154,16 @@ build:linux:
     - cp "target/aarch64-linux-android/release/xperf-agent" "artifacts/$PKG/agent/"
     - cp README.md README_zh.md LICENSE CHANGELOG.md AGENTS.md "artifacts/$PKG/"
     - cp -R skills "artifacts/$PKG/"  # skills/xperf/SKILL.md——编码 agent 的能力发现入口
+    # 火焰图脚本集随包分发：与 xperf-cli 并排的 simpleperf_scripts/（运行时解析链的
+    # 「可执行文件旁」候选，见 core simpleperf::scripts_dir）。CI checkout 常只有 LFS
+    # 指针文本 → 先尽力拉取；拿不到真实库时只带脚本本体，用户侧落到缓存+AOSP 下载
+    - |
+      if command -v git-lfs >/dev/null 2>&1; then
+        git lfs install --local >/dev/null 2>&1 || true
+        git lfs pull --include "xperf-core/simpleperf_scripts/**" \
+          || echo "WARN: git lfs pull 失败——按指针大小决定随包内容"
+      fi
+    - bash scripts/stage_simpleperf_scripts.sh "artifacts/$PKG/simpleperf_scripts" linux/x86_64
     - tar -C artifacts -czf "artifacts/$PKG.tar.gz" "$PKG"
     - ls -lh artifacts/
   # job artifact 仅作 build→release 的传输（release 上传 package registry 后永久存）
@@ -185,8 +195,20 @@ gui:linux:
     - mkdir -p xperf-gui/release-resources/agent
     - cp artifacts/xperf-v$VER-linux-x86_64/agent/xperf-agent xperf-gui/release-resources/agent/xperf-agent
     - chmod 755 xperf-gui/release-resources/agent/xperf-agent
+    # 随包火焰图脚本集（复用 build:linux 已暂存的那份，保证 CLI/GUI 产物内容一致）：
+    # AppImage 里资源在挂载点 usr/share/<app>/，GUI 启动时经 resource_dir 注入 core 解析链
+    - cp -R artifacts/xperf-v$VER-linux-x86_64/simpleperf_scripts xperf-gui/release-resources/simpleperf_scripts
+    - test -f xperf-gui/release-resources/simpleperf_scripts/report_html.py
     - if ! cargo tauri --version >/dev/null 2>&1; then cargo install tauri-cli --version 2.4.1 --locked; fi
     - cd xperf-gui && ARCH=x86_64 CI=true cargo tauri build --verbose --config tauri.release.json --bundles appimage && cd ..
+    # 质量门：agent 与火焰图脚本集确实进了 bundle（找不到 = tauri.release.json resources
+    # 或暂存步骤漂移；v0.3.1 的火焰图缺陷正是发布产物里根本没有脚本集，见 GUI-TEST-PLAN #10）
+    - |
+      APPDIR=target/release/bundle/appimage/xperf-gui.AppDir
+      find "$APPDIR" -name report_html.py -print -quit | grep -q . \
+        || { echo "bundle 内缺 simpleperf_scripts/report_html.py"; exit 1; }
+      find "$APPDIR" -name xperf-agent -type f -print -quit | grep -q . \
+        || { echo "bundle 内缺 agent/xperf-agent"; exit 1; }
     # linuxdeploy excludelist 排除 libharfbuzz（假定目标系统自带），但 bundle 内 bookworm 版
     # pango/webkit 引用了 3 个 harfbuzz 3.3.0/4.0.0 才新增的符号（hb_font_set_synthetic_slant@3.3.0 /
     # hb_ot_layout_get_baseline_with_fallback@4.0.0 / hb_ot_layout_get_horizontal_baseline_tag_for_script@4.0.0），

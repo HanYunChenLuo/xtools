@@ -1,7 +1,8 @@
 {
   "bundle": {
     "resources": {
-      "release-resources/agent/xperf-agent": "agent/xperf-agent"
+      "release-resources/agent/xperf-agent": "agent/xperf-agent",
+      "release-resources/simpleperf_scripts": "simpleperf_scripts"
     },
     "macOS": {
       "signingIdentity": "-"

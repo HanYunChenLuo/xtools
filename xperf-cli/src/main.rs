@@ -127,14 +127,14 @@ struct Args {
     #[arg(long)]
     force_stop: bool,
 
-    /// 清理缓存与采集数据后退出（~/.cache/xperf 的 perfetto UI 镜像 + /tmp/xperf 的全部
-    /// 采集产物 + xperf-core/simpleperf_scripts/ 的火焰图脚本下载缓存，下次使用重新
-    /// 下载；更新用 --update-simpleperf-scripts）
+    /// 清理缓存与采集数据后退出（`~/.cache/xperf` 的 perfetto UI 镜像与火焰图脚本用户缓存、
+    /// `/tmp/xperf` 的全部采集产物、源码检出的 `xperf-core/simpleperf_scripts/` vendor 目录
+    /// ——下次使用重新下载，更新用 `--update-simpleperf-scripts`；发布包内置的只读脚本集不动）
     #[arg(long)]
     clean_cache: bool,
 
-    /// 强制重新下载 simpleperf 火焰图脚本与主机 report 库（覆盖
-    /// xperf-core/simpleperf_scripts/ 的 vendor 文件，git 提交同步到其他机器）后退出
+    /// 强制重新下载 simpleperf 火焰图脚本与主机 report 库（覆盖脚本集所在目录的 vendor
+    /// 文件；源码检出下即仓库文件，git 提交同步到其他机器。只读的随包脚本集会被拒绝）
     #[arg(long)]
     update_simpleperf_scripts: bool,
 
