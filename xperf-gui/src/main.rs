@@ -812,8 +812,9 @@ async fn open_stack_html(data_path: String) -> Result<String, String> {
 }
 
 /// 清理缓存与采集数据（与 CLI `--clean-cache` 同一实现）：
-/// `~/.cache/xperf`（perfetto UI 镜像；simpleperf 脚本集已 vendor 进仓库不受影响）
-/// + `/tmp/xperf`（全部采集数据）。采样/录制进行中会丢当前会话产物——前端
+/// `~/.cache/xperf`（perfetto UI 镜像 + 火焰图脚本用户缓存）+ `/tmp/xperf`（全部采集
+/// 数据）+ 源码检出的 `xperf-core/simpleperf_scripts/`（发布包内置的只读脚本集不动）。
+/// 采样/录制进行中会丢当前会话产物——前端
 /// 弹确认框后调用。返回人类可读结果（清理文件数与体积）。
 #[tauri::command]
 async fn clean_cache() -> Result<String, String> {
