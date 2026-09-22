@@ -5,6 +5,24 @@
 > 待办事项（backlog）在 `WORKSPACE.md` 维护，本文件只做历史追溯。
 > 新会话开始时可先读本文件了解近期上下文。
 
+## 2026-09-22（晚）：K 节环境覆盖——v0.3.1 AppImage 发布验证（hppc）+ issue #5 关闭
+
+**任务**：WORKSPACE K 节三项（K1 hppc GUI `--remote kong` / K2 kong AppImage v0.3.1 本地模式 / K3 关闭 issue #5）。
+
+**结果**：K3 ✅（PUT close → http 200）；K2 ✅ **改在 hppc 执行**（kong 零设备）——v0.3.1 AppImage / Ubuntu 24.04.5 / Xvfb :99 / 本机模式 / SS3+SS2MAX+SS4 三机，回归 总计 FAIL 2 → **1 真发布缺陷 + 1 判据竞态**；K1 **阻塞**（kong `adb devices` 空、`lsusb` 无 Android 设备，待车机通电）。commits：`101a883`（g6 判据轮询化）+ 本条目文档更新（WORKSPACE A/K 节、GUI-TEST-PLAN 环境矩阵与已知发现 #10#11、SESSION）。
+
+**发布产物验证的硬结论**：
+- **v0.3.0 沙箱缺陷的修复在发布产物上闭环**：24.04 `kernel.apparmor_restrict_unprivileged_userns=1` 现场，`/proc/<pid>/environ` 实测有 `WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS=1`（条件式 AppRun hook 注入），WebKitWebProcess/NetworkProcess 正常拉起，g2~g8 全程 UI 可交互、debug API 零失联。AppImage FUSE 直跑（`/dev/fuse` + libfuse.so.2 齐）；harfbuzz 注入亦无需改动（24.04 本就有新符号）。
+- 分组结果：g1 2/2+SKIP(SSH：hppc 自身 ssh config 无 `hppc` 条目)、g2 22/22、g3 14/15、g4 19/19+SKIP(隧道重建：本机模式)、g5 14/14、g6 10/10（判据修复后复跑）、g8 3/3。SKIP 录屏/镜像（hppc 无 scrcpy，与上轮直编一致）。
+- **抓出真缺陷（A 节新条目，未修）**：`simpleperf.rs::scripts_dir()` 用 `env!("CARGO_MANIFEST_DIR")` 烤构建机路径 → CI 产物指向 `/builds/ligraphic/xperf/xperf-core/simpleperf_scripts`（不存在且不可写，AOSP 引导下载同败）→ 火焰图按钮失效；macOS DMG 同缺陷但在构建机上被真实仓库路径掩盖。修法（解析链：宿主注入 override → workspace 存在才用 → `~/.cache/xperf/simpleperf_scripts` 兜底 + 打包随平台附脚本集）与验收已写入 A 节，**留待新会话**。
+- **方法论产出（GUI-TEST-PLAN #10#11）**：① 运行时路径凡出现编译期 `CARGO_MANIFEST_DIR` 必须在发布产物 + 干净机器上验，直编环境不构成证据；② 旧版产物上「通过」的用例不等于回归证据——本轮 g4「start 双击仅一次」是防重入修复缺失下的偶发通过，g3「连点不炸」判据不查新开标签页数（5s 冷却修复亦不在 v0.3.1 内），带计数的判据（s6 式）才能测到这类修复。
+
+**判据竞态修复**：g6「对比报告面板呈现」原先 click 后一次性读 DOM（async `invoke(compare_baseline)` 往返未回来）→ AppImage 首轮误 FAIL；改轮询 ≤15s 后同产物 10/10。
+
+**环境事实（复用备查）**：产物 `hppc:~/xperf-rel/xperf-v0.3.1-linux-x86_64-gui.AppImage`（110MB，package registry API + hppc `~/.git-credentials` PAT 下载）；启动 `/tmp/hppc_launch.sh`（`DISPLAY=:99 setsid nohup ./<AppImage> </dev/null >/tmp/xperf_gui_appimage.log 2>&1 &`），套件 `/tmp/gui_reg_appimage.log`；Mac OAuth access_token 已过期（401，需重登或走 PAT）。**清理**：上一会话遗留的 idle 直编 GUI（pid 4120325，uptime 11h）已 SIGTERM；本轮 AppImage GUI 收尾停掉，agent daemon 空载自杀无残留。
+
+**遗留**：① A 节 scripts_dir 缺陷待修（v0.3.2 前）；② K1 + 22.04 覆盖待 kong 设备恢复（K2 留档步骤可复用）；③ g3/g4 两条判据升级为可判定形态（新开标签页计数、双击后 invoke 次数）——候补；④ v0.3.2 发版后按 K2 同法复跑发布验证。
+
 ## 2026-09-22：GUI 压力测试（WORKSPACE I 节收官）——4 缺陷修复 + 稳定性基线
 
 **任务**：WORKSPACE「GUI 压力测试（后置）」——长时采样/logcat 洪泛/trace+stack 并发/图表高频数据/多设备页切换/浏览器按钮连点/CPU·内存·DOM 增长监测，产出稳定性基线。

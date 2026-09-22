@@ -2,7 +2,7 @@
 
 > 本文件记录跨会话的待办事项（backlog）。每次会话的历史总结见 `SESSION.md`。
 > 完成一项就把状态改为 ✅ 并注明完成的 commit；新增想法随时追加。
-> 最后更新：2026-09-22：I 节「GUI 压力测试」完成（feature/gui-stress-test：七场景压测套件 + 4 缺陷修复——含 WebKit 唯一文本串驻留泄漏根治）
+> 最后更新：2026-09-22（晚）：K 节环境覆盖——K3 ✅（issue #5 已关闭）、K2 ✅（ kong 无设备，改在 hppc 执行 v0.3.1 AppImage / Ubuntu 24.04：沙箱 hook 修复在发布产物上验证通过，另抓出火焰图脚本路径发布缺陷 → A 节新条目）、K1 阻塞（kong 侧 adb 零设备，待车机通电）
 
 ## 当前状态速览
 
@@ -28,6 +28,8 @@
 
 ## A. 已知缺陷
 
+- [ ] **发布产物的火焰图脚本目录是编译期路径（v0.3.1 AppImage 实测，2026-09-22 K2 抓出）**：GUI「在浏览器打开火焰图」报 `打开火焰图失败: 创建 /builds/ligraphic/xperf/xperf-core/simpleperf_scripts/report_html.py.dl-tmp 失败`。根因——`xperf-core/src/simpleperf.rs::scripts_dir()` 用 `env!("CARGO_MANIFEST_DIR")` 拼路径，把**构建机目录**烤进二进制：CI 构建的 Linux 产物指向容器内 `/builds/...`（用户机上不存在且父目录不可写 → AOSP 引导下载也必败），本机脚本 `scripts/release-macos.sh` 构建的 DMG 则烤成维护者仓库路径——**在构建机上恰好可用故本机测不出，换任何用户机器即失效**。影响面：GUI 火焰图按钮 + CLI `--update-simpleperf-scripts`（同 `scripts_dir`），`--clean-cache` 的第三项也会去删一个不存在的路径。
+  **修法（建议）**：① core 把 `scripts_dir()` 改为解析链 + 纯函数便于单测——宿主注入 override（GUI `resource_dir()/simpleperf_scripts`、CLI exe 旁 `simpleperf_scripts/`，与 `resolve_agent_binary` 同构；可选 env `XPERF_SIMPLEPERF_SCRIPTS` 供排障）→ 编译期 workspace 目录**存在才用**（维护者检出、git 同步 vendor 的语义不变）→ 可写缓存 `~/.cache/xperf/simpleperf_scripts/` 兜底，且 `download_scripts` 前 `create_dir_all`；② 打包随产物附脚本集：CI tar 与 release-macos.sh 各带**本主机平台**的 `bin/<os>-<arch>` （省双平台 ~30MB），`tauri.release.json` resources 增一项，GUI 复用 agent 的 resource_dir 传参套路；③ 只读 bundle 下 `--update-simpleperf-scripts` 改落缓存目录或如实提示。**验收**：单测锁优先级；干净环境（容器/无仓库路径的机器）跑发布 GUI 出火焰图 HTML + 发布 CLI `--update-simpleperf-scripts` 成功；v0.3.2 发布后按 K2 同法复跑覆盖。
 - [x] ~~**v0.3.0 AppImage 在 Ubuntu 24.04 点击全无响应**~~（**已修复**，2026-09-20，`fix/appimage-webkit-sandbox` 合 main 6610fe1 / 修复 cfa6576，随 v0.3.1 发布）：根因——Ubuntu 24.04+ 默认 `kernel.apparmor_restrict_unprivileged_userns=1`，AppImage 内 WebKitGTK 以 bubblewrap 沙箱启动 Web 进程（需 user namespace），而 `/tmp/.mount_*` 动态挂载路径不匹配系统 AppArmor profile（只豁免 distro 安装的 webkit）→ Web 进程创建失败：窗口有静态画面但点击/前端 IPC 全部无响应（debug API 实证：无 WebKitWebProcess 子进程、`frontend_ready=true` 但 dom/eval 全超时；`WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS=1` 后进程拉起、点击链路恢复）。修复路径三连勘察：① main 内 `set_var` 对沙箱判定**不生效**（Web 进程仍不起——判定须在 exec 前由环境提供）② re-exec 修补生效但引入**点击即崩**副作用（两实例复现：eval 60s 全绿、首次 click 后 Web 进程消失无 coredump；同二进制手动 env 则 click 正常）③ 终案 = CI `gui:linux` 打包时向 AppDir `apprun-hooks/linuxdeploy-plugin-gtk.sh` 追加**条件式** export（AppRun source 链在 exec 前注入环境，运行时读 `kernel.apparmor_restrict_unprivileged_userns`——仅 24.04+ 受限内核禁用，22.04/其他发行版保留沙箱，质量门 grep 校验）。**代码途径已全数实证排除**：除 ①② 外，官方 `webkit_web_context_set_sandbox_enabled` API 存在但 tauri 2.4/wry 0.50 均不向应用暴露 WebContext（wry 每次新建、tauri 不透传），fork patch 依赖的维护负担不值。——解包目录全形态验证：Web 进程拉起、eval/click/60s 监控全绿；条件 hook 语法/受限触发/set -e 安全本地验证。Rust 侧仅留注释（main.rs 开头）。全量 core 166+8/CLI 12/GUI 16 绿，clippy/doc 零警告。
 - [x] ~~**`cargo run --bin xperf-gui --release` 报「GUI 发布包缺少预编译 agent」**~~（**已修复**，2026-09-17 晚，`fix/gui-release-agent-fallback` 合 main）：根因——`f4f285d`（GUI 发布打包）把 dev 路径的 `ensure_agent_built()` 换成 `bundled_agent_path()`，回退分支以 `cfg!(debug_assertions)` 判定开发运行，而 `cargo run --release` 是 release profile 的**开发运行**（无打包资源）被误判为发布包缺资源。修复：开发判定改为「编译期 workspace 是否存在」（core 新增 `agent::workspace_root()`，绝对路径只在构建机有效）——存在则回退 `ensure_agent_built`（与 CLI 一致自动构建，任意 profile），发布包用户机器必然落到缺资源报错、不触发 Cargo/NDK（发布约束不变）。真机端到端：release GUI `--remote hppc --device 6eb792dfb0f` 自动启动采样全通（三类 CSV 流式落盘 + daemon 空载自杀零残留）；core 149+8 全绿（含新增 workspace_root 单测）。
 
@@ -139,7 +141,7 @@
 
 > 上轮回归的两块环境覆盖缺口 + 一个收尾项。三项均可**从 Mac 经 SSH 链全程驱动**（GUI 进程跑在目标机上——这正是覆盖点），无需登机操作。GUI 长驻进程统一 `setsid nohup ... </dev/null`（SIGHUP 教训）。
 
-- [ ] **K1：hppc GUI `--remote kong`（覆盖「Linux 上的 SSH 远程模式」）**
+- [ ] **K1：hppc GUI `--remote kong`（覆盖「Linux 上的 SSH 远程模式」）** — **阻塞中（2026-09-22 勘察）**：kong 侧 `adb devices` 空列表、`lsusb` 无任何 Android 设备（车机未通电/未插线），hppc→kong 免密与 Xvfb 均正常。恢复条件＝把 SS2PRO/SS4 接到 kong 后按下列步骤原样执行（步骤与判据不变）。同时核实：Mac 本机 adb 零设备、hppc 本机挂 SS3+SS2MAX+SS4（K2 因此改在 hppc 跑）。
   - **目的**：目前 SSH 远程模式只有 Mac（--remote hppc）覆盖；Linux 侧差异在 webkit2gtk 渲染，需 hppc 直编 GUI 经 SSH 连 kong 验证一次
   - **环境**（上轮已勘察）：hppc 直编仓库 `~/code/tools/xperf`（已同步 main `81780ae`）；kong 挂 SS2PRO `ac889a71b1f` + SS4 桥接 `localhost:5559`；测试包 `com.google.android.filament.hellotriangle`（kong 无 gltf viewer）；hppc→kong 免密可达；Xvfb `:99` 上轮已起（没了则 `Xvfb :99 &`）
   - **步骤**：
@@ -149,18 +151,15 @@
     3. hppc 同机跑套件：`XPERF_TEST_SSH=kong XPERF_TEST_SSH_UI=kong XPERF_ADB=~/Android/Sdk/platform-tools/adb XPERF_IT_PACKAGE=com.google.android.filament.hellotriangle python3 scripts/gui_tests/regression.py --group all --serial ac889a71b1f --skip-feedback`
     4. 可选加跑 `stress.py --serial ac889a71b1f`（s7 adb 冻结注入在「Linux ssh 远程」链路下首次覆盖）
   - **预期**：g1-g8 全绿（hppc 的 ssh config 含 kong → g1 SSH 小节可跑；Linux 无 macOS 锁屏/rAF 冻结问题）；结果记 SESSION、勾选本项、更新 GUI-TEST-PLAN 环境矩阵
-- [ ] **K2：kong AppImage v0.3.1 本地模式（发布二进制等效性）**
-  - **目的**：验证 v0.3.1 发布产物（Linux AppImage）在 Ubuntu 22.04 全链路可用
-  - **路径**：Mac → hppc → kong（`ssh hppc "ssh kong ..."`；kong 有 python3/xvfb-run/adb，上轮已勘察）
-  - **步骤**：
-    1. hppc 下载（`~/.git-credentials` 有 PAT）：GitLab project 39859 release v0.3.1 资产，`https://gitlab.chehejia.com/api/v4/projects/39859/packages/generic/xperf/v0.3.1/<file>`（文件名查 release 页，取 x86_64 AppImage）
-    2. scp hppc→kong：AppImage + `scripts/gui_tests/{harness.py,regression.py}`（stress.py 可选）
-    3. kong 运行：`chmod +x <appimage> && xvfb-run -a ./<appimage> &`（本地模式默认，无 --remote）
-    4. kong 同机跑：`XPERF_IT_PACKAGE=com.google.android.filament.hellotriangle XPERF_TEST_LOCAL_SERIALS=ac889a71b1f,localhost:5559 python3 regression.py --group all --serial ac889a71b1f --skip-feedback`（本地模式无 ssh，SSH 相关小节 SKIP 属预期）
-  - **预期与判读**：核心组（g2 采样/g3 深挖/g5 logcat/g7 并行）应过；**v0.3.1 不含 2026-09-21/22 的修复**（open_perfetto_ui async 化、start 防重入、capabilities set-focus、连点 5s 冷却、刻度档位化内存修复）——依赖这些的用例失败属预期，逐条标注「v0.3.1 已知不含修复」vs「AppImage 环境问题」；kong 是 22.04 无 userns 限制（24.04 的 AppRun hook 条件不触发）
-  - **后续**：v0.3.2 发版后同法复跑一轮拿「含全部修复」的发布验证
-- [ ] **K3：GitLab issue #5 关闭**（[gui-test] 验证 issue，上轮真实上传已完成验证）
-  - Mac OAuth token `~/.config/xperf/gitlab-oauth.json`：`PUT https://gitlab.chehejia.com/api/v4/projects/39859/issues/5` form `state_event=close`
+- [x] ~~**K2：kong AppImage v0.3.1 本地模式（发布二进制等效性）**~~（**已完成**，2026-09-22 晚，**执行环境改为 hppc**：kong 无设备挂载，而 hppc 挂着 SS3+SS2MAX+SS4 且系统更新——测的是同一份发布产物）
+  - **结果（v0.3.1 AppImage / Ubuntu 24.04.5 / Xvfb :99 / 本机模式 / 三设备）**：`regression.py --skip-feedback` 总计 **FAIL 2 → 分诊后 1 真缺陷 + 1 判据竞态**（修判据后 g6 复跑 10/10）。g1 2/2+SKIP(SSH)、g2 **22/22**、g3 14/15、g4 **19/19**+SKIP(隧道重建，本机模式无隧道)、g5 **14/14**、g6 10/10（复跑）、g8 **3/3**。
+  - **发布验证亮点**：① 24.04 `apparmor_restrict_unprivileged_userns=1` 现场，条件式 AppRun hook 实际注入 `WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS=1`（核验 `/proc/<pid>/environ`），WebKitWebProcess/NetworkProcess 正常拉起、全程 UI 可交互 → **v0.3.0「点击全无响应」修复在发布产物上闭环**；② harfbuzz 注入 + FUSE 挂载 + `--clean-cache`/agent 资源等无 Cargo/NDK 参与（g2/g4 采样零构建）；③ g8 杀 NetworkProcess 后 debug API 与 UI 自愈 ✓。
+  - **抓出的真缺陷（已入 A 节）**：g3「火焰图 HTML 产物」FAIL——`scripts_dir()` 烤编译期路径 `/builds/ligraphic/xperf/...`，发布产物上必败（macOS DMG 同缺陷、在构建机上被掩盖）。
+  - **覆盖判读（如实记录）**：① 22.04 仍**未覆盖**（kong 才有 22.04；hppc=24.04 反而多验了沙箱 hook 分支）；② v0.3.1 不含 9-21/9-22 修复，本轮相关用例通过**不可当回归证据**——g4「start 双击仅一次」在旧版上偶发通过（防重入修复不在内，本机往返快），g3「连点不炸」判据只查存活不查标签页数（连点 5s 冷却修复亦不在内）；③ 录屏/镜像 SKIP（hppc 未装 scrcpy）、SSH 隧道重建 SKIP（本机模式），与上轮 hppc 直编一致。
+  - **环境事实**：产物 `hppc:~/xperf-rel/xperf-v0.3.1-linux-x86_64-gui.AppImage`（110MB，GitLab package registry API 下载）；启动脚本 `/tmp/hppc_launch.sh`、日志 `/tmp/xperf_gui_appimage.log`、套件日志 `/tmp/gui_reg_appimage.log`；上一会话遗留的 idle 直编 GUI（pid 4120325，uptime 11h）已 SIGTERM 停掉腾出发现文件/adb。
+  - **后续**：v0.3.2 发版后同法复跑一轮拿「含全部修复 + 火焰图路径已修」的发布验证；22.04 覆盖待 kong 设备恢复（可与 K1 同场）。
+  - **原 kong 计划留档（待设备恢复复用）**：产物从 GitLab package registry API 下载（hppc `~/.git-credentials` 有 PAT，`.../packages/generic/xperf/<tag>/xperf-<tag>-linux-x86_64-gui.AppImage`）→ scp hppc→kong（连 `scripts/gui_tests/{harness.py,regression.py}`）→ kong `chmod +x && xvfb-run -a ./<appimage> &` 本地模式 → `XPERF_IT_PACKAGE=com.google.android.filament.hellotriangle XPERF_TEST_LOCAL_SERIALS=ac889a71b1f,localhost:5559 python3 regression.py --group all --serial ac889a71b1f --skip-feedback`。kong=22.04（无 userns 限制，AppRun hook 条件不触发，与本轮 hppc 互补）。
+- [x] ~~**K3：GitLab issue #5 关闭**~~（**已完成**，2026-09-22 晚）：Mac OAuth access_token 已过期（401），改经 hppc `~/.git-credentials` 的 PAT 走 `PUT /projects/39859/issues/5` form `state_event=close` → http 200，`state=closed`。
 
 ---
 

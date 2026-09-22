@@ -42,7 +42,8 @@ python3 scripts/gui_tests/harness.py --check                  # harness 自检
 |------|---------|------|--------|
 | Mac 本机 | 直编 `target/release/xperf-gui` | SSH 远程（hppc 挂真机） | 主验证环境（本文档基线） |
 | hppc 直编 | Linux 原生 GUI | 本机 adb | WebKit 进程树形态、X11 下 `resize_default` |
-| kong AppImage | v0.3.1 发布产物 | 本机 adb（kong 自挂 SS2PRO + SS4 桥接） | 发布二进制等效性（v0.3.1 早于本会话修复，capabilities/async 修复不在内属预期） |
+| hppc AppImage（v0.3.1 发布产物） | 2026-09-22 实测：从 package registry 下载的 `xperf-v0.3.1-linux-x86_64-gui.AppImage`，FUSE 直跑 | 本机 adb（SS3+SS2MAX+SS4） | 发布二进制等效性——**Ubuntu 24.04**（`apparmor_restrict_unprivileged_userns=1`）顺带验证 v0.3.1 条件式沙箱 hook 生效（`/proc/<pid>/environ` 有 `WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS=1`、WebProcess 起、点击链路全通）；抓出 #10 发布产物缺陷。22.04 与「Linux 上的 SSH 远程模式」两格仍空（kong 侧设备未挂载，见 WORKSPACE K1/K2） |
+| ~~kong AppImage~~（未跑） | 原计划 v0.3.1 发布产物 | 本机 adb（kong 自挂 SS2PRO + SS4 桥接） | 2026-09-22 勘察：kong `adb devices` 空 + `lsusb` 无 Android 设备 → 改在 hppc 执行（上表）；待 kong 设备恢复按 WORKSPACE K2 留档步骤补 22.04 覆盖 |
 
 同一套 `regression.py` 三环境通用（脚本在 GUI 宿主机上跑，读本地发现文件）；
 `adb_on_remote` 在 ssh 模式经 hop#1 宿主执行（非交互 ssh 无 PATH，自动探测
@@ -119,6 +120,23 @@ python3 scripts/gui_tests/harness.py --check                  # harness 自检
    离屏唯一串 10/s 反向放大 43.65）→ fillText 包装器计数唯一串。
    **残余（非泄漏）**：修复后首分钟合成器 IOSurface 填池（purgeable，OS 压力
    可回收、不计 phys_footprint），ps RSS 判据须取后半程斜率（s1 已按此）。
+
+10. **发布产物烤编译期路径（真缺陷，2026-09-22 hppc AppImage g3 抓出）**：火焰图
+    脚本目录 `xperf-core/src/simpleperf.rs::scripts_dir()` = `env!("CARGO_MANIFEST_DIR")`
+    + `simpleperf_scripts`，把**构建机目录**烤进二进制——CI 产物指向容器内
+    `/builds/ligraphic/xperf/xperf-core/...`（用户机不存在且不可写，AOSP 引导下载同样
+    失败），本机 `release-macos.sh` 产物烤成维护者仓库路径（**在构建机上恰好可用，
+    本机/直编测试永远测不出**）。症状：状态栏「打开火焰图失败: 创建 <path>.dl-tmp
+    失败」+ g3 判据「火焰图 HTML 产物」空列表。修法与验收见 WORKSPACE A 节；
+    **纪律性结论**：凡 `env!("CARGO_MANIFEST_DIR")`/`concat!(env!(...))` 出现在运行时
+    路径解析处，都必须在**发布产物 + 干净机器**上验一次，直编环境不构成证据。
+
+11. **旧版产物上「通过」的用例不等于回归证据（2026-09-22 同轮）**：v0.3.1 tag（
+    `80c2968`，9-20）不含 9-21/9-22 的修复，但本轮 g4「start 双击仅启动一次」与
+    g3「连点不炸（冷却保护）」照样 PASS——前者是防重入修复缺失下的偶发通过（本机
+    invoke 往返快，双击的第二击落在 disabled 之后），后者判据只查 GUI 存活不查新开
+    标签页数（连点开 3 页由压测 s6 的 diag 计数才测得）。**发布产物回归要跑 s6 类
+    带计数的判据**，或把这两条判据升级为可判定形态（候补）。
 
 ## 压力测试（2026-09-22 交付）
 
