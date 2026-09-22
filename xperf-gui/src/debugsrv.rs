@@ -270,11 +270,20 @@ async fn api_status(State(ctx): State<Ctx>) -> (StatusCode, Json<Value>) {
             })
             .collect()
     };
-    // adb 枚举含 bridge refresh，可能秒级——放 blocking 池，不占 runtime 线程
-    let devices = tokio::task::spawn_blocking(xperf_core::list_adb_devices)
-        .await
-        .unwrap_or_else(|_| Ok(Vec::new()))
-        .unwrap_or_default()
+    // 设备列表读监视器缓存（非阻塞）：adb server 卡死时活查询会永久挂起
+    // handler 拖死整个调试接口（2026-09-22 压测实测 /api/status 超时）；缓存为空
+    // （启动首 3s 监视器未产出）才回退活查询——adb 枚举含 bridge refresh 可能秒级，
+    // 放 blocking 池不占 runtime 线程
+    let cached = st.devices_cache.lock().unwrap().clone();
+    let live = if cached.is_empty() {
+        tokio::task::spawn_blocking(xperf_core::list_adb_devices)
+            .await
+            .unwrap_or_else(|_| Ok(Vec::new()))
+            .unwrap_or_default()
+    } else {
+        cached
+    };
+    let devices = live
         .into_iter()
         .map(|d| {
             json!({

@@ -383,6 +383,10 @@ struct AppState {
     /// 经 `agent_building` 命令回查该状态补偿（done 事件必然晚于构建完成，能收到）。
     /// 计数配对：构建窗口内重启采样会产生并发构建者，归零才算真正构建完
     agent_building: Mutex<HashMap<String, usize>>,
+    /// 设备热插拔监视器的最近一轮成功枚举快照（未过滤网关的原始列表）。
+    /// 供 debug API `/api/status` 非阻塞读取——adb server 卡死时活查询会永久
+    /// 挂起 handler（2026-09-22 压测实测），缓存语义 ≤3s  staleness 足够新鲜。
+    devices_cache: Mutex<Vec<xperf_core::AdbDevice>>,
 }
 
 impl AppState {
@@ -443,6 +447,14 @@ fn visible_devices(devices: Vec<xperf_core::AdbDevice>) -> Vec<xperf_core::AdbDe
 /// 不在线返回带设备清单的错误（前端展示给用户）。SS4 网关（MindRT）拒绝采样，
 /// 错误信息指引其桥接出的 Android 伪设备。
 fn ensure_device_online(serial: &str) -> Result<(), String> {
+    // SSH 模式隧道死（网络抖动/远端重启后）而会话空闲时，没有任何路径会重建隧道
+    // ——adb 调用打到死转发口行为不定（实测 start_sampling 挂起无返回）。命令入口
+    // 先自愈隧道再校验设备（采样中的隧道重建由 reconnect_agent 负责，互补）
+    if matches!(xperf_core::transport(), xperf_core::Transport::Ssh(_))
+        && !xperf_core::tunnel_alive()
+    {
+        xperf_core::rebuild_tunnel().map_err(|e| format!("SSH 隧道重建失败: {e}"))?;
+    }
     let devices = xperf_core::list_adb_devices().map_err(|e| e.to_string())?;
     match devices.iter().find(|d| d.serial == serial) {
         Some(d) if d.is_gateway => {
@@ -1715,7 +1727,14 @@ fn spawn_device_monitor(app: tauri::AppHandle) {
             let devices = match xperf_core::list_adb_devices() {
                 // diff 之前过滤网关（设计 §4.4）：网关插拔不产生 devices-changed
                 // 噪声、不进 added/removed，前端不会为 MindRT 建 tab
-                Ok(d) => visible_devices(d),
+                Ok(d) => {
+                    // 原始快照供 debug API /api/status 非阻塞读取（adb 卡死时
+                    // 活查询会挂死 handler；缓存即后端真相，staleness ≤3s）
+                    if let Some(st) = app.try_state::<AppState>() {
+                        *st.devices_cache.lock().unwrap() = d.clone();
+                    }
+                    visible_devices(d)
+                }
                 Err(_) => continue, // adb 暂不可用，下轮重试
             };
             let (added, removed) = xperf_core::diff_devices(&last, &devices);
@@ -2065,6 +2084,7 @@ fn main() {
         .manage(AppState {
             sessions: Mutex::new(HashMap::new()),
             agent_building: Mutex::new(HashMap::new()),
+            devices_cache: Mutex::new(Vec::new()),
         })
         .manage(debugsrv::DebugSlot::new(None))
         .setup(move |app| {
@@ -2314,7 +2334,8 @@ Host myserver          # 重复别名去重
 
     #[test]
     fn test_app_state_sessions_per_device() {
-        let state = AppState { sessions: Mutex::new(HashMap::new()), agent_building: Mutex::new(HashMap::new()) };
+        let state = AppState { sessions: Mutex::new(HashMap::new()), agent_building: Mutex::new(HashMap::new()),
+            devices_cache: Mutex::new(Vec::new()) };
         let a1 = state.session("devA");
         let b1 = state.session("devB");
         assert!(!*a1.running.lock().unwrap());
@@ -2387,7 +2408,8 @@ Host myserver          # 重复别名去重
 
     #[test]
     fn test_csv_dir_for_fresh_and_reuse() {
-        let state = AppState { sessions: Mutex::new(HashMap::new()), agent_building: Mutex::new(HashMap::new()) };
+        let state = AppState { sessions: Mutex::new(HashMap::new()), agent_building: Mutex::new(HashMap::new()),
+            devices_cache: Mutex::new(Vec::new()) };
         let pkg = format!("test_csvdir_{}", std::process::id());
         // 同包 + 非 fresh（指标勾选重启）→ 复用同一目录
         let d1 = state.csv_dir_for("devA", &pkg, false);
