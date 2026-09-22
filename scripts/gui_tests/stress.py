@@ -330,12 +330,16 @@ def scenario_s1(c, ck, mon, args):
     launch_app(c, args.serial)
     if not start_sampling(c, ck, args.serial, "s1 开始监控"):
         return
-    # 唯一文本串计数器（透明包装，结束读取后还原）
-    c.eval(
-        f"(()=>{{const s=app.sessions.get('{args.serial}');window._s1uniq=new Set();"
+    # 唯一文本串计数器（透明包装，结束读取后还原）；%SERIAL% 占位替换——
+    # 避免 f-string 花括号转义（JS 大括号在 f-string 段需 {{}}、普通字符串段
+    # 不需，混排极易错——首跑即栽在尾段 }} 未转义）
+    install = (
+        "(()=>{const s=app.sessions.get('%S%');window._s1uniq=new Set();"
         "s.allCharts.forEach(ch=>{if(!ch._s1wrap){ch._s1wrap=ch.ctx.fillText.bind(ch.ctx);"
         "ch.ctx.fillText=function(t,x,y){window._s1uniq.add(String(t));"
-        "ch._s1wrap(t,x,y);};}});return 1}})()")
+        "ch._s1wrap(t,x,y);};}});return 1})()"
+    ).replace("%S%", args.serial)
+    c.eval(install)
     c0 = cpu_count(c, args.serial)
     deadline = time.time() + args.s1_minutes * 60
     last = c0
@@ -350,10 +354,12 @@ def scenario_s1(c, ck, mon, args):
             stall_windows += 1
         last = now
     uniq = c.eval("window._s1uniq.size")
-    c.eval(
-        f"(()=>{{const s=app.sessions.get('{args.serial}');"
+    restore = (
+        "(()=>{const s=app.sessions.get('%S%');"
         "s.allCharts.forEach(ch=>{if(ch._s1wrap){ch.ctx.fillText=ch._s1wrap;ch._s1wrap=null;}});"
-        "window._s1uniq=null;return 1}})()")
+        "window._s1uniq=null;return 1})()"
+    ).replace("%S%", args.serial)
+    c.eval(restore)
     ck.check("s1 采样全程无 60s 停滞窗", stall_windows == 0,
              f"stall_windows={stall_windows} cpu {c0}→{last}")
     ck.check("s1 唯一文本串 <300（WebKit 驻留泄漏签名）", uniq is not None and uniq < 300,
