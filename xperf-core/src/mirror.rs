@@ -614,7 +614,7 @@ mod tests {
             .args([
                 "-c",
                 &format!(
-                    "trap 'touch {}' INT; touch {}; while :; do sleep 0.2; done",
+                    "trap 'touch {}; exit 0' INT; touch {}; while :; do sleep 0.2; done",
                     marker.display(),
                     ready.display()
                 ),
@@ -624,15 +624,34 @@ mod tests {
         let mut h = handle_for(child);
         h.record_path = Some(PathBuf::from("/tmp/xperf-test-rec.mp4"));
         // 等 sh 装好 trap（ready 握手——固定 sleep 在全量并行测试高负载下曾竞态：
-        // SIGINT 先于 trap 安装到达，默认动作杀 shell，标记缺失误报失败）
+        // SIGINT 先于 trap 安装到达，默认动作杀 shell，标记缺失误报失败）。
+        // trap 里 `exit 0` 而非只 touch：让 shell 收到 SIGINT 后**自行优雅退出**
+        // （语义与 scrcpy finalize 一致）——只 touch 时 shell 会继续 while 循环，
+        // 用例实际靠 3s 宽限到期后的 SIGKILL 收尾，高负载下 trap 来不及跑就被杀，
+        // 标记文件缺失造成假失败（2026-09-22 一轮 6/6 复现，同机后续 10+ 轮不复现）
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         while !ready.exists() {
             assert!(std::time::Instant::now() < deadline, "sh trap 就绪握手超时");
             std::thread::sleep(Duration::from_millis(20));
         }
         h.stop();
+        // SIGINT 的 trap 要等 shell 当前那条 `sleep 0.2` 结束才执行（POSIX 前台等待语义），
+        // 判据用轮询（2s，远大于 0.2s 且短于 3s 宽限）而非 wait_exit 后的一次性断言——
+        // 调度抖动不再造成假失败（2026-09-22 同一条断言在满载下间歇误报，事后 8 轮全绿）
+        let mut signaled = false;
+        for _ in 0..40 {
+            if marker.exists() {
+                signaled = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(signaled, "录屏停止应投递 SIGINT（trap 标记文件）");
+        assert!(
+            h.sigint_at.lock().unwrap().is_some(),
+            "stop() 应记录 SIGINT 发出时刻（防重复发信号）"
+        );
         assert!(matches!(h.wait_exit(), MirrorExit::Stopped));
-        assert!(marker.exists(), "录屏停止应投递 SIGINT（trap 标记文件）");
         assert!(!h.is_alive());
         std::fs::remove_file(&marker).ok();
         std::fs::remove_file(&ready).ok();
