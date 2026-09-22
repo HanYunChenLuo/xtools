@@ -229,10 +229,14 @@ def webkit_children(gui_pid):
 
 
 def proc_rss_cpu(pids):
-    """进程 RSS(KB)/CPU(%) 采样快照（ps 一次往返，多 pid）。"""
+    """进程 RSS(KB)/CPU(%) 采样快照（ps 一次往返，多 pid）。
+
+    多 pid 必须 `-p` + 逗号连接：macOS BSD ps 对裸 pid 列表语义错乱
+    （返回行数多于请求 pid 数，2026-09-22 压测实测）；`-p a,b,c` 双平台一致。
+    """
     if not pids:
         return {"rss_kb": 0, "cpu": 0.0, "alive": 0}
-    args = ["ps", "-o", "rss=,pcpu=", *[str(p) for p in pids]]
+    args = ["ps", "-o", "rss=,pcpu=", "-p", ",".join(str(p) for p in pids)]
     try:
         out = subprocess.run(args, capture_output=True, text=True, timeout=5).stdout
     except Exception:

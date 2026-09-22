@@ -383,6 +383,10 @@ struct AppState {
     /// 经 `agent_building` 命令回查该状态补偿（done 事件必然晚于构建完成，能收到）。
     /// 计数配对：构建窗口内重启采样会产生并发构建者，归零才算真正构建完
     agent_building: Mutex<HashMap<String, usize>>,
+    /// 设备热插拔监视器的最近一轮成功枚举快照（未过滤网关的原始列表）。
+    /// 供 debug API `/api/status` 非阻塞读取——adb server 卡死时活查询会永久
+    /// 挂起 handler（2026-09-22 压测实测），缓存语义 ≤3s  staleness 足够新鲜。
+    devices_cache: Mutex<Vec<xperf_core::AdbDevice>>,
 }
 
 impl AppState {
@@ -443,6 +447,14 @@ fn visible_devices(devices: Vec<xperf_core::AdbDevice>) -> Vec<xperf_core::AdbDe
 /// 不在线返回带设备清单的错误（前端展示给用户）。SS4 网关（MindRT）拒绝采样，
 /// 错误信息指引其桥接出的 Android 伪设备。
 fn ensure_device_online(serial: &str) -> Result<(), String> {
+    // SSH 模式隧道死（网络抖动/远端重启后）而会话空闲时，没有任何路径会重建隧道
+    // ——adb 调用打到死转发口行为不定（实测 start_sampling 挂起无返回）。命令入口
+    // 先自愈隧道再校验设备（采样中的隧道重建由 reconnect_agent 负责，互补）
+    if matches!(xperf_core::transport(), xperf_core::Transport::Ssh(_))
+        && !xperf_core::tunnel_alive()
+    {
+        xperf_core::rebuild_tunnel().map_err(|e| format!("SSH 隧道重建失败: {e}"))?;
+    }
     let devices = xperf_core::list_adb_devices().map_err(|e| e.to_string())?;
     match devices.iter().find(|d| d.serial == serial) {
         Some(d) if d.is_gateway => {
@@ -1696,6 +1708,9 @@ fn spawn_device_monitor(app: tauri::AppHandle) {
             if tunnel_dead {
                 if !tunnel_was_dead {
                     tunnel_was_dead = true;
+                    // 边沿留痕：master 死亡时刻是故障归因关键证据（2026-09-22 曾现
+                    // master 无痕迹死亡致设备枚举全空）
+                    xperf_core::utils::diag("tunnel: 检测到 SSH 隧道死亡，等待恢复");
                     let _ = app.emit(
                         "remote-status",
                         serde_json::json!({"state": "tunnel-down", "message": "SSH 隧道断开，等待恢复…"}),
@@ -1705,6 +1720,7 @@ fn spawn_device_monitor(app: tauri::AppHandle) {
             }
             if tunnel_was_dead {
                 tunnel_was_dead = false;
+                xperf_core::utils::diag("tunnel: SSH 隧道已恢复");
                 last.clear(); // 清快照强制全量 diff，设备 tab 状态与新侧对齐
                 first_round = true;
                 let _ = app.emit(
@@ -1715,7 +1731,14 @@ fn spawn_device_monitor(app: tauri::AppHandle) {
             let devices = match xperf_core::list_adb_devices() {
                 // diff 之前过滤网关（设计 §4.4）：网关插拔不产生 devices-changed
                 // 噪声、不进 added/removed，前端不会为 MindRT 建 tab
-                Ok(d) => visible_devices(d),
+                Ok(d) => {
+                    // 原始快照供 debug API /api/status 非阻塞读取（adb 卡死时
+                    // 活查询会挂死 handler；缓存即后端真相，staleness ≤3s）
+                    if let Some(st) = app.try_state::<AppState>() {
+                        *st.devices_cache.lock().unwrap() = d.clone();
+                    }
+                    visible_devices(d)
+                }
                 Err(_) => continue, // adb 暂不可用，下轮重试
             };
             let (added, removed) = xperf_core::diff_devices(&last, &devices);
@@ -2065,6 +2088,7 @@ fn main() {
         .manage(AppState {
             sessions: Mutex::new(HashMap::new()),
             agent_building: Mutex::new(HashMap::new()),
+            devices_cache: Mutex::new(Vec::new()),
         })
         .manage(debugsrv::DebugSlot::new(None))
         .setup(move |app| {
@@ -2179,6 +2203,8 @@ fn main() {
             // 关窗时停止全部设备采样：各会话 running 置 false，采样线程在下一轮
             // 循环检测到后退出，exec-out 管道断开 → 设备端 agent 因 stdout 写失败自行退出
             if let tauri::WindowEvent::CloseRequested { .. } = event {
+                // 退出路径留痕（2026-09-22 压测期 GUI 进程曾无痕迹消失，无法归因）
+                xperf_core::utils::diag("lifecycle: 收到 CloseRequested（用户关窗/Cmd+Q）");
                 // 深挖录制线程不等待（最长 600s），置中断标志让其尽快退出；
                 // 未及退出时设备端 perfetto 由 traced TTL 兜底停止（残留文件无害）
                 xperf_core::utils::set_interrupt_flag();
@@ -2314,7 +2340,8 @@ Host myserver          # 重复别名去重
 
     #[test]
     fn test_app_state_sessions_per_device() {
-        let state = AppState { sessions: Mutex::new(HashMap::new()), agent_building: Mutex::new(HashMap::new()) };
+        let state = AppState { sessions: Mutex::new(HashMap::new()), agent_building: Mutex::new(HashMap::new()),
+            devices_cache: Mutex::new(Vec::new()) };
         let a1 = state.session("devA");
         let b1 = state.session("devB");
         assert!(!*a1.running.lock().unwrap());
@@ -2387,7 +2414,8 @@ Host myserver          # 重复别名去重
 
     #[test]
     fn test_csv_dir_for_fresh_and_reuse() {
-        let state = AppState { sessions: Mutex::new(HashMap::new()), agent_building: Mutex::new(HashMap::new()) };
+        let state = AppState { sessions: Mutex::new(HashMap::new()), agent_building: Mutex::new(HashMap::new()),
+            devices_cache: Mutex::new(Vec::new()) };
         let pkg = format!("test_csvdir_{}", std::process::id());
         // 同包 + 非 fresh（指标勾选重启）→ 复用同一目录
         let d1 = state.csv_dir_for("devA", &pkg, false);

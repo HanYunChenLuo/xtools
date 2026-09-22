@@ -1,9 +1,11 @@
 # GUI 回归与压力测试计划（UI 全覆盖）
 
-> 对应 WORKSPACE 待办「GUI 完整回归与压力测试」的 UI 覆盖部分（压力测试后置到独立会话）。
+> 对应 WORKSPACE 待办「GUI 完整回归与压力测试」。回归部分见上（已完成，
+> Mac/hppc 双环境全绿）；压力测试 2026-09-22 交付 `scripts/gui_tests/stress.py`。
 > 驱动方式：`scripts/gui_tests/harness.py`（debug API 客户端，鉴权 token 自动发现）+
-> `scripts/gui_tests/regression.py`（场景组）。不依赖坐标模拟/AX 树——全部走
-> `xperf-gui/src/debugsrv.rs` 的可编程接口（设计见 `DESIGN-gui-debug.md`）。
+> `scripts/gui_tests/regression.py`（场景组）/ `stress.py`（压力场景）。不依赖
+> 坐标模拟/AX 树——全部走 `xperf-gui/src/debugsrv.rs` 的可编程接口
+> （设计见 `DESIGN-gui-debug.md`）。
 
 ## 运行方式
 
@@ -96,8 +98,58 @@ python3 scripts/gui_tests/harness.py --check                  # harness 自检
    agent v9 源码 > 9-7 旧产物）。**候选产品改进（未做）**：构建失败时把 cargo 的
    stderr 尾行附进错误信息，替代固定 NDK 文案。
 
-## 压力测试（后置）
+8. **进程级采样的 macOS 陷阱（2026-09-22 压测实测）**：①BSD ps 多 pid 裸列表
+   语义错乱（返回行数多于请求 pid）——必须 `-p a,b,c` 逗号连接（harness
+   `proc_rss_cpu` 已修）；②WKWebView 的 WebKit 子进程是 XPC 服务挂 launchd
+   （ppid=1、无 root 读不了 responsible），归因只能按「与 GUI 启动时刻相近」
+   时间窗匹配（stress `webkit_pids_for_gui`）；③崩溃重 spawn 的 WebContent
+   会逃逸时间窗归因——由 debug API 失联计数互补兜底。
 
-harness 已备 `proc_rss_cpu`/`webkit_children`（进程级 CPU/RSS 采样），供后续会话：
-长时采样、logcat 洪泛、trace/stack 并发、图表高频数据、多设备页切换、浏览器按钮
-连点、CPU/内存/DOM 增长曲线。产出基线记录进 SESSION.md。
+9. **WebKit 唯一文本串无界驻留（macOS 平台缺陷，2026-09-22 压测定位+根治）**：
+   WebCore 对**渲染/测量过的唯一字符串**有两层无淘汰 hash 驻留——fillText
+   ~74KB/串（文本绘制缓存）+ measureText ~6.3KB/串（FontCascade 宽度缓存）。
+   图表刻度标签原本每秒产新串（Y 轴连续浮点、X 轴 HH:MM:SS + tickStep 随窗口
+   连续变），9 图 × ~7 帧/s ⇒ WebContent RSS ~3.7MB/min 线性不收敛（45min
+   浸泡不平台化）。**修复** = 压灭唯一键产出：Y 轴上限 `niceCeil` 档位吸附
+   （1/1.5/2/2.5/3/4/5/7.5×10^n）+ X 轴 `niceTimeStep` 时间档位 + tick 对齐
+   绝对时间网格——实测唯一串 90s 450→21，dirty 内存持平、`phys_footprint`
+   恒定 133MB、RSS 预热后平在 120MB（footprint 双轨 6min 验证）。
+   勘察方法备忘：vmmap 分区定位（WebKit Malloc dirty 增长 vs owned unmapped
+   graphics）→ 操作级二分（禁 fillText 0.12MB/min / 时间标签固定 0.11 /
+   离屏唯一串 10/s 反向放大 43.65）→ fillText 包装器计数唯一串。
+   **残余（非泄漏）**：修复后首分钟合成器 IOSurface 填池（purgeable，OS 压力
+   可回收、不计 phys_footprint），ps RSS 判据须取后半程斜率（s1 已按此）。
+
+## 压力测试（2026-09-22 交付）
+
+```bash
+# 前置同 regression.py（GUI 已启动/设备在线/测试应用已装）；全程 ~20min
+python3 scripts/gui_tests/stress.py                       # 全部场景 s1..s7
+python3 scripts/gui_tests/stress.py --scenario s1,s7      # 指定场景
+python3 scripts/gui_tests/stress.py --s1-minutes 45       # 长浸泡
+```
+
+场景与判据（顺序执行，采样自 s1 起贯穿全程——叠加负载即压力）：
+
+| 场景 | 内容 | 判据要点 |
+|------|------|---------|
+| s1 | 长时采样（默认 10min @1s） | 无 60s 停滞窗；DOM 恒定；**唯一文本串 <300**（WebKit 驻留泄漏的直接签名，稳态 ~140/10min、泄漏态 3000+）；series 增长；RSS 斜率信息项（≥30min 长浸泡才硬判 <1MB/min 平台验证——短窗预热 2-5MB/min 波动） |
+| s2 | 50ms 高频数据（3min） | series 高速增长（~20 点/s/PID）；高频绘制下悬停读数可用 |
+| s3 | logcat 洪泛（全机 V + 设备端 `log` 循环注入） | ring buffer 封顶 2000；隐藏段 buf 冻结（后端暂停事件）；切回补发（洪泛序号前进——序号跨调用单调防回绕） |
+| s4 | trace 15s + stack 15s 并发（采样中） | 录制期间采样节拍不饿死；两报告产出 |
+| s5 | 三机并行 + 0.4s×150 快切设备页 | switch 无错乱；各设备 series 隔离增长 |
+| s6 | open-perf 按钮连点 ×10 | 首击后即禁用（防抖）；**连点仅开一页**（diag 计数差==1；冷却 5s 锚完成时刻——600ms 锚点击时刻实测 burst 开 3 页）；GUI 存活 |
+| s7 | adb server SIGSTOP 45s（仅 ssh 模式） | 冻结期间 series 静止；恢复后看门狗→重连→数据流自愈 |
+
+监测：全程 5s 粒度资源曲线落 JSONL（`/tmp/xperf-gui-stress-<ts>.jsonl`）——
+GUI/WebKit 进程 RSS+CPU、DOM 节点数、series 总点数、debug API 可达性、
+隧道/设备数快照；结束分段汇总基线表。WebKit 子进程归因：Linux 按 ppid；
+macOS WKWebView XPC 挂 launchd，按 GUI 启动时刻窗口（±5s/90s）匹配。
+
+压测产出的产品修复（2026-09-22，`feature/gui-stress-test`）：
+- agent 事件流**入向静止看门狗**（半开信道自愈，s7 回归守卫）
+- `/api/status` 设备列表读监视器缓存（adb 卡死不再拖垮调试接口）
+- GUI 命令入口隧道自愈（空闲期 master 死亡后 adb 打死转发口挂起）
+- 图表刻度标签档位化（WebKit 唯一文本串驻留泄漏根治，见 #9）
+- open-perf/stack 冷却 5s 锚完成时刻（600ms 点击锚 burst 连点开 3 页）
+- CloseRequested/隧道死亡边沿 diag 留痕

@@ -5,6 +5,25 @@
 > 待办事项（backlog）在 `WORKSPACE.md` 维护，本文件只做历史追溯。
 > 新会话开始时可先读本文件了解近期上下文。
 
+## 2026-09-22：GUI 压力测试（WORKSPACE I 节收官）——4 缺陷修复 + 稳定性基线
+
+**任务**：WORKSPACE「GUI 压力测试（后置）」——长时采样/logcat 洪泛/trace+stack 并发/图表高频数据/多设备页切换/浏览器按钮连点/CPU·内存·DOM 增长监测，产出稳定性基线。
+
+**交付**：`scripts/gui_tests/stress.py` 七场景（s1 长时采样/s2 50ms 高频/s3 logcat 洪泛含设备端注入/s4 trace+stack 并发/s5 三机并行快切页/s6 按钮连点/s7 adb server SIGSTOP 冻结注入）+ 5s 粒度资源曲线 JSONL（GUI/WebKit RSS+CPU、DOM、series 点数、隧道/设备数、debug API 可达性）分段汇总。分支 `feature/gui-stress-test`，commits：`c279a30`（套件+harness ps 修复）→ `2f26fb6`（看门狗）→ `ae4b5e3`（/api/status 缓存+隧道自愈）→ `34a7346`（刻度档位化）→ `c74757e`（diag 留痕+判据）→ `ebc0041`（冷却锚+判据双轨）→ `91694d3`（f-string 转义）→ `103ff25`（冷却 5s+s6 前置）。
+
+**压测抓出的 5 个真缺陷（全修+真机验证）**：
+1. **采样静默挂死不自愈**（首轮 22/27 五项 FAIL 的共同根因）：adb server 短暂卡死可致转发信道「无数据亦无 EOF」永久半开，series 冻结、前后端均无感知（s7 确定性复现）。修复 = 会话 TCP 入向静止看门狗 max(15s, 5×interval)——daemon 每轮节拍至少产一行（零输出轮发心跳空行），超时映射 EOF 走既有重连；CLI 同享。
+2. **debug API 被 adb 卡死拖垮**：`/api/status` 活查询 adb 在 server 冻结时永久挂起 handler（实测超时拖死调试接口）。修复 = 设备列表读热插拔监视器 3s 快照（首轮缓存未填才回退活查询）。
+3. **ssh 隧道空闲期死亡无自愈**：master 无声死亡后（设备枚举全空 2min 实测），空闲会话下无任何重建路径，adb 打死转发口行为不定（start_sampling 挂起）。修复 = `ensure_device_online` 先 rebuild_tunnel 再校验（采样中由 reconnect_agent 重建，互补）。
+4. **WebKit 唯一文本串无界驻留泄漏**（浸泡实测 WebContent RSS ~3.7MB/min 线性不收敛，45min 不平台化）：WebCore 对渲染/测量过的唯一字符串两层无淘汰 hash 驻留（fillText ~74KB/串 + FontCascade measureText ~6.3KB/串）。图表刻度标签每秒产新串（Y 轴连续浮点 + X 轴 HH:MM:SS/tickStep 连续变）× 9 图 × ~7 帧/s。修复 = `niceCeil` Y 轴档位吸附 + `niceTimeStep` X 轴时间档位 + tick 绝对网格对齐——唯一串 90s 450→21；dirty（WebKit Malloc）持平、phys_footprint 恒定 133MB、预热后 RSS 平 120MB（footprint 双轨 6min）。**残余非泄漏**：合成器 IOSurface 预热（purgeable，OS 压力可回收），预热期 20-50min 内 RSS 斜率 2-4MB/min 属预期——s1 判据因此双轨化（唯一串计数 <300 为本质签名 + RSS 斜率按时长取阈）。
+5. **open-perf/stack 连点穿透开重复标签页**（用户实撞「为什么 perfetto 开三个网页」）：600ms 冷却锚在点击时刻而 invoke 本身 ~630ms——finally 解禁按钮时冷却已过期，burst 下一击穿透（diag 实锤一次连点开 3 页，0.62s 间隔）。修复分两步：冷却锚移到完成时刻（ebc0041）→ 复验仍 3 页（burst 跨 ~3.5s > 600ms 窗口）→ 冷却扩到 **5s** + 冷却期内点击状态栏提示（103ff25）；s6 增「连点仅开一页」diag 计数判据，复验 4/4（18→19 恰好一页）。**测试侧两个假阳性教训**：①s6 独立跑须先填包名（空包名兜底 trace 不启动，按钮从未启用，「首击后即禁用」在恒 disabled 按钮上平凡通过——修复未被测到）②f-string 与 JS 花括号混排的转义坑（占位符替换根治）。
+
+**勘察方法沉淀**（入 GUI-TEST-PLAN #8/#9）：vmmap 分区定位（WebKit Malloc dirty vs owned unmapped graphics）→ JS 操作级二分（禁 fillText 0.12MB/min / 时间标签固定 0.11 / 离屏唯一串 10/s 反向放大 43.65）→ fillText 包装器唯一串计数。macOS 陷阱：BSD ps 多 pid 裸列表语义错乱（须 `-p a,b,c`）；WKWebView XPC 挂 launchd 按 GUI 启动时刻窗归因；`willReadFrequently`（CPU 栅格化）反而 7.8MB/min 更糟（已回滚）；canvas resize/display 周期均不释放驻留。
+
+**基线（终跑 final3 + s6 复验，/tmp/xperf-gui-stress-20260922_1552*.jsonl）**：final3 29/31——核心判据全过：s1 无停滞窗、唯一文本串 39/10min（泄漏态 3000+）、DOM 1449→1459 恒定、s2 悬停读数可用、s3 洪泛三段全过、s4 双报告产出、s5 三机隔离、**s7 冻结 45s 静止 + 恢复后看门狗自愈**、全程 debug API 零失联；两个 FAIL 均为判据问题非缺陷（s6 600ms 冷却不足→已修并复验 4/4；s1 RSS 短窗斜率 4.59 预热波动→降级信息项）。GUI 主进程 RSS ~100MB 量级全程稳定。
+
+**遗留**：①上轮回归遗留未动（hppc GUI --remote kong / kong AppImage v0.3.1 / issue #5 关闭 / main↔hppc 同步）②10:32 GUI 进程消失（pid 25000）无 diag 留痕无法归因（用户否认知情手动关闭；已加 CloseRequested/隧道死亡留痕，再现可归因）③长浸泡 45min（s1 ≥30min 平台验证阈值 1.0）本轮未跑——10min 窗口验证已足够发布门，长浸泡留给下次环境复用时顺带。
+
 ## 2026-09-21：GUI 完整回归（Mac 全绿 + Linux 双环境）——WORKSPACE L133
 
 **任务**：WORKSPACE.md L133「GUI 完整回归与压力测试」。用户裁定：压力测试后置，先 UI 全覆盖；反馈链路真实上传一次；Linux 也要测（hppc 直编 GUI + kong AppImage）。
