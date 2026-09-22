@@ -879,6 +879,18 @@ fn html_path_for(data_path: &Path) -> PathBuf {
     data_path.with_extension("html")
 }
 
+/// 宿主 python3 的子进程构造：**剥掉随包 Python 的解释器定位变量**。
+/// AppImage 的 AppRun（linuxdeploy python 插件）给整个应用进程设
+/// `PYTHONHOME=$APPDIR/usr/` 与 `PYTHONPATH=$APPDIR/usr/share/pyshared/`，子进程直接
+/// 继承 → 宿主 python3 找不到自己的标准库（`ModuleNotFoundError: No module named
+/// 'encodings'`，CI 构建的 AppImage 真机实测）。火焰图渲染用的是宿主解释器，须按宿主
+/// 自己的路径找库；mac/Linux 直编环境无这些变量，行为不变。
+fn python3_command() -> Command {
+    let mut cmd = Command::new("python3");
+    cmd.env_remove("PYTHONHOME").env_remove("PYTHONPATH");
+    cmd
+}
+
 /// 在浏览器中查看 simpleperf 数据（GUI「函数热点」tab 的查看入口）：
 /// 用 AOSP 官方 `report_html.py` 把 `.data` 渲染成**单文件 HTML**（含火焰图/Chart/
 /// Sample Table，实测 3.3MB data → 7.8MB html ~1.2s），再 `open`/`xdg-open` 打开。
@@ -912,7 +924,7 @@ pub fn open_stack_in_browser(data_path: &Path) -> Result<String> {
             _ => false,
         };
     if !reuse {
-        let mut child = Command::new("python3")
+        let mut child = python3_command()
             .arg(scripts_dir.join("report_html.py"))
             .arg("-i")
             .arg(data_path)
@@ -1659,6 +1671,24 @@ mod tests {
         );
         let _ = std::fs::remove_dir_all(&root);
     }
+
+    /// 火焰图渲染的 python3 子进程须剥掉随包 Python 的解释器定位变量（AppImage 的
+    /// AppRun 设 PYTHONHOME/PYTHONPATH，宿主 python3 继承后连标准库都找不到）
+    #[test]
+    fn test_python3_command_scrubs_bundle_env() {
+        let removed: Vec<String> = python3_command()
+            .get_envs()
+            .filter(|(_, v)| v.is_none())
+            .map(|(k, _)| k.to_string_lossy().into_owned())
+            .collect();
+        for k in ["PYTHONHOME", "PYTHONPATH"] {
+            assert!(
+                removed.iter().any(|r| r == k),
+                "python3 子进程应移除 {k}，实际移除 {removed:?}"
+            );
+        }
+    }
+
 
     /// report 库按 >1MB 判存在（LFS 指针文本 ~130B 不算），普通脚本按非空判
     #[test]
