@@ -319,6 +319,25 @@ const alertBox = (msg, kind = 'warning') => window.__TAURI__.dialog.message(msg,
 // 读数格式化：最多两位小数去尾零（值在 push 时已按指标精度取整，这里只兜住 mem/freq 的原始浮点）
 function fmtChartVal(v) { return String(Number(v.toFixed(2))); }
 
+// Y 轴自适应上限取「好看」档位（1/1.5/2/2.5/3/4/5/7.5×10^n 向上）：档位吸附让
+// 刻度标签在稳态下保持恒定文本，避免每秒产生新字符串（WebKit 唯一文本串驻留）
+function niceCeil(v) {
+  if (!isFinite(v) || v <= 0) return 1;
+  const e = Math.floor(Math.log10(v));
+  const f = v / 10 ** e;
+  const STEPS = [1, 1.5, 2, 2.5, 3, 4, 5, 7.5, 10];
+  const nf = STEPS.find((s) => f <= s) ?? 10;
+  return nf * 10 ** e;
+}
+
+// X 轴时间刻度步长取时间档位（1s/2s/5s/10s/15s/30s/1/2/5/10/15/30min 向上）：
+// 与 tick 绝对对齐配合，窗口滚动或增长阶段标签文本都只在跨档时变化
+function niceTimeStep(ms) {
+  const STEPS = [1000, 2000, 5000, 10000, 15000, 30000,
+    60000, 120000, 300000, 600000, 900000, 1800000];
+  return STEPS.find((s) => ms <= s) ?? 3600000;
+}
+
 class LineChart {
   // canvas 直接传元素引用（多设备页并存，不再用全局 id 查找）
   constructor(canvas, title, unit, maxValue) {
@@ -414,12 +433,15 @@ class LineChart {
         if (v > vMax) vMax = v;
       }
     }
-    // Y 轴范围：固定下限（CPU=100，超出自动扩展）或自适应（内存，基于实际最大值）
+    // Y 轴范围：固定下限（CPU=100，超出自动扩展）或自适应（内存，基于实际最大值）。
+    // 自适应值吸附 1-2-2.5-5 档位：连续浮点 yMax 每秒微变会让刻度标签每秒产生
+    // 新文本串——WebKit 对渲染/测量过的唯一字符串有无界驻留（2026-09-22 压测
+    // 定位：fillText ~74KB/串、measureText ~6KB/串），吸附后稳态标签恒定
     let yMax;
     if (this.maxValue !== undefined) {
-      yMax = Math.max(this.maxValue, vMax * 1.1);
+      yMax = Math.max(this.maxValue, niceCeil(vMax * 1.05));
     } else {
-      yMax = Math.max(1, vMax) * 1.1;
+      yMax = niceCeil(Math.max(1, vMax) * 1.05);
     }
     // 刻度标签精度：按 yMax 大小选位数，避免 toFixed(0) 四舍五入导致重复
     const labelPrec = yMax >= 100 ? 0 : (yMax >= 10 ? 1 : 2);
@@ -432,11 +454,17 @@ class LineChart {
       ctx.beginPath(); ctx.moveTo(L, y); ctx.lineTo(W - R, y); ctx.stroke();
       ctx.fillText((yMax * (1 - i / 4)).toFixed(labelPrec), 8, y + 4);
     }
-    // X 轴时间刻度
+    // X 轴时间刻度：tick 落在 step 的绝对时间整数倍上（step 取 1s/2s/5s/…/30min
+    // 时间档位）——窗口滚动/增长时标签串只在 step 跳档或跨整数倍时变化，而非每帧
+    // 新串（WebKit 对渲染/测量过的唯一字符串有无界驻留，2026-09-22 压测定位；
+    // 此前只对齐 5s 的做法在窗口未满 10min 时 span 每秒增长、tickStep 随动，
+    // 标签仍逐秒 churn——对齐 tick 值本身才完整覆盖两阶段）
     const span = tMax - tMin;
-    for (let i = 0; i <= 4; i++) {
-      const x = L + (W - R - L) * i / 4;
-      const ts = new Date(tMin + span * i / 4);
+    const tickStep = niceTimeStep(span / 4);
+    const t0 = Math.ceil(tMin / tickStep) * tickStep;
+    for (let tv = t0; tv <= tMax; tv += tickStep) {
+      const x = L + (W - R - L) * (tv - tMin) / span;
+      const ts = new Date(tv);
       ctx.fillText(ts.toTimeString().slice(0, 8), x - 22, H - 10);
     }
     this.drawAxes(L, T, W - R, H - B);
