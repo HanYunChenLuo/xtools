@@ -648,10 +648,15 @@ def _g6_body(c, ck, serial, p):
                        .get("cpu", {}).get("series", {}).values()) >= 3, timeout=30)
     _, r = c.action("click", selector=f"{p} .compare-baseline-btn")
     ck.check("点击对比基线", r.get("ok"), str(r.get("error", ""))[:120])
-    report = c.eval(f"document.querySelector('{p} .baseline-report').textContent")
-    panel_visible = c.eval(f"!document.querySelector('{p} .panel-baseline').classList.contains('hidden')")
-    ck.check("对比报告面板呈现", bool(panel_visible) and len(report or "") > 20,
-             str(report)[:120])
+    # click 的 ok 只代表 DOM 事件派发——前端 handler 是 async invoke(compare_baseline)，
+    # 报告文本渲染要等一次后端往返（发布产物首轮实测慢于 click 返回，直编偶发通过）：轮询
+    def _report():
+        rep = c.eval(f"document.querySelector('{p} .baseline-report').textContent") or ""
+        vis = c.eval(
+            f"!document.querySelector('{p} .panel-baseline').classList.contains('hidden')")
+        return rep if (vis and len(rep) > 20) else None
+    report = c.poll(_report, timeout=15)
+    ck.check("对比报告面板呈现", bool(report), str(report)[:120])
     _, r = c.action("click", selector=f"{p} .stop-btn")
     c.poll(lambda: not c.state(serial).get("samplingRunning"), timeout=15)
 
