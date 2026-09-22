@@ -135,6 +135,35 @@
 
 ---
 
+## K. 环境覆盖补齐（2026-09-22 排期，新会话实施）
+
+> 上轮回归的两块环境覆盖缺口 + 一个收尾项。三项均可**从 Mac 经 SSH 链全程驱动**（GUI 进程跑在目标机上——这正是覆盖点），无需登机操作。GUI 长驻进程统一 `setsid nohup ... </dev/null`（SIGHUP 教训）。
+
+- [ ] **K1：hppc GUI `--remote kong`（覆盖「Linux 上的 SSH 远程模式」）**
+  - **目的**：目前 SSH 远程模式只有 Mac（--remote hppc）覆盖；Linux 侧差异在 webkit2gtk 渲染，需 hppc 直编 GUI 经 SSH 连 kong 验证一次
+  - **环境**（上轮已勘察）：hppc 直编仓库 `~/code/tools/xperf`（已同步 main `81780ae`）；kong 挂 SS2PRO `ac889a71b1f` + SS4 桥接 `localhost:5559`；测试包 `com.google.android.filament.hellotriangle`（kong 无 gltf viewer）；hppc→kong 免密可达；Xvfb `:99` 上轮已起（没了则 `Xvfb :99 &`）
+  - **步骤**：
+    1. `ssh hppc 'cd ~/code/tools/xperf && git pull && rustup run 1.93.0 cargo build --release -p xperf-gui'`
+       （若触发 agent 自动构建：`RUSTUP_TOOLCHAIN=1.97.0` + aarch64-linux-android target，见 GUI-TEST-PLAN 已知发现 #7）
+    2. 启动：`DISPLAY=:99 setsid nohup ./target/release/xperf-gui --remote kong </dev/null >/tmp/xperf_gui_hppc_kong.log 2>&1 &`
+    3. hppc 同机跑套件：`XPERF_TEST_SSH=kong XPERF_TEST_SSH_UI=kong XPERF_ADB=~/Android/Sdk/platform-tools/adb XPERF_IT_PACKAGE=com.google.android.filament.hellotriangle python3 scripts/gui_tests/regression.py --group all --serial ac889a71b1f --skip-feedback`
+    4. 可选加跑 `stress.py --serial ac889a71b1f`（s7 adb 冻结注入在「Linux ssh 远程」链路下首次覆盖）
+  - **预期**：g1-g8 全绿（hppc 的 ssh config 含 kong → g1 SSH 小节可跑；Linux 无 macOS 锁屏/rAF 冻结问题）；结果记 SESSION、勾选本项、更新 GUI-TEST-PLAN 环境矩阵
+- [ ] **K2：kong AppImage v0.3.1 本地模式（发布二进制等效性）**
+  - **目的**：验证 v0.3.1 发布产物（Linux AppImage）在 Ubuntu 22.04 全链路可用
+  - **路径**：Mac → hppc → kong（`ssh hppc "ssh kong ..."`；kong 有 python3/xvfb-run/adb，上轮已勘察）
+  - **步骤**：
+    1. hppc 下载（`~/.git-credentials` 有 PAT）：GitLab project 39859 release v0.3.1 资产，`https://gitlab.chehejia.com/api/v4/projects/39859/packages/generic/xperf/v0.3.1/<file>`（文件名查 release 页，取 x86_64 AppImage）
+    2. scp hppc→kong：AppImage + `scripts/gui_tests/{harness.py,regression.py}`（stress.py 可选）
+    3. kong 运行：`chmod +x <appimage> && xvfb-run -a ./<appimage> &`（本地模式默认，无 --remote）
+    4. kong 同机跑：`XPERF_IT_PACKAGE=com.google.android.filament.hellotriangle XPERF_TEST_LOCAL_SERIALS=ac889a71b1f,localhost:5559 python3 regression.py --group all --serial ac889a71b1f --skip-feedback`（本地模式无 ssh，SSH 相关小节 SKIP 属预期）
+  - **预期与判读**：核心组（g2 采样/g3 深挖/g5 logcat/g7 并行）应过；**v0.3.1 不含 2026-09-21/22 的修复**（open_perfetto_ui async 化、start 防重入、capabilities set-focus、连点 5s 冷却、刻度档位化内存修复）——依赖这些的用例失败属预期，逐条标注「v0.3.1 已知不含修复」vs「AppImage 环境问题」；kong 是 22.04 无 userns 限制（24.04 的 AppRun hook 条件不触发）
+  - **后续**：v0.3.2 发版后同法复跑一轮拿「含全部修复」的发布验证
+- [ ] **K3：GitLab issue #5 关闭**（[gui-test] 验证 issue，上轮真实上传已完成验证）
+  - Mac OAuth token `~/.config/xperf/gitlab-oauth.json`：`PUT https://gitlab.chehejia.com/api/v4/projects/39859/issues/5` form `state_event=close`
+
+---
+
 ## J. Agent 能力提供（Claude Code / Codex，2026-09-18 review 排期）
 
 > 目标：编码 agent 在用户项目里经 shell 调用 xperf-cli 完成性能采集/断言。2026-09-18 review 结论：**现状对 agent 不可用**——1 个阻断缺陷 + 1 个刚需缺口 + 文档载体缺失。分 4 个实施会话 + 1 个完整 review/真机回归会话。已具备基础：CLI 全链路非交互、结果全落盘（`/tmp/xperf/<pkg>/<ts>/` CSV/报告）、`--threshold`/基线对比天然是断言接口、`--help` 自描述充分。
