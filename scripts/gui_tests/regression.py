@@ -85,6 +85,16 @@ def ssh_run(cmd, timeout=30):
     )
 
 
+def pkg_installed(serial, pkg=None):
+    """测试包是否装在该设备（多设备并行判据的前置——各机队装的应用未必相同，
+    如 kong 机队 SS2PRO=hellotriangle / SS4=gltf viewer，未装者不可能出 series）。
+    经 `adb_on_remote` 走与 GUI 相同的宿主（ssh 模式=hop#1 宿主）。
+    """
+    pkg = pkg or PKG
+    r = adb_on_remote(serial, "shell", "pm", "list", "packages", pkg, timeout=20)
+    return f"package:{pkg}" in ((r.stdout or "") + (r.stderr or ""))
+
+
 def _remote_adb():
     """远端 adb 路径（非交互 ssh 无 PATH；标准 SDK 位置兜底，与 GUI 预检同套路）。"""
     global _REMOTE_ADB
@@ -398,17 +408,29 @@ def _g1_body(c, ck, serial, p):
     _, r = c.action("select", selector="#remoteSelect", value="")
     local = c.poll(lambda: c.status().get("remote", {}).get("mode") == "local", timeout=20)
     ck.check("切回本机", bool(local))
-    devs = [d["serial"] for d in c.status().get("devices", []) if not d.get("is_gateway")]
+    # 设备列表读热插拔监视器的 3s 快照缓存——刚切回本机时快照可能还是远程机队
+    # （2026-09-22 hppc --remote kong 实测假 FAIL：读到 kong 的两台），故轮询到出本机队
+    expect, seen = set(LOCAL_SERIALS), []
+
+    def _local_fleet():
+        devs = [d["serial"] for d in c.status().get("devices", []) if not d.get("is_gateway")]
+        seen[:] = devs
+        return True if set(devs) == expect else None
+    fleet_ok = c.poll(_local_fleet, timeout=15) is not None
     if LOCAL_SERIALS:
-        ck.check("切回本机后设备为本机机队", set(devs) == set(LOCAL_SERIALS), f"devs={devs}")
-        ck.check("有设备提示隐藏（本机有机队）", c.eval(
-            "document.getElementById('noDeviceHint').classList.contains('hidden')"))
+        ck.check("切回本机后设备为本机机队", fleet_ok, f"devs={seen}")
+        ck.check("有设备提示隐藏（本机有机队）", bool(c.poll(lambda: c.eval(
+            "document.getElementById('noDeviceHint').classList.contains('hidden')") or None,
+            timeout=10)))
     else:
-        ck.check("本机模式无设备", devs == [], f"devs={devs}")
-        hint = c.eval("!document.getElementById('noDeviceHint').classList.contains('hidden')")
+        ck.check("本机模式无设备", fleet_ok, f"devs={seen}")
+        hint = c.poll(lambda: c.eval(
+            "!document.getElementById('noDeviceHint').classList.contains('hidden')") or None,
+            timeout=10)
         ck.check("无设备提示显示", bool(hint))
-    sb_hidden = c.eval(f"document.querySelector('{p} .sidebar-remote').classList.contains('hidden')"
-                       if c.eval("app.sessions.size") else "true")
+    sb_hidden = c.poll(lambda: c.eval(
+        f"document.querySelector('{p} .sidebar-remote').classList.contains('hidden')"
+        if c.eval("app.sessions.size") else "true") or None, timeout=10)
     ck.check("本机模式侧栏远程区块隐藏", bool(sb_hidden))
 
     # 7. 密码认证失败路径（nobody@<host>：agent 密钥对该用户无授权 → 认证失败；
@@ -771,9 +793,11 @@ def group_g3(c, ck, serial):
     ck.check("浏览器按钮解锁（recorded 起）", bool(c.eval(
         f"!document.querySelector('{p} .open-perf-btn').disabled")))
     trace_path = c.eval(f"document.querySelector('{p} .trace-content .trace-file-label').textContent")
-    ck.check("trace 落盘产物（.pftrace >1MB）",
+    # 体积判据按「有真实内容」而非固定 1MB：SS3 10s≈46MB，而 SS2PRO/A11 5s 实测仅 476KB
+    # （ftrace 事件类目少）——阈值取 50KB 防「空文件/截断拉取」假通过（2026-09-22 K1 实测）
+    ck.check("trace 落盘产物（.pftrace >50KB）",
              bool(trace_path) and os.path.exists(trace_path)
-             and os.path.getsize(trace_path) > 1_000_000, str(trace_path)[:120])
+             and os.path.getsize(trace_path) > 50_000, str(trace_path)[:120])
 
     # 2. 浏览器打开 Perfetto UI（本地镜像/回退均算成功；连点保护不炸）
     _, r = c.action("click", selector=f"{p} .open-perf-btn")
@@ -882,26 +906,45 @@ def group_g4(c, ck, serial):
     # ≥2 即构成多设备并行语义（Mac/hppc 三台、kong 两台）；台数入详情
     ck.check("多设备在线（≥2 台）", len(all_serials) >= 2, f"{all_serials}")
 
-    # 1. 三机并行采样：各自 series 增长 + 会话隔离（切设备页 charts 互不串）
+    # 1. 多机并行采样：各自 series 增长 + 会话隔离（切设备页 charts 互不串）。
+    #    前置=该设备装了本次测试包：机队间装的应用未必相同（kong 机队 SS2PRO 原装
+    #    hellotriangle、SS4 装 gltf viewer），未装者永远不出 series——判 FAIL 是判据
+    #    假设错而非产品缺陷，故如实 SKIP（2026-09-22 K1 实测）
     for s_ in all_serials:
         c.action("input", selector=f"{page(s_)} .package-input", value=PKG)
         c.action("click", selector=f"{page(s_)} .start-btn")
     for s_ in all_serials:
         ck.check(f"[{s_}] 并行采样启动", bool(c.poll(
             lambda s_=s_: c.state(s_).get("samplingRunning"), timeout=30)))
+    data_serials = []
     for s_ in all_serials:
+        if not pkg_installed(s_):
+            ck.skip(f"[{s_}] 并行 series 增长", f"测试包 {PKG} 未装在该设备（无数据源）")
+            continue
+        data_serials.append(s_)
         ck.check(f"[{s_}] 并行 series 增长", bool(c.poll(
             lambda s_=s_: sum(v.get("count", 0) for v in (c.state(s_).get("charts") or {})
                               .get("cpu", {}).get("series", {}).values()) >= 3, timeout=60)))
+    iso_other = data_serials[-1] if len(data_serials) >= 2 else None
     base = c.state(serial).get("charts", {}).get("cpu", {}).get("series", {})
-    c.action("click", selector=f"{page(all_serials[-1])} .tab.subtab[data-tab='trace']")
-    other = c.state(all_serials[-1]).get("charts", {}).get("cpu", {}).get("series", {})
-    ck.check("切设备页数据隔离（series 独立）", bool(base) and base != other,
-             f"base={len(base)} other={len(other)}")
+    if iso_other:
+        c.action("click", selector=f"{page(iso_other)} .tab.subtab[data-tab='trace']")
+        other = c.state(iso_other).get("charts", {}).get("cpu", {}).get("series", {})
+        ck.check("切设备页数据隔离（series 独立）", bool(base) and base != other,
+                 f"base={len(base)} other={len(other)}")
+    else:
+        ck.skip("切设备页数据隔离（series 独立）",
+                f"需两台以上有数据源（本次 {len(data_serials)} 台装了 {PKG}）")
 
     # 2. 连点竞态与快切（stop 后快双击 start——第二击落在首击 invoke pending
     #    窗口内，disabled 尚未置位；修复前会双发报错弹窗 + resetSessionData 清图表）
-    extra = all_serials[1] if len(all_serials) > 1 else serial
+    #    取有数据源的第二台，否则「双击后 series 增长」测的是无源设备（假 FAIL）
+    if len(data_serials) > 1:
+        extra = data_serials[1]
+    elif data_serials:
+        extra = data_serials[0]
+    else:
+        extra = all_serials[1] if len(all_serials) > 1 else serial
     c.action("click", selector=f"{page(extra)} .stop-btn")
     c.poll(lambda: not c.state(extra).get("samplingRunning"), timeout=20)
     for _ in range(2):
@@ -952,10 +995,13 @@ def group_g4(c, ck, serial):
         back = c.poll(lambda: (lambda devs: ss4 in devs and devs)(
             [d["serial"] for d in c.status().get("devices", [])]) or None, timeout=120)
         ck.check("断连后设备在线（未永久丢失）", bool(back), str(back)[:80])
-        resumed = c.poll(lambda: sum(v.get("count", 0) for v in (c.state(ss4).get("charts") or {})
-                                     .get("cpu", {}).get("series", {}).values()) > n_before
-                         or None, timeout=60)
-        ck.check("SS4 采样恢复（series 续增）", bool(resumed))
+        if not pkg_installed(ss4):
+            ck.skip("SS4 采样恢复（series 续增）", f"测试包 {PKG} 未装在 SS4（无数据源）")
+        else:
+            resumed = c.poll(lambda: sum(v.get("count", 0) for v in (c.state(ss4).get("charts") or {})
+                                         .get("cpu", {}).get("series", {}).values()) > n_before
+                             or None, timeout=60)
+            ck.check("SS4 采样恢复（series 续增）", bool(resumed))
 
     # 4. SSH 隧道重建（杀 GUI 自己的 ControlMaster → rebuild_tunnel 指数退避恢复）
     #    仅 ssh 模式有意义——Linux 本地直跑（hppc 直编/kong AppImage）无隧道，
@@ -964,11 +1010,21 @@ def group_g4(c, ck, serial):
         ck.skip("SSH 隧道重建", "本机模式无隧道（Linux 本地直跑；Mac --remote 已覆盖）")
         sockets = []
     else:
+        # socket 名 = xperf-<连接主机>-<gui pid>-<n>：主机取 GUI 实际连上的那台
+        # （写死 hppc 时，GUI --remote kong 场景必然找不到 → 假 FAIL，2026-09-22 K1 实测）
         gui_pid = c.status().get("pid")
-        sockets = [s for s in (os.path.exists(os.path.expanduser("~/.ssh/cm")) and
-                               os.listdir(os.path.expanduser("~/.ssh/cm"))) or []
-                   if s.startswith(f"xperf-hppc-{gui_pid}-")]
-        ck.check("找到 GUI 自己的 control socket", bool(sockets), f"pid={gui_pid} {sockets}")
+        rhost = (c.status().get("remote") or {}).get("host") or REMOTE_ADB
+        cm_dir = os.path.expanduser("~/.ssh/cm")
+        pref = f"xperf-{rhost}-{gui_pid}-"
+
+        def _socks():
+            got = [x for x in (os.listdir(cm_dir) if os.path.isdir(cm_dir) else [])
+                   if x.startswith(pref)]
+            return got or None
+        # 重连窗口内旧 master 已 -O exit 摘掉 socket、新 master 尚未建好 → 轮询
+        sockets = c.poll(_socks, timeout=20) or []
+        ck.check("找到 GUI 自己的 control socket", bool(sockets),
+                 f"host={rhost} pid={gui_pid} {sockets}")
     if sockets:
         sock_path = os.path.expanduser(f"~/.ssh/cm/{sockets[0]}")
         # 找 master 进程并 SIGKILL（模拟异常断网）。macOS 的 lsof 对该 unix socket
