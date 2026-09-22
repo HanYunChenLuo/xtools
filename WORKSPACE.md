@@ -2,7 +2,7 @@
 
 > 本文件记录跨会话的待办事项（backlog）。每次会话的历史总结见 `SESSION.md`。
 > 完成一项就把状态改为 ✅ 并注明完成的 commit；新增想法随时追加。
-> 最后更新：2026-09-19：I 节「GUI 可编程操控/状态读取接口」完成（feature/gui-debug-api：默认开启的 axum loopback 调试接口 + token 鉴权 + scripts/gui_debug_accept.py 验收全绿）
+> 最后更新：2026-09-22：I 节「GUI 压力测试」完成（feature/gui-stress-test：七场景压测套件 + 4 缺陷修复——含 WebKit 唯一文本串驻留泄漏根治）
 
 ## 当前状态速览
 
@@ -131,7 +131,7 @@
 - [x] ~~**截屏与录屏**~~（**已完成**，2026-09-12 主体 + 2026-09-14 并存缺陷核销，`feature/screen-capture` 合 main）：截屏=`adb exec-out screencap -p` 直写本机 PNG（PNG 魔数偏移定位剥 stdout 前缀警告——SS4 实踩）；录屏=scrcpy `--no-window --record`（复用镜像隧道双钉同号全链路；停止 SIGINT 优雅封盘 ≤3s 宽限 SIGKILL 兜底；CLI 倒计时从首帧落盘起算；产物核验防假阳性；**启动未建流自动重试一次**——设备端 server 启动偶发中止的自愈，CLI/GUI 同策略，GUI 前端 `retrying` 状态）。CLI `--screenshot`/`--record N`（独立+采样并行同窗口）；GUI 侧栏「屏幕捕获」区截屏按钮+录屏 toggle（AX 目验通过）。真机回归 SS3/SS4 全通，镜像+录屏并存 13 连过
 
 - [x] ~~**GUI 完整回归与压力测试**~~（**回归已完成**，2026-09-21，commits `2a5446e`/`7989334`/`8e20095` + `4a19be3` 测试计划；**压力测试仍留待办**见下条）：自动化套件 `scripts/gui_tests/regression.py`（harness 复用 gui_debug_accept.py 协议，8 组 g1~g8）+ 覆盖清单 `docs/GUI-TEST-PLAN.md`（含用例矩阵与已知发现 6 条）。**Mac（--remote hppc）8 组全绿**：g1 侧栏 29/29、g2 指标页 20/20（+1 SKIP）、g3 深挖 20/20、g4 SSH 23/23、g5 多设备并行 14/14、g6 基线 10/10、g8 1/1；反馈链路真实上传 issue #5 ✓。故障注入：重复点击/快速切 tab/设备断连重连/SSH 隧道重建（kill master）/WebKit 子进程 SIGKILL 全过。顺带修 3 个真实缺陷：`open_perfetto_ui` 阻塞主线程（改 async+spawn_blocking）、前端 `start()` 无防重入（`_startPending`）、capabilities 缺 `core:window:allow-set-focus`。**关键发现（非缺陷）**：macOS 锁屏/全遮挡冻结 WebKit rAF（visibilityState=hidden 时悬停合帧确定性失败）→ 三层防护（`ensure_visible()` setFocus / `Checker.skip()` SKIP 通道 / 测试计划备档 #6）；AX/System Events 在无障碍权限缺失的 shell 不可用。环境参数化：`XPERF_TEST_SSH`/`XPERF_TEST_EXTRA_SERIALS`/`XPERF_IT_PACKAGE`（Linux 本地直跑与 kong AppImage 复用同一套件）。**Linux 双环境结果见 SESSION.md 2026-09-21 条目**。
-- [ ] **下一会话：GUI 压力测试（后置）**：长时间采样与 logcat 洪泛、trace/stack 并发、图表高频数据、多设备页切换、浏览器按钮连点、CPU/内存/DOM 增长监测；测试启动统一使用 `setsid nohup ... </dev/null`，避免 SIGHUP 污染结果。产出稳定性基线（用户拍板：先 UI 全覆盖后压测，回归已交付）。
+- [x] ~~**下一会话：GUI 压力测试（后置）**~~（**已完成**，2026-09-22，`feature/gui-stress-test` 分支）：`scripts/gui_tests/stress.py` 七场景（s1 长时采样/s2 50ms 高频/s3 logcat 洪泛/s4 trace+stack 并发/s5 三机并行快切页/s6 按钮连点/s7 adb 冻结注入）+ 5s 粒度资源曲线 JSONL 落盘分段基线。**压测抓出 5 个真缺陷全修**：①采样静默挂死不自愈（adb server 卡死致信道「无数据亦无 EOF」永久半开——入向静止看门狗 15s 转 EOF 走重连，s7 守卫）②debug API `/api/status` 被 adb 卡死拖垮（设备列表改读监视器 3s 缓存）③ssh 隧道空闲期死亡无自愈（命令入口先 rebuild 再校验）④**WebKit 唯一文本串无界驻留泄漏**（fillText ~74KB/串 + measureText ~6.3KB/串，刻度标签每秒产新串 ⇒ RSS ~3.7MB/min 不收敛；修复 = Y 轴档位吸附 + X 轴 tick 时间网格对齐，唯一串 90s 450→21，phys_footprint 恒定 133MB 验证闭环）⑤open-perf/stack 连点穿透开重复标签页（600ms 冷却锚点击时刻 < invoke 630ms，burst 实测开 3 页——冷却 5s 锚完成时刻）。macOS 陷阱三条入 GUI-TEST-PLAN #8（ps 多 pid/WebKit XPC 归因/purgeable 预热），泄漏勘察链入 #9。终跑 29/31（两 FAIL 均判据问题非缺陷）+ s6 修复后复验 4/4，基线见 SESSION.md 当日条目。
 
 ---
 
