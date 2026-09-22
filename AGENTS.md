@@ -11,6 +11,9 @@ Release archives (internal GitLab Releases page) unpack to:
 ```
 xperf-cli               # host CLI
 agent/xperf-agent       # on-device sampler (aarch64 Android, pushed automatically)
+simpleperf_scripts/     # flamegraph renderer (report_html.py + host report lib),
+                        # used by the GUI "open in browser" action; override with
+                        # XPERF_SIMPLEPERF_SCRIPTS
 AGENTS.md               # this file
 skills/xperf/SKILL.md   # Claude Code / siada skill — install into the agent's
                         # skill root (e.g. ~/.siada-cli/skills/xperf/) so the
