@@ -208,7 +208,11 @@ Linux 资源在挂载点 `usr/share/<app>` 不在 exe 旁，故须显式注入�
 `/builds/...`（用户机不存在且不可写 → 下载兜底一起失败），本机/直编永远测不出（v0.3.1 AppImage
 实测火焰图按钮失效，见 GUI-TEST-PLAN #10）。`--update-simpleperf-scripts` 只写可写目录（只读
 随包资源如实拒绝）；`--clean-cache` 清用户缓存与源码检出的 vendor 目录，**不动发布包内置只读
-脚本集**。每次打开火焰图 stderr 打一行实际用的目录（排障）。失败清半截 HTML（防 reuse 误判）；HTML 新于 `.data` 复用不重渲染；需 python3
+脚本集**。每次打开火焰图 stderr 打一行实际用的目录（排障）。**AppImage 的 AppRun
+（linuxdeploy python 插件）会给整个应用设 `PYTHONHOME=$APPDIR/usr/` +
+`PYTHONPATH=$APPDIR/usr/share/pyshared/`，宿主 python3 子进程继承即 `No module named
+'encodings'`**——`python3_command()` 统一 env_remove 这两个变量（CI 产物真机实撞）。
+失败清半截 HTML（防 reuse 误判）；HTML 新于 `.data` 复用不重渲染；需 python3
 - **录制进度**：core `record` 带 `progress: Option<&dyn Fn(u64)>` 回调（等待循环**循环头**每整秒触发 elapsed 1..=N——放 None 分支会漏报：adb 启动开销 ~0.5s 推迟首秒 + try_wait=Some 轮次跳过最后上报，曾致 10s 只显示 6s）；GUI 传闭包 emit `stage:'progress'`（message 如 `调用栈录制中 3/8s`），前端 status 栏以**绿色进度条**呈现（`#status.progress` 类，linear-gradient 按 elapsed/N 百分比铺开；完成/失败自动退回普通样式），CLI 传 None（打印会刷屏）。录制时长下拉与「录制并分析」按钮在**各分析页 toolbar 内**（Perfetto/Simpleperf 各自独立，`trace-seconds`/`stack-seconds` 5/10/15/30/60/120s；2026-09-08 起侧栏不再有深挖入口，采样控制在性能指标页控制区）
 - **实测基线（SS3，simpleperf 1.build.47）**：svm 空闲态 8s ≈ 8500 样本 / 0 丢失 / 3.3MB（样本率随 CPU 活动浮动）；设备端应用 so 多为 stripped（函数名显示 `libxxx.so[+偏移]`，偏移可用未剥离 so 离线符号化），系统库与 `[kernel.kallsyms]` 有符号；非 root 设备上非 debuggable 应用被 run-as 路径拒绝（错误由 simpleperf 透传）
 

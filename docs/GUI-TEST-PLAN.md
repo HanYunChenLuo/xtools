@@ -127,9 +127,16 @@ python3 scripts/gui_tests/harness.py --check                  # harness 自检
     `/builds/ligraphic/xperf/xperf-core/...`（用户机不存在且不可写，AOSP 引导下载同样
     失败），本机 `release-macos.sh` 产物烤成维护者仓库路径（**在构建机上恰好可用，
     本机/直编测试永远测不出**）。症状：状态栏「打开火焰图失败: 创建 <path>.dl-tmp
-    失败」+ g3 判据「火焰图 HTML 产物」空列表。修法与验收见 WORKSPACE A 节；
-    **纪律性结论**：凡 `env!("CARGO_MANIFEST_DIR")`/`concat!(env!(...))` 出现在运行时
-    路径解析处，都必须在**发布产物 + 干净机器**上验一次，直编环境不构成证据。
+    失败」+ g3 判据「火焰图 HTML 产物」空列表。**已修**（解析链 + 随包分发 + bundle 质量门，
+    见 WORKSPACE A 节）；修后在同一条 CI 产物上复验又抓出**第二层**：AppImage 的 AppRun
+    （linuxdeploy python 插件）设 `PYTHONHOME=$APPDIR/usr/` + `PYTHONPATH=.../share/pyshared/`，
+    宿主 `python3` 子进程继承 → `ModuleNotFoundError: No module named 'encodings'`（状态栏
+    「report_html.py 生成失败」）——`python3_command()` 剥掉这两个变量后 g3 15/15 全绿。
+    **纪律性结论**：① 凡 `env!("CARGO_MANIFEST_DIR")`/`concat!(env!(...))` 出现在运行时
+    路径解析处，都必须在**发布产物 + 干净机器**上验一次，直编环境不构成证据；
+    ② 发布产物里起的**宿主子进程**（python3/curl/xdg-open/trace_processor）会继承 bundle
+    的打包环境（`PYTHONHOME`/`LD_LIBRARY_PATH`/`PATH`），排障先看 `/proc/<gui pid>/environ`
+    再复现，别先怀疑脚本或数据本身。
 
 11. **旧版产物上「通过」的用例不等于回归证据（2026-09-22 同轮）**：v0.3.1 tag（
     `80c2968`，9-20）不含 9-21/9-22 的修复，但本轮 g4「start 双击仅启动一次」与

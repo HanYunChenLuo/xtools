@@ -5,6 +5,21 @@
 > 待办事项（backlog）在 `WORKSPACE.md` 维护，本文件只做历史追溯。
 > 新会话开始时可先读本文件了解近期上下文。
 
+## 2026-09-22（深夜）：A 节火焰图发布缺陷根治（两层）+ CI 产物真机复验闭环
+
+**任务**：用户令「错误问题都修复了吗」→ 把 K2 抓出的真缺陷当场根治（不只登记）。
+
+**交付**（分支 `fix/release-scripts-dir` + `fix/flamegraph-bundle-python-env`，commits `4249552`/`cba8861`/`e435f96`，merge `78202cb`/`e070698`）：
+1. **第一层·目录**：`scripts_dir()` 从 `env!("CARGO_MANIFEST_DIR")` 改为运行时解析链——`XPERF_SIMPLEPERF_SCRIPTS` → 随产物（GUI `resource_dir()` 经 `set_bundled_scripts_dir` 注入 / CLI tarball exe 旁 `simpleperf_scripts/`；须「齐全」或「可写」才入选）→ 仓库 vendor（**存在才用**，维护者 git 同步 vendor 语义不变）→ `~/.cache/xperf/simpleperf_scripts/`。配套：纯函数 `pick_scripts_dir` + 单测锁优先级、`script_present` 的 `bin/>1MB`（LFS 指针）判据单测、`download_scripts` 前 `create_dir_all`、`--update-simpleperf-scripts` 只写可写目录（只读随包资源如实拒绝而非静默改写）、`--clean-cache` 不清发布包内置只读脚本集、ensure 时 stderr 打一行实际目录（排障）。**打包三路一致**：新脚本 `scripts/stage_simpleperf_scripts.sh`（按主机平台暂存，LFS 指针形态不带库并 WARN）+ CI tar（Linux +~6MB）+ `tauri.release.json` resources 增项 + `gui:linux` bundle 质量门（AppDir 内必须有 `report_html.py` 与 `xperf-agent`）+ `release-macos.sh`（`prepare_gui_agent`→`prepare_gui_resources`，macOS +~24MB universal dylib）。
+2. **第二层·随包 Python 环境污染（复验时新抓出）**：解析链生效后 CI 产物仍不出 HTML，报 `ModuleNotFoundError: No module named 'encodings'`。取证=`/proc/<gui>/environ` 有 `PYTHONHOME=/tmp/.mount_xperf-*/usr/` 与 `PYTHONPATH=.../usr/share/pyshared/`（linuxdeploy python 插件所设）；对照=同一 `.data` 纯净环境手跑 `report_html.py` rc=0 出 2.4MB HTML，带 PYTHONHOME 即同错。修=`python3_command()` 起宿主 python3 时 `env_remove` 两者（单测锁契约，不改全局 env、不依赖宿主有无 python3）。
+3. **顺带（压测式追打）**：`test_record_stop_sends_sigint` 在满载窗口间歇假失败（2 次），根因是判据在 `wait_exit`（含 3s SIGKILL 宽限）之后一次性读 trap 标记 + trap 只 touch 不退出；改为 trap 内 `exit 0`（与 scrcpy finalize 语义一致）+ 标记 2s 轮询 + 断言 `sigint_at` 已记录。副证：全量套件 3.28s → 0.51s。事后 30+ 轮（含 6-8 路 CPU 满载）全绿。
+
+**验收（真跑，非推演）**：CI #1420875 / #1420946 三 job 全绿；**hppc 上下载 CI 产物 AppImage**（GUI pid 1156598，24.04 沙箱 hook 依旧生效）→ `regression.py --group g3` **15/15**，状态栏「火焰图已生成并打开: …/stack_20260922_185758.html」+ HTML 产物核验通过，stderr 显示选中档 = `/tmp/.mount_xperf-*/usr/lib/xperf-gui/simpleperf_scripts`（Tauri Linux 资源实际落在 `usr/lib/<app>/`，非 `usr/share`）；**同 pipeline 的 CLI tarball** 布局 `agent/ simpleperf_scripts/ skills/ xperf-cli …`，只读 sibling → 拒绝并打出该路径（证明 exe 旁档被选中），`XPERF_SIMPLEPERF_SCRIPTS` 指向空目录 → 建目录 + AOSP 补齐 7 文件 31MB（v0.3.1 在 Linux 上失败的那条路径）；本机 Mac 三条 E2E（sibling 优先于 vendor、只读拒绝、env 覆盖最高，且 dev vendor 分毫未动）。全量 core 169+8 / CLI 12 / GUI 16 绿，clippy 与 cargo doc（含 missing_docs 三 crate）零警告。文档：WORKSPACE A 节转 ✅、GUI-TEST-PLAN #10 补第二层与两条纪律、CLAUDE.md 解析链节、AGENTS.md tarball 布局、CHANGELOG 两条修复项。
+
+**踩坑留痕**：`GET /projects/:id/jobs/:job/artifacts/download` 在本实例 **404**，取产物要用 `GET .../jobs/:job/artifacts`（直接回 zip）；`run_cmd` 输出含二进制/控制字节会被整段吞掉——远端一律 `sed 's/[^[:print:]]//g'` 落文件再读（必要时 base64 回传）。遗留 GUI 进程杀不掉的原因记一笔：AppImage 的进程名是内部 `xperf-gui`，按外层 `.AppImage` 文件名 pgrep 匹配不到（须按 `xperf-gui` 或读 `gui-debug.json` 的 pid）。
+
+**遗留**：① v0.3.2 出包后在**非构建机**补验 macOS DMG 的火焰图按钮（同根因，理论已覆盖）；② K1 + 22.04 覆盖仍等 kong 设备通电；③ g3/g4 两条判据升级为可判定形态（新开标签页计数 / 双击 invoke 次数）候补；④ 本会话全部改动已同步 hppc→GitLab(`li`)/GitHub(`origin`)，main=`e070698`+文档 commit。
+
 ## 2026-09-22（晚）：K 节环境覆盖——v0.3.1 AppImage 发布验证（hppc）+ issue #5 关闭
 
 **任务**：WORKSPACE K 节三项（K1 hppc GUI `--remote kong` / K2 kong AppImage v0.3.1 本地模式 / K3 关闭 issue #5）。
