@@ -5,6 +5,26 @@
 > 待办事项（backlog）在 `WORKSPACE.md` 维护，本文件只做历史追溯。
 > 新会话开始时可先读本文件了解近期上下文。
 
+## 2026-09-22（深夜·二）：K 节收官——K1（Linux SSH 远程 + SS4 桥接）与 K2b（22.04 发布产物）双环境补齐
+
+**触发**：用户报「kong 上已经连接了 ss4」→ 车机通电，K1/K2 的硬件前提恢复。
+
+**K1：hppc 直编 GUI `--remote kong`（覆盖「Linux 上的 SSH 远程模式」）**
+- 环境：hppc 仓库同步到 main 并重建 GUI（`rustup run 1.93.0 cargo build --release -p xperf-gui`，14s 增量）；Xvfb `:99`；GUI `--remote kong` 起来后枚举到 SS2PRO `ac889a71b1f`(A11) + **桥接 `localhost:5559`(HU_SS4/A16)** + 网关 `42087266b1f`（is_gateway 被前端过滤）——「SSH 隧道 + SS4 自动桥接」组合首次真跑。
+- 结果：**g1 29/29、g2 22/22、g3 15/15、g4 16/16、g5 14/14、g6 10/10、g8 3/3 全绿**（g4 含「杀 GUI 自己的 ControlMaster → rebuild_tunnel → 恢复采样」，Linux 上首次跑到）。
+- **抓出并修掉一个真缺陷**（`dbef7fb`）：「切回本机」后 `/api/status` 设备列表停在远程机队 >15s（tab/侧栏错位）。根因＝设备列表读监视器 3s 快照缓存（压测期为防 adb 卡死挂 handler 而设），但传输切换既不作废也不回填，且切换瞬间的枚举失败被 `Err(_) => continue` 静默吞掉。修：切换前置空缓存 + 两条成功路径 seed 新枚举；连续失败首次/每 10 次经 `utils::diag` 留痕。教训入 GUI-TEST-PLAN #12。
+- 判据环境化 4 条（`53bafee`/`9b8a17b`）：g1 切回本机改轮询；g4 逐设备自建「装了包 + 真的在跑」前置（自己点「打开应用」，起不来如实 SKIP）、隧道 socket 前缀改用 `remote.host`（写死 hppc 在 `--remote kong` 下必找不到）；g3 trace 产物阈值 1MB→50KB（SS2PRO/A11 5s 实测 476KB）。
+- 机队事实：kong 的 SS2PRO 装 hellotriangle、SS4 装 gltf viewer（**无共同测试包**）→ 把 `example/apk` 的 gltf viewer 装到 SS2PRO（A11 接受，冷启动 1227ms）以覆盖并行；hellotriangle 装 SS4 失败——`adb install` 经桥接 TCP 挂到超时（已知边界，非工具问题，记 E 节候补观察）。
+
+**K2b：CI 产物 AppImage @ kong 22.04 本地模式（发布二进制 + 22.04 覆盖补齐）**
+- 用 pipeline #1420946 的 gui:linux artifact（114MB，含 A 节火焰图修复）scp 到 kong，`xvfb-run -a` 本地模式，套件在 kong 同机跑。**总计 FAIL 0**：g1 2/2+SKIP(SSH 小节)、g2 22/22、g3 14/14+SKIP2、g4 16/16+SKIP(隧道)、g5 14/14、g6 10/10、g8 3/3。
+- **A 节修复的跨机复验**：22.04 上（无 userns 限制）沙箱保留、条件 hook 不触发（与 hppc 24.04 相反分支）；火焰图 fresh 与 reuse 两条路径都产出 3.6MB HTML，GUI stderr 显示选中随包档 → 第二台**非构建机**证据到手。
+- 三条环境门槛如实 SKIP（判据 `9a298a9`）：apt scrcpy=1.21（工具按 4.x 设计，按主版本 <2 SKIP）、离线机取不到 `trace_processor`（产品如实「分析失败 + trace 已保存」，判据不该 FAIL）、慢机火焰图渲染分钟级（改产物双轨）。→ 产品候补记 I 节：**scrcpy 版本地板提示**（现在只有一条失败弹窗）。
+
+**commit**：`dbef7fb`（GUI 缓存修复）、`53bafee`/`9b8a17b`/`9a298a9`（套件判据）、本条目文档。全量 core 169+8 / CLI 12 / GUI 16 绿，clippy + cargo doc（missing_docs 三 crate）零警告。**K 节三项（K1/K2/K3）全部收官。**
+
+**遗留**：① v0.3.2 出包后 22.04+24.04 两机各复跑一轮（含 Linux-SSH）；② I 节 scrcpy 版本提示；③ `adb install` 经 SS4 桥接挂住（工具不做安装，属环境边界，若日后加「一键装 apk」需绕行）；④ kong 侧长期无 hppc 反向密钥 → 「Linux GUI + SSH」只能由 hppc 作 GUI 宿主。
+
 ## 2026-09-22（深夜）：A 节火焰图发布缺陷根治（两层）+ CI 产物真机复验闭环
 
 **任务**：用户令「错误问题都修复了吗」→ 把 K2 抓出的真缺陷当场根治（不只登记）。

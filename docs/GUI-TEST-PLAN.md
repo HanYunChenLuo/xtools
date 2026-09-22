@@ -43,7 +43,8 @@ python3 scripts/gui_tests/harness.py --check                  # harness 自检
 | Mac 本机 | 直编 `target/release/xperf-gui` | SSH 远程（hppc 挂真机） | 主验证环境（本文档基线） |
 | hppc 直编 | Linux 原生 GUI | 本机 adb | WebKit 进程树形态、X11 下 `resize_default` |
 | hppc AppImage（v0.3.1 发布产物） | 2026-09-22 实测：从 package registry 下载的 `xperf-v0.3.1-linux-x86_64-gui.AppImage`，FUSE 直跑 | 本机 adb（SS3+SS2MAX+SS4） | 发布二进制等效性——**Ubuntu 24.04**（`apparmor_restrict_unprivileged_userns=1`）顺带验证 v0.3.1 条件式沙箱 hook 生效（`/proc/<pid>/environ` 有 `WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS=1`、WebProcess 起、点击链路全通）；抓出 #10 发布产物缺陷。22.04 与「Linux 上的 SSH 远程模式」两格仍空（kong 侧设备未挂载，见 WORKSPACE K1/K2） |
-| ~~kong AppImage~~（未跑） | 原计划 v0.3.1 发布产物 | 本机 adb（kong 自挂 SS2PRO + SS4 桥接） | 2026-09-22 勘察：kong `adb devices` 空 + `lsusb` 无 Android 设备 → 改在 hppc 执行（上表）；待 kong 设备恢复按 WORKSPACE K2 留档步骤补 22.04 覆盖 |
+| kong AppImage（CI 产物，含 A 节修复） | **22.04 覆盖已补齐**（2026-09-22 深夜，`xvfb-run -a` 本地模式） | 本机 adb（SS2PRO `ac889a71b1f` + SS4 桥接 `localhost:5559`） | **g1-g8 总计 FAIL 0**（g3 14/14+SKIP2、g4 16/16+SKIP 隧道）；22.04 无 userns 限制 → 条件式沙箱 hook 不触发（沙箱保留），与 hppc 24.04 互补；**火焰图在第二台非构建机 fresh+reuse 双路径出 3.6MB HTML**（A 节修复跨机验证） |
+| hppc GUI `--remote kong`（Linux SSH 远程模式） | 直编 main 二进制 | SSH 隧道 → kong 的 adb server（SS2PRO + 桥接 SS4） | **g1-g8 全绿**（g1 29/29、g3 15/15、g4 16/16 含「杀 master→重建隧道→恢复采样」）；同时是「SSH + SS4 桥接」组合的首次覆盖；抓出 #12 传输切换设备缓存缺陷 |
 
 同一套 `regression.py` 三环境通用（脚本在 GUI 宿主机上跑，读本地发现文件）；
 `adb_on_remote` 在 ssh 模式经 hop#1 宿主执行（非交互 ssh 无 PATH，自动探测
@@ -52,7 +53,7 @@ python3 scripts/gui_tests/harness.py --check                  # harness 自检
 `XPERF_TEST_EXTRA_SERIALS`（逗号分隔副设备，默认按 hppc 机队）、`XPERF_TEST_SSH`
 （ssh 模式宿主，仅 G4 断连注入用）。**覆盖缺口（如实记录）**：kong→hppc 无密钥认证
 （也无凭证注入渠道），AppImage 以本地模式测——「Linux 上的 SSH 远程模式」未覆盖
-（Mac --remote 已覆盖 ssh 通道逻辑本身，Linux 侧差异仅在 webkit2gtk 渲染，风险低）。
+（已消解：2026-09-22 深夜 hppc `--remote kong` 与 kong 本机两条覆盖均已跑绿，见环境矩阵）。
 
 ## 已知发现（本计划实施过程）
 
@@ -144,6 +145,10 @@ python3 scripts/gui_tests/harness.py --check                  # harness 自检
     invoke 往返快，双击的第二击落在 disabled 之后），后者判据只查 GUI 存活不查新开
     标签页数（连点开 3 页由压测 s6 的 diag 计数才测得）。**发布产物回归要跑 s6 类
     带计数的判据**，或把这两条判据升级为可判定形态（候补）。
+
+12. **传输切换后设备列表停在旧机队（真缺陷，2026-09-22 K1 抓出并修）**：`/api/status` 的 devices 读热插拔监视器的 3s 快照缓存（#压测教训：adb 卡死时活查询会挂死 handler），但`connect_remote` 切换传输时既不作废也不回填该缓存，且切换瞬间的枚举失败被监视线程`Err(_) => continue` 静默吞掉 → 「切回本机」后设备 tab/侧栏远程区块仍显示远程机队 >15s（手工探测在干净态 3s 内翻转，只在切换窗口重现）。修 `dbef7fb`：切换前置空缓存、两条成功路径用新枚举 seed；连续枚举失败首次与每 10 次经 `utils::diag` 留痕。**教训**：任何「读缓存当后端真相」的路径，在改变真相的那一刻必须显式失效/回填。
+
+13. **判据的环境门槛要显式建模（2026-09-22 K1/K2b 四条假 FAIL 的共性）**：① scrcpy 只查「装没装」不够——Ubuntu 22.04 apt 是 1.21，本工具按 4.x 设计，现按 `--version` 主版本 <2 SKIP；② trace 分析依赖 `trace_processor`（本地缓存→PATH→get.perfetto.dev 引导下载），离线机产品如实报「分析失败 + trace 已保存」是正确行为，判据须 SKIP 而非 FAIL（产物判据保留）；③ 慢机首轮火焰图渲染分钟级，判据改「产物 HTML 出现即通过」双轨；④ 并行采样判据必须自建前置（该机装了测试包 + 用例自己点「打开应用」），不能假设「用户已经开着它」。
 
 ## 压力测试（2026-09-22 交付）
 
