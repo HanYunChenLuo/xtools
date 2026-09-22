@@ -297,7 +297,21 @@ impl AgentStream {
                 return Ok(Some(ev));
             }
             let mut line = String::new();
-            let n = self.reader.read_line(&mut line)?;
+            let n = match self.reader.read_line(&mut line) {
+                Ok(n) => n,
+                // 读超时 = 入向静止看门狗触发（见 spawn_agent_inner 的
+                // set_read_timeout）：流已半开死亡，按 EOF 交调用方重连
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) =>
+                {
+                    eprintln!("[agent] 事件流入向静止超时，按断连处理（触发重连）");
+                    return Ok(None);
+                }
+                Err(e) => return Err(e.into()),
+            };
             if n == 0 {
                 // EOF 前先放尽已排队的 host 合成事件（如通道退出终态 err），
                 // 否则随 None 返回被静默丢弃
@@ -733,6 +747,13 @@ fn spawn_agent_inner(
     let port = ensure_daemon(serial, local_bin)?;
     let tcp = std::net::TcpStream::connect(("127.0.0.1", port))?;
     let _ = tcp.set_nodelay(true);
+    // 入向静止看门狗：daemon 每轮节拍至少产一行（零输出轮发心跳空行探活），
+    // start 后预热（pid 解析 + SurfaceFlinger 全量 dump ~2s）也有界——超时仍未
+    // 收到任何字节即判定流死。覆盖「无数据亦无 EOF」的半开故障（adb server 卡死
+    // / ssh 转发信道 wedge：2026-09-22 压测实测采样永久静默挂死）；读超时在
+    // next_event 映射为 EOF 语义，调用方走既有重连路径恢复。
+    let stall = std::time::Duration::from_millis((interval_ms * 5).max(15_000));
+    tcp.set_read_timeout(Some(stall))?;
     let writer = std::sync::Arc::new(std::sync::Mutex::new(tcp.try_clone()?));
     let reader = BufReader::new(tcp);
     // start 命令复用 agent argv 语法（daemon 端 parse_args 同款校验）
