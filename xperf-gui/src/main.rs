@@ -1641,6 +1641,12 @@ async fn connect_remote(
             *s.running.lock().unwrap() = false;
         }
     }
+    // 传输切换即刻作废监视器缓存：否则切完到下个 3s 轮询之间，`/api/status`
+    // 仍给出旧机队（2026-09-22 hppc `--remote kong` 实测「切回本机」后设备列表
+    // 停在远程两台 >15s 不刷新——轮询期间 adb 短暂报错被静默 continue 吞掉）
+    if let Ok(mut c) = state.devices_cache.lock() {
+        c.clear();
+    }
     xperf_core::shutdown_remote();
     // 密码在 shutdown_remote（会清密码）之后设置；仅进程内存驻留，会话结束即清。
     // None = 该主机走免密（ssh config/密钥/agent），同时清掉上一个主机的残留密码。
@@ -1649,7 +1655,10 @@ async fn connect_remote(
     let Some(host) = host else {
         emit("local", None, "已切回本机".to_string());
         return xperf_core::list_adb_devices()
-            .map(devices_json)
+            .map(|d| {
+                seed_devices_cache(&state, &d);
+                devices_json(d)
+            })
             .map_err(|e| e.to_string());
     };
 
@@ -1679,6 +1688,7 @@ async fn connect_remote(
                 devices.len()
             ));
             emit("connected", Some(&host), format!("已连接 {host}"));
+            seed_devices_cache(&state, &devices);
             Ok(devices_json(devices))
         }
         Err(e) => {
@@ -1690,6 +1700,15 @@ async fn connect_remote(
     }
 }
 
+/// 用刚拿到的枚举结果回填设备缓存（`/api/status` 的非阻塞数据源）——传输切换后
+/// 立即给出新机队，不必等下一个 3s 轮询；缓存为空时调试接口会退化成活查询
+/// （adb 卡死即挂死 handler），故成功路径都要 seed。
+fn seed_devices_cache(state: &AppState, devices: &[xperf_core::AdbDevice]) {
+    if let Ok(mut c) = state.devices_cache.lock() {
+        *c = devices.to_vec();
+    }
+}
+
 /// 设备热插拔监视线程：每 3s 轮询 `adb devices -l`，与上次快照 diff，有变化时
 /// emit `devices-changed` 事件：`{devices: [{serial, model, version}], added, removed}`。
 /// 首轮只建立快照不通知（首屏由前端 loadDevices 填充，避免重复提示）。
@@ -1698,6 +1717,7 @@ async fn connect_remote(
 fn spawn_device_monitor(app: tauri::AppHandle) {
     std::thread::spawn(move || {
         let mut last: Vec<xperf_core::AdbDevice> = Vec::new();
+        let poll_fails = std::sync::Arc::new(std::sync::Mutex::new(0u32));
         let mut first_round = true;
         let mut tunnel_was_dead = false;
         loop {
@@ -1740,8 +1760,23 @@ fn spawn_device_monitor(app: tauri::AppHandle) {
                     }
                     visible_devices(d)
                 }
-                Err(_) => continue, // adb 暂不可用，下轮重试
+                Err(e) => {
+                    // 连续失败留痕：缓存停在旧机队是「切换后设备列表不动」的直接症状，
+                    // 静默 continue 曾让该现象无法归因（2026-09-22 hppc --remote kong）
+                    let n = {
+                        let mut c = poll_fails.lock().unwrap();
+                        *c += 1;
+                        *c
+                    };
+                    if n == 1 || n % 10 == 0 {
+                        xperf_core::utils::diag(&format!(
+                            "devices: 枚举失败 x{n}（缓存停留在旧快照）: {e}"
+                        ));
+                    }
+                    continue; // adb 暂不可用，下轮重试
+                }
             };
+            *poll_fails.lock().unwrap() = 0;
             let (added, removed) = xperf_core::diff_devices(&last, &devices);
             if first_round || (added.is_empty() && removed.is_empty()) {
                 last = devices;
