@@ -907,21 +907,32 @@ def group_g4(c, ck, serial):
     ck.check("多设备在线（≥2 台）", len(all_serials) >= 2, f"{all_serials}")
 
     # 1. 多机并行采样：各自 series 增长 + 会话隔离（切设备页 charts 互不串）。
-    #    前置=该设备装了本次测试包：机队间装的应用未必相同（kong 机队 SS2PRO 原装
-    #    hellotriangle、SS4 装 gltf viewer），未装者永远不出 series——判 FAIL 是判据
-    #    假设错而非产品缺陷，故如实 SKIP（2026-09-22 K1 实测）
-    for s_ in all_serials:
-        c.action("input", selector=f"{page(s_)} .package-input", value=PKG)
-        c.action("click", selector=f"{page(s_)} .start-btn")
-    for s_ in all_serials:
-        ck.check(f"[{s_}] 并行采样启动", bool(c.poll(
-            lambda s_=s_: c.state(s_).get("samplingRunning"), timeout=30)))
+    #    两条前置都要显式建立（2026-09-22 K1 实测：换机队即假 FAIL）：
+    #    ① 该设备装了本次测试包——各机队装的应用未必相同（kong 机队 SS2PRO=
+    #       hellotriangle、SS4=gltf viewer），未装者永远不出 series，如实 SKIP；
+    #    ② 该测试包真的在跑——agent 无进程即无数据源，故由用例自己点「打开应用」
+    #       （顺带产一次冷启动记录），不再假设"用户已经开着它"
     data_serials = []
     for s_ in all_serials:
+        c.action("input", selector=f"{page(s_)} .package-input", value=PKG)
         if not pkg_installed(s_):
-            ck.skip(f"[{s_}] 并行 series 增长", f"测试包 {PKG} 未装在该设备（无数据源）")
+            ck.skip(f"[{s_}] 并行采样启动", f"测试包 {PKG} 未装在该设备（无数据源）")
+            ck.skip(f"[{s_}] 并行 series 增长", "同上（无数据源）")
+            continue
+        n0 = len(c.state(s_).get("coldStarts") or [])
+        c.action("click", selector=f"{page(s_)} .launch-btn")
+        # 冷启动记录增加 = 应用已在前台运行（launch_app 自带 15s 超时）
+        started = c.poll(lambda s_=s_, n0=n0: (
+            len(c.state(s_).get("coldStarts") or []) > n0) or None, timeout=40)
+        if not started:
+            ck.skip(f"[{s_}] 并行 series 增长", f"「打开应用」未见冷启动记录（{PKG} 起不来）")
             continue
         data_serials.append(s_)
+        c.action("click", selector=f"{page(s_)} .start-btn")
+    for s_ in data_serials:
+        ck.check(f"[{s_}] 并行采样启动", bool(c.poll(
+            lambda s_=s_: c.state(s_).get("samplingRunning"), timeout=30)))
+    for s_ in data_serials:
         ck.check(f"[{s_}] 并行 series 增长", bool(c.poll(
             lambda s_=s_: sum(v.get("count", 0) for v in (c.state(s_).get("charts") or {})
                               .get("cpu", {}).get("series", {}).values()) >= 3, timeout=60)))
