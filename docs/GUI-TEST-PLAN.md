@@ -40,11 +40,16 @@ python3 scripts/gui_tests/harness.py --check                  # harness 自检
 |------|---------|------|--------|
 | Mac 本机 | 直编 `target/release/xperf-gui` | SSH 远程（hppc 挂真机） | 主验证环境（本文档基线） |
 | hppc 直编 | Linux 原生 GUI | 本机 adb | WebKit 进程树形态、X11 下 `resize_default` |
-| kong AppImage | v0.3.1 发布产物 | SSH 远程（真机在 hppc） | AppRun 沙箱 hook（Ubuntu 24.04 userns 限制）、发布二进制等效性 |
+| kong AppImage | v0.3.1 发布产物 | 本机 adb（kong 自挂 SS2PRO + SS4 桥接） | 发布二进制等效性（v0.3.1 早于本会话修复，capabilities/async 修复不在内属预期） |
 
 同一套 `regression.py` 三环境通用（脚本在 GUI 宿主机上跑，读本地发现文件）；
 `adb_on_remote` 在 ssh 模式经 hop#1 宿主执行（非交互 ssh 无 PATH，自动探测
-`~/Android/Sdk/platform-tools/adb`，与 GUI 预检同套路）。
+`~/Android/Sdk/platform-tools/adb`，与 GUI 预检同套路）。**环境参数化**：
+`XPERF_IT_PACKAGE`（kong 无 gltf viewer，用 `com.google.android.filament.hellotriangle`）、
+`XPERF_TEST_EXTRA_SERIALS`（逗号分隔副设备，默认按 hppc 机队）、`XPERF_TEST_SSH`
+（ssh 模式宿主，仅 G4 断连注入用）。**覆盖缺口（如实记录）**：kong→hppc 无密钥认证
+（也无凭证注入渠道），AppImage 以本地模式测——「Linux 上的 SSH 远程模式」未覆盖
+（Mac --remote 已覆盖 ssh 通道逻辑本身，Linux 侧差异仅在 webkit2gtk 渲染，风险低）。
 
 ## 已知发现（本计划实施过程）
 
@@ -79,6 +84,17 @@ python3 scripts/gui_tests/harness.py --check                  # harness 自检
    System Events 在 Claude Code shell 上下文枚举不到任何窗口（无 Accessibility
    权限），`set frontmost` 也会无声失败——窗口状态以 webview 内
    `document.visibilityState` 与 Tauri window API 为准，前台判定用 `lsappinfo`。
+
+7. **Linux dev 机 agent 自动构建的 cargo 版本地板（环境级，2026-09-21 hppc 实测）**：
+   `ensure_agent_built` 触发重建时，cargo 经 `~/.cargo/bin/cargo`（rustup shim）走
+   **默认工具链**——hppc 默认 1.75 解析不了 lockfile v4（`lock file version 4
+   requires -Znext-lockfile-bump`），报错文案却归因为「需要 Android NDK」具有误导性。
+   规避：GUI 启动环境带 `RUSTUP_TOOLCHAIN=<新版>`（hppc 用 1.97.0——还须装
+   `aarch64-linux-android` target；1.93.0 无该 target 同样失败），或 `rustup default`
+   升级。
+   顺带确认：`agent_binary_needs_build` 按源码 mtime 判定正确触发（仓库含 9-11 后
+   agent v9 源码 > 9-7 旧产物）。**候选产品改进（未做）**：构建失败时把 cargo 的
+   stderr 尾行附进错误信息，替代固定 NDK 文案。
 
 ## 压力测试（后置）
 

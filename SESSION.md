@@ -5,6 +5,33 @@
 > 待办事项（backlog）在 `WORKSPACE.md` 维护，本文件只做历史追溯。
 > 新会话开始时可先读本文件了解近期上下文。
 
+## 2026-09-21：GUI 完整回归（Mac 全绿 + Linux 双环境）——WORKSPACE L133
+
+**任务**：WORKSPACE.md L133「GUI 完整回归与压力测试」。用户裁定：压力测试后置，先 UI 全覆盖；反馈链路真实上传一次；Linux 也要测（hppc 直编 GUI + kong AppImage）。
+
+**成果（Mac 全绿）**：`scripts/gui_tests/regression.py` 8 组全过——g1 侧栏 29/29、g2 指标页 20/20（+1 SKIP）、g3 Perfetto/Simpleperf 20/20、g4 SSH 23/23、g5 多设备并行 14/14、g6 基线 10/10、g8 1/1。产品修复 3 项（commit 2a5446e）：
+- `open_perfetto_ui` 改 async + `spawn_blocking`（曾阻塞主线程冻结 UI）
+- 前端 `start()` `_startPending` 防重入（重复点击曾双开会话）
+- capabilities 放行 `core:window:allow-set-focus`（自动化需要把被遮挡窗口拉回前台）
+
+**关键发现（非缺陷）——macOS 锁屏/全遮挡冻结 WebKit rAF**：`document.visibilityState='hidden'` 时 rAF 回调永不执行（setInterval 正常），悬停 tooltip 的 rAF 合帧确定性失败；AX/System Events 在无障碍权限缺失的 shell 里不可用（窗口枚举返回 0）。三层防护：`ensure_visible()` setFocus 拉前台 / Checker.skip() SKIP 通道（锁屏不可恢复，不计 FAIL）/ GUI-TEST-PLAN 已知发现 #6 备档。测试纪律：无人值守过夜跑出 hover SKIP 属预期，解锁后重跑即覆盖。
+
+**反馈链路**：真实上传 `[gui-test]` GitLab issue #5 全链验证 ✓（凭证 OAuth，issue 正文含环境 manifest）。
+
+**Linux 双环境**：
+- **hppc 直编 GUI（本地模式，Xvfb :99 + setsid）**：g1 2/2（+SKIP SSH 连接流）、g2 22/22、g3 15/15（+SKIP 录屏/镜像——hppc 未装 scrcpy）、g4 19/19（+SKIP 隧道重建）、g5 14/14、g6 10/10、g8 3/3（首轮）。首轮 38 FAIL 三根因全为环境/脚本适配（已修）：① GUI 以最小 PATH 启动 → cargo 走 rustup 默认 1.75 解析不了 lockfile v4，agent 自动构建失败（报错文案误导为 NDK 问题，规避 `RUSTUP_TOOLCHAIN=1.97.0`+android target）；② 测试脚本本地模式断连注入误走 ssh、g6 身份行不容「未配置」态、g1 SSH 小节按 Mac 环境写死（`XPERF_TEST_SSH_UI`/`XPERF_TEST_LOCAL_SERIALS` 参数化 + 不可达即 SKIP）；③ g8 杀 `children[0]` 顺序不定轮杀 WebProcess（改确定性杀 NetworkProcess——webkit2gtk 网络进程死亡可自愈、WebProcess 死亡主进程不恢复属已知边界 #5）
+- **环境矩阵修正**：kong→hppc 无密钥认证 → AppImage 以本地模式测（kong 自挂 SS2PRO+SS4）；「Linux 上的 SSH 远程模式」由 hppc GUI `--remote kong` 补覆盖（hppc→kong 免密可达）
+- **kong AppImage v0.3.1 本地模式**：（未跑——本轮 Bash 分类器长时间不可用阻断远端 exec，见遗留问题）
+
+**遗留问题（新会话续接，按优先级）**：
+1. **hppc 上还有两件事没跑**：① `hppc GUI --remote kong`（覆盖「Linux 上的 SSH 远程模式」，hppc→kong 免密可达，kong 挂 SS2PRO `ac889a71b1f` + SS4 `localhost:5559`，测试包 `com.google.android.filament.hellotriangle`；启动：`DISPLAY=:99 setsid nohup ./target/release/xperf-gui --remote kong </dev/null >/tmp/xperf_gui_hppc_kong.log 2>&1 &`，跑 `XPERF_TEST_SSH=kong XPERF_TEST_SSH_UI=kong XPERF_ADB=~/Android/Sdk/platform-tools/adb XPERF_IT_PACKAGE=... python3 scripts/gui_tests/regression.py --group all --serial ac889a71b1f --skip-feedback`；hppc GUI 直编二进制已构建（b52ac84，Rust 1.93 `rustup run 1.93.0 cargo build --release -p xperf-gui`），Xvfb :99 已起）；② kong AppImage v0.3.1 本地模式（下载：GitLab project 39859 release v0.3.1 资产 `.../packages/generic/xperf/v0.3.1/<file>`，hppc `~/.git-credentials` 有 PAT；kong 有 python3/xvfb-run/adb；断点=被 Bash 分类器拦截的命令 `ssh hppc 'kill 4120325; ... --remote kong ...'`）
+2. **本地 main 落后 hppc**：hppc main 已到 `b52ac84`（Mac 两提交经 format-patch/am 合入）；本地新增 WORKSPACE/SESSION/GUI-TEST-PLAN/regression.py 修改未提交，须提交后同步 hppc（push/git push 均被分类器阻断，未能执行）
+3. **GitLab issue #5 关闭**（[gui-test] 验证已过）：Mac OAuth `~/.config/xperf/gitlab-oauth.json` access_token，`PUT https://gitlab.chehejia.com/api/v4/projects/39859/issues/5` form `state_event=close`（多次尝试被分类器阻断）
+4. g3 已知边界补录：scrcpy 依赖 SKIP 机制、`RUSTUP_TOOLCHAIN` 地板（GUI-TEST-PLAN #7）
+5. kong→hppc 无密钥认证是长期事实，SSH remote-on-Linux 覆盖只能靠 hppc--remote-kong 方案（勿再试 kong 侧连接 hppc）
+
+**commits**：`4a19be3`（测试计划）→ `2a5446e`（产品修复+套件）→ `7989334`（merge）→ `8e20095`（环境参数化）；hppc 侧 `425d994`/`56534fc`/`b52ac84`（同源重放）。本条目文档更新（WORKSPACE 勾选/SESSION/GUI-TEST-PLAN #7/g1·g3·g8 环境门控）为本会话最后一个未提交 commit。
+
 ## 2026-09-20（下午·二）：GUI 远程下拉过滤 ssh config 主机 + 「从 ssh config 导入」选择器
 
 **任务**：用户反馈「ssh 中应该要过滤掉这种非主机名称」——kong 22.04 实测中用户在「连接」下拉误选了 `gerrit.it.chehejia.com`（ssh config 里的 Gerrit 服务别名，29418 端口）导致连接失败。用户追加需求：已有 ssh config 主机应能直接添加（免手动重填 IP/用户名/端口）。
