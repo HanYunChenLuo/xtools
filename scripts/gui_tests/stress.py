@@ -583,11 +583,18 @@ def summarize(c, ck, mon, args):
         if d:
             ck.check("s1 DOM 节点稳定（canvas 渲染不堆 DOM）",
                      d["last"] <= d["first"] + 100, f"dom {d['first']}→{d['last']} max={d['max']}")
+        # WebKit RSS 判据取**后半程斜率**：首分钟是合成器缓存预热（purgeable
+        # IOSurface 填池，phys_footprint 不计、OS 压力下可回收——2026-09-22
+        # footprint 双轨实测恒定 133MB/RSS 平台 120MB），全窗 first→last 会把
+        # 预热误报为泄漏；后半程斜率 <1MB/min 才是真增长信号
         w = seg_stat(s1, "web_rss_kb")
-        if w and w["first"] > 0:
-            ratio = w["last"] / w["first"]
-            ck.check("s1 WebKit RSS 增长 <50%", ratio < 1.5,
-                     f"{w['first']}→{w['last']} KB（×{ratio:.2f}，max={w['max']}）")
+        if w and w["first"] > 0 and len(s1) >= 8:
+            half = s1[len(s1) // 2:]
+            dur = (half[-1]["t"] - half[0]["t"]) / 60
+            slope = (half[-1]["web_rss_kb"] - half[0]["web_rss_kb"]) / 1024 / dur
+            ck.check("s1 WebKit RSS 后半程斜率 <1MB/min（预热平台化）", slope < 1.0,
+                     f"后半程 {slope:+.2f} MB/min；全程 {w['first']}→{w['last']} KB "
+                     f"（×{w['last'] / w['first']:.2f}，max={w['max']}）")
         pt = seg_stat(s1, "pts")
         if pt:
             ck.check("s1 series 总点数增长", pt["last"] > pt["first"] + 100,

@@ -1708,6 +1708,9 @@ fn spawn_device_monitor(app: tauri::AppHandle) {
             if tunnel_dead {
                 if !tunnel_was_dead {
                     tunnel_was_dead = true;
+                    // 边沿留痕：master 死亡时刻是故障归因关键证据（2026-09-22 曾现
+                    // master 无痕迹死亡致设备枚举全空）
+                    xperf_core::utils::diag("tunnel: 检测到 SSH 隧道死亡，等待恢复");
                     let _ = app.emit(
                         "remote-status",
                         serde_json::json!({"state": "tunnel-down", "message": "SSH 隧道断开，等待恢复…"}),
@@ -1717,6 +1720,7 @@ fn spawn_device_monitor(app: tauri::AppHandle) {
             }
             if tunnel_was_dead {
                 tunnel_was_dead = false;
+                xperf_core::utils::diag("tunnel: SSH 隧道已恢复");
                 last.clear(); // 清快照强制全量 diff，设备 tab 状态与新侧对齐
                 first_round = true;
                 let _ = app.emit(
@@ -2199,6 +2203,8 @@ fn main() {
             // 关窗时停止全部设备采样：各会话 running 置 false，采样线程在下一轮
             // 循环检测到后退出，exec-out 管道断开 → 设备端 agent 因 stdout 写失败自行退出
             if let tauri::WindowEvent::CloseRequested { .. } = event {
+                // 退出路径留痕（2026-09-22 压测期 GUI 进程曾无痕迹消失，无法归因）
+                xperf_core::utils::diag("lifecycle: 收到 CloseRequested（用户关窗/Cmd+Q）");
                 // 深挖录制线程不等待（最长 600s），置中断标志让其尽快退出；
                 // 未及退出时设备端 perfetto 由 traced TTL 兜底停止（残留文件无害）
                 xperf_core::utils::set_interrupt_flag();
