@@ -305,13 +305,37 @@ def seg_stat(rows, key):
 # 场景
 # ---------------------------------------------------------------------------
 
+DIAG_LOG = "/tmp/xperf_gui_diag.log"  # GUI 宿主侧诊断日志（XPERF_DIAG_LOG 固定值）
+
+
+def diag_count(tag):
+    """diag 日志中含 tag 的行数（文件缺失返回 None）。"""
+    try:
+        with open(DIAG_LOG, encoding="utf-8", errors="replace") as f:
+            return sum(1 for line in f if tag in line)
+    except FileNotFoundError:
+        return None
+
+
 def scenario_s1(c, ck, mon, args):
-    """长时采样：默认指标 @1000ms，持续 --s1-minutes。"""
+    """长时采样：默认指标 @1000ms，持续 --s1-minutes。
+
+    内存判据双轨：①fillText 唯一串计数（WebKit 唯一文本串驻留泄漏的**直接签名**
+    ——稳态档位化后 ~140 串/10min，泄漏态 3000+/10min，不受合成器 IOSurface
+    预热干扰）②WebKit RSS 后半程斜率粗 tripline（预热期可 >1MB/min 且持续
+    20-50min，阈值为时长的函数：<30min 用 3.0、≥30min 平台验证用 1.0）。
+    """
     mon.set_scenario("s1")
     p = page(args.serial)
     launch_app(c, args.serial)
     if not start_sampling(c, ck, args.serial, "s1 开始监控"):
         return
+    # 唯一文本串计数器（透明包装，结束读取后还原）
+    c.eval(
+        f"(()=>{{const s=app.sessions.get('{args.serial}');window._s1uniq=new Set();"
+        "s.allCharts.forEach(ch=>{if(!ch._s1wrap){ch._s1wrap=ch.ctx.fillText.bind(ch.ctx);"
+        "ch.ctx.fillText=function(t,x,y){window._s1uniq.add(String(t));"
+        "ch._s1wrap(t,x,y);};}});return 1}})()")
     c0 = cpu_count(c, args.serial)
     deadline = time.time() + args.s1_minutes * 60
     last = c0
@@ -325,8 +349,16 @@ def scenario_s1(c, ck, mon, args):
         if now <= last:  # 60s 窗口零增长 = 采样管线停滞
             stall_windows += 1
         last = now
+    uniq = c.eval("window._s1uniq.size")
+    c.eval(
+        f"(()=>{{const s=app.sessions.get('{args.serial}');"
+        "s.allCharts.forEach(ch=>{if(ch._s1wrap){ch.ctx.fillText=ch._s1wrap;ch._s1wrap=null;}});"
+        "window._s1uniq=null;return 1}})()")
     ck.check("s1 采样全程无 60s 停滞窗", stall_windows == 0,
              f"stall_windows={stall_windows} cpu {c0}→{last}")
+    ck.check("s1 唯一文本串 <300（WebKit 驻留泄漏签名）", uniq is not None and uniq < 300,
+             f"uniq={uniq}/{{{args.s1_minutes:.0f}min}}（稳态档位化 ~140/10min、"
+             f"修复前泄漏态 ~3000/10min）")
     ck.check("s1 末态仍在采样", bool(c.state(args.serial).get("samplingRunning")))
     # 恢复默认速率留给后续场景；s1 不停止采样（贯穿压测）
 
@@ -498,12 +530,20 @@ def scenario_s6(c, ck, mon, args):
         c.action("click", selector=f"{p} .trace-start-btn")
         c.poll(lambda: c.eval(f"!document.querySelector('{p} .open-perf-btn').disabled"),
                timeout=120, interval=3)
+    n0 = diag_count("openPerfBtn: 已打开")
     c.action("click", selector=f"{p} .open-perf-btn")  # 第一击真实触发（开一次浏览器）
     disabled_now = c.eval(f"document.querySelector('{p} .open-perf-btn').disabled")
     for _ in range(9):  # 冷却/禁用期内连点
         c.action("click", selector=f"{p} .open-perf-btn")
         time.sleep(0.15)
+    time.sleep(2)  # 等在途 invoke 完成（冷却锚在完成时刻，完成前 disabled 挡全部）
+    n1 = diag_count("openPerfBtn: 已打开")
     ck.check("s6 首击后即禁用（防抖）", bool(disabled_now))
+    if n0 is not None:
+        ck.check("s6 连点仅开一页（冷却锚完成时刻）", n1 == n0 + 1,
+                 f"diag 计数 {n0}→{n1}（2026-09-22 修复前同场景一次连点开 3 页）")
+    else:
+        ck.skip("s6 连点仅开一页", f"diag 日志不可读: {DIAG_LOG}")
     ck.check("s6 连点后 GUI 存活", c.alive() and bool(c.status().get("frontend_ready")))
 
 
@@ -583,16 +623,18 @@ def summarize(c, ck, mon, args):
         if d:
             ck.check("s1 DOM 节点稳定（canvas 渲染不堆 DOM）",
                      d["last"] <= d["first"] + 100, f"dom {d['first']}→{d['last']} max={d['max']}")
-        # WebKit RSS 判据取**后半程斜率**：首分钟是合成器缓存预热（purgeable
-        # IOSurface 填池，phys_footprint 不计、OS 压力下可回收——2026-09-22
-        # footprint 双轨实测恒定 133MB/RSS 平台 120MB），全窗 first→last 会把
-        # 预热误报为泄漏；后半程斜率 <1MB/min 才是真增长信号
+        # WebKit RSS 判据取**后半程斜率**，阈值为 s1 时长的函数：修复后仍有合成器
+        # IOSurface 预热（purgeable，phys_footprint 侧 dirty 恒定——2026-09-22
+        # footprint 双轨验证），预热可持 20-50min；短窗（<30min）用宽阈值 3.0
+        # （历史泄漏态 3.7 稳态会挂），长浸泡（≥30min）平台验证用 1.0。
+        # 唯一文本串计数（s1 场景内）是更本质的泄漏签名，本判据为粗 tripline
         w = seg_stat(s1, "web_rss_kb")
         if w and w["first"] > 0 and len(s1) >= 8:
             half = s1[len(s1) // 2:]
             dur = (half[-1]["t"] - half[0]["t"]) / 60
             slope = (half[-1]["web_rss_kb"] - half[0]["web_rss_kb"]) / 1024 / dur
-            ck.check("s1 WebKit RSS 后半程斜率 <1MB/min（预热平台化）", slope < 1.0,
+            thr = 1.0 if args.s1_minutes >= 30 else 3.0
+            ck.check(f"s1 WebKit RSS 后半程斜率 <{thr}MB/min（粗 tripline）", slope < thr,
                      f"后半程 {slope:+.2f} MB/min；全程 {w['first']}→{w['last']} KB "
                      f"（×{w['last'] / w['first']:.2f}，max={w['max']}）")
         pt = seg_stat(s1, "pts")
