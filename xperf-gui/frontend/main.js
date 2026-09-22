@@ -1751,7 +1751,10 @@ class DeviceSession {
     this.el('open-perf-btn').addEventListener('click', async () => {
       const btn = this.el('open-perf-btn');
       if (!this.currentTracePath || btn.disabled) return;
-      if (Date.now() - (this._lastPerfOpen || 0) < 600) return;
+      if (Date.now() - (this._lastPerfOpen || 0) < 5000) {
+        this.setStatus('Perfetto UI 已在浏览器打开（5s 内不重复开页）');
+        return;
+      }
       btn.disabled = true;
       try {
         const msg = await invoke('open_perfetto_ui', { tracePath: this.currentTracePath });
@@ -1761,9 +1764,9 @@ class DeviceSession {
         await alertBox('打开 Perfetto UI 失败: ' + err, 'error');
         _diag('[' + this.serial + '] openPerfBtn ERROR: ' + JSON.stringify(err));
       } finally {
-        // 冷却锚定在完成时刻（而非点击时刻）：invoke 本身 ~0.6s，点击锚点的
-        // 冷却在 finally 解禁时已过期——机器枪连点下一击穿透开了重复标签页
-        // （2026-09-22 压测 s6 实测一次连点开 3 页）；进行中窗口由 disabled 覆盖
+        // 冷却锚定在完成时刻（而非点击时刻）+ 5s 窗口：invoke ~0.6s，600ms 点击锚
+        // 冷却在 finally 解禁时已过期（连点穿透），扩到 5s 才覆盖真实连点 burst
+        // （2026-09-22 压测 s6 实测 600ms burst 仍开 3 页）；进行中窗口由 disabled 覆盖
         this._lastPerfOpen = Date.now();
         btn.disabled = false;
       }
@@ -1778,7 +1781,10 @@ class DeviceSession {
     this.el('open-stack-btn').addEventListener('click', async () => {
       const btn = this.el('open-stack-btn');
       if (!this.currentStackPath || btn.disabled) return;
-      if (Date.now() - (this._lastStackOpen || 0) < 600) return;
+      if (Date.now() - (this._lastStackOpen || 0) < 5000) {
+        this.setStatus('火焰图已在浏览器打开（5s 内不重复开页）');
+        return;
+      }
       btn.disabled = true;
       try {
         const msg = await invoke('open_stack_html', { dataPath: this.currentStackPath });
@@ -1788,7 +1794,7 @@ class DeviceSession {
         await alertBox('打开火焰图失败: ' + err, 'error');
         _diag('[' + this.serial + '] openStackBtn ERROR: ' + JSON.stringify(err));
       } finally {
-        // 冷却锚定完成时刻（同 open-perf 的连点穿透修复）
+        // 冷却锚定完成时刻 + 5s 窗口（同 open-perf 的连点穿透修复）
         this._lastStackOpen = Date.now();
         btn.disabled = false;
       }

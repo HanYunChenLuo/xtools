@@ -529,6 +529,7 @@ def scenario_s6(c, ck, mon, args):
     mon.set_scenario("s6")
     p = page(args.serial)
     c.eval(f"app.switchDevice('{args.serial}')")
+    c.action("input", selector=f"{p} .package-input", value=PKG)  # 独立跑 s6 时无 s1 铺垫
     c.action("click", selector=f"{p} .tab.subtab[data-tab='trace']")
     en = c.eval(f"!document.querySelector('{p} .open-perf-btn').disabled")
     if not en:  # 无 trace 产物（s4 未跑过）——录 5s 兜底
@@ -629,20 +630,22 @@ def summarize(c, ck, mon, args):
         if d:
             ck.check("s1 DOM 节点稳定（canvas 渲染不堆 DOM）",
                      d["last"] <= d["first"] + 100, f"dom {d['first']}→{d['last']} max={d['max']}")
-        # WebKit RSS 判据取**后半程斜率**，阈值为 s1 时长的函数：修复后仍有合成器
-        # IOSurface 预热（purgeable，phys_footprint 侧 dirty 恒定——2026-09-22
-        # footprint 双轨验证），预热可持 20-50min；短窗（<30min）用宽阈值 3.0
-        # （历史泄漏态 3.7 稳态会挂），长浸泡（≥30min）平台验证用 1.0。
-        # 唯一文本串计数（s1 场景内）是更本质的泄漏签名，本判据为粗 tripline
+        # WebKit RSS 斜率：**仅长浸泡（≥30min）作硬判据**（平台验证 <1MB/min）。
+        # 短窗（10min）内合成器 IOSurface 预热（purgeable，dirty 恒定——footprint
+        # 双轨已证非泄漏）斜率 2-5MB/min 且幅度随环境波动，硬判只会假阳；泄漏的
+        # 本质判据是 s1 场景内的唯一文本串计数（签名），此处仅信息输出
         w = seg_stat(s1, "web_rss_kb")
         if w and w["first"] > 0 and len(s1) >= 8:
             half = s1[len(s1) // 2:]
             dur = (half[-1]["t"] - half[0]["t"]) / 60
             slope = (half[-1]["web_rss_kb"] - half[0]["web_rss_kb"]) / 1024 / dur
-            thr = 1.0 if args.s1_minutes >= 30 else 3.0
-            ck.check(f"s1 WebKit RSS 后半程斜率 <{thr}MB/min（粗 tripline）", slope < thr,
-                     f"后半程 {slope:+.2f} MB/min；全程 {w['first']}→{w['last']} KB "
-                     f"（×{w['last'] / w['first']:.2f}，max={w['max']}）")
+            detail = (f"后半程 {slope:+.2f} MB/min；全程 {w['first']}→{w['last']} KB "
+                      f"（×{w['last'] / w['first']:.2f}，max={w['max']}）")
+            if args.s1_minutes >= 30:
+                ck.check("s1 长浸泡 WebKit RSS 后半程斜率 <1MB/min（平台验证）",
+                         slope < 1.0, detail)
+            else:
+                print(f"INFO s1 WebKit RSS 短窗斜率（预热期，不作判据）  | {detail}", flush=True)
         pt = seg_stat(s1, "pts")
         if pt:
             ck.check("s1 series 总点数增长", pt["last"] > pt["first"] + 100,
