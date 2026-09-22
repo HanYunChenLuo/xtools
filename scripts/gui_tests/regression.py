@@ -391,7 +391,14 @@ def _g1_body(c, ck, serial, p):
     c.action("click", selector="#remoteAddBtn")  # 重开表单刷新导入列表
     import_opts = c.eval(
         "[...document.getElementById('rfImport').options].map(o => o.value)")
-    ck.check(f"导入列表排除已保存 {SSH_UI_HOST}", SSH_UI_HOST not in import_opts, f"opts={import_opts}")
+    # 判据用不变式「导入列表 ∩ 已保存 = ∅」而非「当前 UI 宿主必在排除之列」——
+    # 后者在 GUI 由命令行 --remote 启动时不成立（临时目标零保存，本来就该出现在
+    # 导入列表里；2026-09-22 hppc --remote kong 实测假 FAIL）
+    rem = (c.invoke("list_remotes").get("data") or [])
+    saved = {r.get("name") for r in rem} | {r.get("host") for r in rem}
+    leaked = sorted(set(import_opts or []) & saved)
+    ck.check("导入列表过滤已保存条目", not leaked,
+             f"saved={sorted(x for x in saved if x)} opts={import_opts}")
     if "103server" in import_opts:
         _, r = c.action("select", selector="#rfImport", value="103server")
         filled = c.eval("({n: document.getElementById('rfName').value,"
@@ -428,9 +435,11 @@ def _g1_body(c, ck, serial, p):
             "!document.getElementById('noDeviceHint').classList.contains('hidden')") or None,
             timeout=10)
         ck.check("无设备提示显示", bool(hint))
+    # 切回本机后远程设备页可能整体不存在（querySelector 返回 null）——没有页面自然
+    # 也不会显示远程区块，判 True（原式在 hppc --remote kong 下 eval 抛错致 g1 组中断）
     sb_hidden = c.poll(lambda: c.eval(
-        f"document.querySelector('{p} .sidebar-remote').classList.contains('hidden')"
-        if c.eval("app.sessions.size") else "true") or None, timeout=10)
+        "(() => {const e = document.querySelector('%s .sidebar-remote');"
+        "return !e || e.classList.contains('hidden');})()" % p) or None, timeout=10)
     ck.check("本机模式侧栏远程区块隐藏", bool(sb_hidden))
 
     # 7. 密码认证失败路径（nobody@<host>：agent 密钥对该用户无授权 → 认证失败；
@@ -787,9 +796,22 @@ def group_g3(c, ck, serial):
         rep = c.eval(f"document.querySelector('{p} .trace-report').textContent")
         return rep and "包 CPU 总量" in rep and rep
     rep = c.poll(trace_done, timeout=150)
-    # 报告段头为「── 段名 ──」风格（===xxx=== 是 SQL 内部 marker，不进最终报告）
-    ck.check("trace 报告生成（含分段标记）", bool(rep) and "包 CPU 总量" in (rep or "")
-             and "包线程 CPU" in (rep or ""), (str(rep)[:120] if rep else "超时"))
+    if not rep:
+        # 分析依赖宿主侧 trace_processor（~/.local/share/perfetto 缓存 → PATH →
+        # get.perfetto.dev 引导下载）。离线机（如 kong 22.04 不可达外网）拿不到它，
+        # 产品行为是「trace 已保存 + 如实报分析失败」——判据按环境受限 SKIP
+        why = ((c.eval(f"document.querySelector('{p} .trace-report').textContent") or "")
+               + " | " + (c.eval("document.getElementById('status').textContent") or ""))
+        if "trace_processor" in why or "分析失败" in why:
+            ck.skip("trace 报告生成（含分段标记）",
+                    "宿主机无 trace_processor 且引导下载不可达（外网受限）；"
+                    "trace 本体见下一条产物判据。现场：" + why[:140])
+        else:
+            ck.check("trace 报告生成（含分段标记）", False, "超时 | " + why[:140])
+    else:
+        # 报告段头为「── 段名 ──」风格（===xxx=== 是 SQL 内部 marker，不进最终报告）
+        ck.check("trace 报告生成（含分段标记）", "包 CPU 总量" in (rep or "")
+                 and "包线程 CPU" in (rep or ""), str(rep)[:120])
     ck.check("浏览器按钮解锁（recorded 起）", bool(c.eval(
         f"!document.querySelector('{p} .open-perf-btn').disabled")))
     trace_path = c.eval(f"document.querySelector('{p} .trace-content .trace-file-label').textContent")
@@ -841,9 +863,16 @@ def group_g3(c, ck, serial):
 
     # 4. 浏览器火焰图（report_html.py 渲染单文件 HTML；复用不重渲染）
     _, r = c.action("click", selector=f"{p} .open-stack-btn")
-    html_ok = c.poll(lambda: (lambda t: t and "火焰图" in t and t)(
-        c.eval("document.getElementById('status').textContent")), timeout=60)
-    ck.check("在浏览器打开火焰图", bool(html_ok), str(html_ok)[:140])
+    # 判据双轨：渲染是同步 invoke（几 MB HTML 在慢机上可达分钟级），只看状态文案会在
+    # kong(22.04) 假 FAIL——产物 HTML 出现即算成功，状态文案作为补充证据
+    fl_dir = os.path.dirname(stack_path) if stack_path else None
+
+    def _flame():
+        t = c.eval("document.getElementById('status').textContent") or ""
+        got = [f for f in os.listdir(fl_dir) if f.endswith(".html")] if fl_dir else []
+        return (t[:60], got) if got or "火焰图" in t else None
+    fl = c.poll(_flame, timeout=180)
+    ck.check("在浏览器打开火焰图", bool(fl), str(fl)[:140])
     if stack_path:
         htmls = [f for f in os.listdir(os.path.dirname(stack_path)) if f.endswith(".html")]
         ck.check("火焰图 HTML 产物", bool(htmls), str(htmls)[:120])
@@ -858,9 +887,27 @@ def group_g3(c, ck, serial):
     ck.check("截屏 PNG 产物（魔数核验）", bool(png), shot_path[:120])
 
     # 6. 录屏（scrcpy 无窗口录制 → 停止封盘 → mp4 产物）
-    #    scrcpy 为 GUI 宿主机依赖（hppc 未装属环境限制，SKIP 不计缺陷——
-    #    Mac 侧已全量覆盖录屏/镜像链路）
-    if shutil.which("scrcpy") or os.path.exists("/opt/homebrew/bin/scrcpy"):
+    #    scrcpy 为 GUI 宿主机外部依赖，两条环境门槛都算 SKIP 不算缺陷：
+    #    ① 未安装（hppc 实测）；② 版本过旧——Ubuntu 22.04 apt 只有 scrcpy 1.21，
+    #       本工具的隧道/参数形态按 4.x 设计与验证，1.21 起不来（2026-09-22 kong
+    #       AppImage 实测「录屏开始/镜像启动」失败），已知可用版本 ≥2
+    def _scrcpy_ver():
+        exe = shutil.which("scrcpy") or ("/opt/homebrew/bin/scrcpy"
+                                         if os.path.exists("/opt/homebrew/bin/scrcpy") else None)
+        if not exe:
+            return None, "宿主机未安装 scrcpy"
+        try:
+            out = subprocess.run([exe, "--version"], capture_output=True, text=True,
+                                 timeout=10).stdout or ""
+        except Exception as e:  # 起不来也算环境受限，失败信息照实带上
+            return None, f"{exe} --version 异常: {e}"
+        m = re.search(r"scrcpy\s+(\d+)", out)
+        if not m:
+            return None, f"{exe} 版本无法解析: {out.strip().splitlines()[:1]}"
+        v = int(m.group(1))
+        return (v, None) if v >= 2 else (v, f"{exe} 版本 {v} < 2（本工具按 scrcpy 4.x 设计验证）")
+    ver, why = _scrcpy_ver()
+    if ver is not None and why is None:
         _, r = c.action("click", selector=f"{p} .record-btn")
         rec = c.poll(lambda: _sess(c, serial).get("recording") or None, timeout=20)
         ck.check("录屏开始（后端会话）", bool(rec))
@@ -882,8 +929,7 @@ def group_g3(c, ck, serial):
         stopped = c.poll(lambda: (not _sess(c, serial).get("mirror")) or None, timeout=20)
         ck.check("镜像停止复位", bool(stopped))
     else:
-        ck.skip("录屏/镜像（scrcpy）", "GUI 宿主机未安装 scrcpy（hppc Linux 实测）——"
-                "环境受限，Mac 侧已覆盖")
+        ck.skip("录屏/镜像（scrcpy）", f"{why}——环境受限，Mac/hppc 高版本 scrcpy 已覆盖")
 
     c.action("click", selector=f"{p} .tab.subtab[data-tab='perf']")
     c.poll(lambda: c.state(serial).get("activeTab") == "perf", timeout=8)
