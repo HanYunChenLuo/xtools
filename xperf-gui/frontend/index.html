@@ -28,7 +28,15 @@
     </div>
     <nav id="deviceTabs"></nav>
     <div id="status">未开始</div>
+    <button id="updateBadge" class="hidden" title="发现新版本，点击查看详情与下载">🆕</button>
     <button id="feedbackTopBtn" title="问题反馈：收集本机 + 全部在线设备最近 1 小时的 xperf 日志与产物，打包上传内部 GitLab issue">问题反馈</button>
+    <div id="settingsBox">
+      <button id="settingsBtn" title="设置">⚙ 设置</button>
+      <div id="settingsMenu" class="hidden">
+        <label title="GUI 启动后在后台检测一次新版本（失败静默不打扰）；取消勾选则仅手动检查"><input id="stAutoCheck" type="checkbox" checked /> 启动时自动检查更新</label>
+        <button id="stCheckNow" class="small" title="立即查询 GitLab 最新 Release（结果见状态栏；有新版时顶栏出徽标）">检查更新</button>
+      </div>
+    </div>
     <button id="themeBtn" title="切换暗色/亮色主题">☾ 亮色</button>
   </header>
   <main id="content">
@@ -54,6 +62,23 @@
       <div class="fb-actions">
         <button id="fbSubmit" class="small">提交反馈</button>
         <button id="fbCancel" class="small">取消</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 版本更新模态（顶栏徽标点击唤起；Release 说明按纯文本展示不渲染 markdown） -->
+  <div id="updateMask" class="hidden">
+    <div id="updateForm">
+      <h3>发现新版本 <span id="updTag"></span></h3>
+      <div class="upd-meta" id="updMeta"></div>
+      <pre id="updDesc" title="Release 说明（markdown 原文）"></pre>
+      <div class="upd-assets-box">
+        <div class="upd-assets-title">资产清单（登录态浏览器可直接下载）</div>
+        <div id="updAssets"></div>
+      </div>
+      <div class="fb-actions">
+        <button id="updOpen" class="small">在浏览器打开 Release 页</button>
+        <button id="updClose" class="small">关闭</button>
       </div>
     </div>
   </div>

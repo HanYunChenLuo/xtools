@@ -170,6 +170,21 @@ body { font-family: -apple-system, "Segoe UI", "Noto Sans CJK SC", "PingFang SC"
 #feedbackForm .fb-auth { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--text-mute); }
 #feedbackForm .fb-auth button { flex-shrink: 0; }
 #feedbackForm .fb-auth.fb-warn #fbIdentity { color: var(--err); }
+/* 设置子菜单：绝对定位浮层（同 remoteForm 套路，不撑高顶栏） */
+#settingsBox { position: relative; flex-shrink: 0; }
+#settingsMenu { position: absolute; top: calc(100% + 6px); right: 0; z-index: 20; display: flex; flex-direction: column; gap: 8px; padding: 10px; background: var(--bg-card); border: 1px solid var(--bg-input); border-radius: 6px; box-shadow: 0 4px 16px rgba(0,0,0,0.35); width: 220px; }
+#settingsMenu label { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text); margin: 0; }
+/* 新版本徽标 */
+#updateBadge { border-color: var(--ok); color: var(--ok); font-weight: 600; }
+/* 版本更新模态（复用 feedbackMask 遮罩样式语义） */
+#updateMask { position: fixed; inset: 0; z-index: 30; background: rgba(0,0,0,0.45); display: flex; align-items: center; justify-content: center; }
+#updateForm { display: flex; flex-direction: column; gap: 8px; width: 460px; max-width: 90vw; max-height: 80vh; padding: 14px 16px; background: var(--bg-card); border: 1px solid var(--border); border-radius: 8px; box-shadow: 0 8px 28px rgba(0,0,0,0.45); }
+#updateForm h3 { margin: 0; color: var(--accent); font-size: 14px; }
+#updateForm .upd-meta { font-size: 12px; color: var(--text-mute); }
+#updDesc { margin: 0; padding: 8px; background: var(--bg-input); border-radius: 4px; font-size: 12px; line-height: 1.6; white-space: pre-wrap; word-break: break-word; overflow-y: auto; max-height: 32vh; }
+#updateForm .upd-assets-title { font-size: 12px; color: var(--text-mute); margin-bottom: 4px; }
+#updAssets { display: flex; flex-direction: column; gap: 2px; font-size: 12px; overflow-y: auto; max-height: 16vh; }
+#updateForm .fb-actions { display: flex; gap: 8px; justify-content: flex-end; }
 .panels { display: flex; gap: 12px; flex-shrink: 0; flex-wrap: wrap; align-items: flex-start; }
 .panel { flex: 1 1 220px; background: var(--bg-card); border-radius: 6px; padding: 8px 12px; color: var(--text); }
 .panel h3 { font-size: 13px; color: var(--accent); margin-bottom: 6px; }

@@ -887,6 +887,106 @@ fn gitlab_logout() -> Result<String, String> {
     }
 }
 
+// ---------- 版本更新检测 + GUI 设置（设置子菜单） ----------
+
+/// GUI 设置（`~/.config/xperf/gui-settings.json` 持久化，顶栏「设置」子菜单编辑）
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct GuiSettings {
+    /// 启动时自动检查更新（默认开；检测失败静默不打扰，仅记 diag）
+    #[serde(default = "default_auto_check_update")]
+    auto_check_update: bool,
+}
+
+fn default_auto_check_update() -> bool {
+    true
+}
+
+impl Default for GuiSettings {
+    fn default() -> Self {
+        Self { auto_check_update: default_auto_check_update() }
+    }
+}
+
+fn gui_settings_path() -> Option<std::path::PathBuf> {
+    let base = std::env::var_os("XDG_CONFIG_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".config")));
+    base.map(|b| b.join("xperf").join("gui-settings.json"))
+}
+
+fn load_gui_settings() -> GuiSettings {
+    gui_settings_path()
+        .map(|p| load_gui_settings_from(&p))
+        .unwrap_or_default()
+}
+
+/// [`load_gui_settings`] 的可测内核（路径注入，免 env 突变）
+fn load_gui_settings_from(path: &std::path::Path) -> GuiSettings {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+/// 读取 GUI 设置（设置子菜单初始化数据源）
+#[tauri::command]
+fn get_gui_settings() -> GuiSettings {
+    load_gui_settings()
+}
+
+/// 保存 GUI 设置（tmp+rename 原子写，防中途崩溃截断）
+#[tauri::command]
+fn save_gui_settings(auto_check_update: bool) -> Result<(), String> {
+    let p = gui_settings_path().ok_or("无法确定配置目录（HOME 未设置）")?;
+    save_gui_settings_to(&p, auto_check_update)
+}
+
+/// [`save_gui_settings`] 的可测内核（路径注入，免 env 突变）
+fn save_gui_settings_to(path: &std::path::Path, auto_check_update: bool) -> Result<(), String> {
+    let settings = GuiSettings { auto_check_update };
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    }
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, serde_json::to_string_pretty(&settings).map_err(|e| e.to_string())?)
+        .map_err(|e| e.to_string())?;
+    std::fs::rename(&tmp, path).map_err(|e| e.to_string())
+}
+
+/// 检查更新（设置菜单「检查更新」+ 启动自动检测）：查询最新 Release 并与当前版本
+/// 比较。返回 `{ok, current, release?, has_update?, error?}`——失败不 throw
+/// （启动自动检测要求静默失败），前端按 ok 分支处理。
+#[tauri::command]
+async fn check_update() -> serde_json::Value {
+    let r = tokio::task::spawn_blocking(xperf_core::update::fetch_latest_release).await;
+    let current = concat!("v", env!("CARGO_PKG_VERSION"));
+    match r {
+        Ok(Ok(rel)) => {
+            let has_update = xperf_core::update::is_newer(&rel.tag, env!("CARGO_PKG_VERSION"));
+            serde_json::json!({ "ok": true, "current": current, "release": rel, "has_update": has_update })
+        }
+        Ok(Err(e)) => serde_json::json!({ "ok": false, "current": current, "error": format!("{e:#}") }),
+        Err(e) => serde_json::json!({ "ok": false, "current": current, "error": e.to_string() }),
+    }
+}
+
+/// 在系统浏览器打开 URL（更新模态「打开 Release 页」；仅放行 http/https scheme）
+#[tauri::command]
+fn open_url(url: String) -> Result<(), String> {
+    if !(url.starts_with("https://") || url.starts_with("http://")) {
+        return Err(format!("仅支持 http(s) 链接: {url}"));
+    }
+    #[cfg(target_os = "macos")]
+    let opener = "open";
+    #[cfg(not(target_os = "macos"))]
+    let opener = "xdg-open";
+    std::process::Command::new(opener)
+        .arg(&url)
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
 /// 更新 simpleperf 火焰图脚本与双平台 report 库（从 AOSP 强制重新拉取，覆盖
 /// `xperf-core/simpleperf_scripts/` 的 vendor 文件；git 提交后同步到其他机器）。
 /// 逐 MB 进度经 `scripts-update` 事件推给前端（stage: progress/done；percent 为
@@ -2208,6 +2308,10 @@ fn main() {
             gitlab_auth_status,
             gitlab_login,
             gitlab_logout,
+            get_gui_settings,
+            save_gui_settings,
+            check_update,
+            open_url,
             update_simpleperf_scripts,
             diag_log,
             list_packages,
@@ -2403,6 +2507,28 @@ Host myserver          # 重复别名去重
         assert_eq!(a.package, "com.example.app");
         assert_eq!(a.startup_extra.unwrap().0, 500);
         assert!(map.get("devB").unwrap().startup_extra.is_none());
+    }
+
+    // ---- GUI 设置持久化（路径注入内核，不碰 env） ----
+
+    #[test]
+    fn test_gui_settings_roundtrip() {
+        let dir = std::env::temp_dir().join(format!("xperf-guisettings-test-{}", std::process::id()));
+        let path = dir.join("gui-settings.json");
+        // 不存在 → 默认（自动检查开）
+        assert!(load_gui_settings_from(&path).auto_check_update);
+        // 保存 false → 读回 false；保存 true → 读回 true
+        save_gui_settings_to(&path, false).unwrap();
+        assert!(!load_gui_settings_from(&path).auto_check_update);
+        save_gui_settings_to(&path, true).unwrap();
+        assert!(load_gui_settings_from(&path).auto_check_update);
+        // 缺字段的旧 JSON 兼容（serde default → true）
+        std::fs::write(&path, "{}").unwrap();
+        assert!(load_gui_settings_from(&path).auto_check_update);
+        // 损坏 JSON → 默认
+        std::fs::write(&path, b"not json").unwrap();
+        assert!(load_gui_settings_from(&path).auto_check_update);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
