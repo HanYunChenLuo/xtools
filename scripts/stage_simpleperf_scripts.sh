@@ -32,7 +32,7 @@ fi
 if [ "$big" = "1" ]; then
     mkdir -p "$dest/bin/$(dirname "$plat")"
     cp -R "$lib" "$dest/bin/$(dirname "$plat")/"
-    echo "火焰图脚本集已暂存: $dest（含 bin/$plat）"
+    echo "火焰图脚本集已暂存: ${dest}（含 bin/${plat}）"
 else
     echo "WARN: $lib 无 >1MB 的真实 report 库（LFS 未拉取？）——只暂存脚本本体，" \
          "运行时会落到可写目录从 AOSP 引导下载补齐" >&2
