@@ -26,7 +26,7 @@ use xperf_core::simpleperf;
 #[command(version, about = "XPerformance Monitor - Android process CPU/memory monitor", long_about = None)]
 struct Args {
     /// Package name to monitor
-    #[arg(short, long, required_unless_present_any = ["clean_cache", "update_simpleperf_scripts", "mirror", "screenshot", "record", "logcat", "feedback", "gitlab_login", "gitlab_logout"])]
+    #[arg(short, long, required_unless_present_any = ["clean_cache", "update_simpleperf_scripts", "mirror", "screenshot", "record", "logcat", "feedback", "gitlab_login", "gitlab_logout", "check_update"])]
     package: Option<String>,
 
     /// 目标设备 serial（多台设备同连时必须指定，如 `adb devices` 列出的 6eb792dfb0f；
@@ -189,6 +189,12 @@ struct Args {
     /// GitLab 退出登录（删除本地 token 文件）
     #[arg(long)]
     gitlab_logout: bool,
+
+    /// 检查 GitLab 是否有新版本发布（只检测 + 引导：打印当前/最新版本、Release 页
+    /// 链接与资产清单，不自动更新）。凭证链同 --feedback；恒 exit 0——「有新版」
+    /// 是提示不是错误，无凭证/网络失败也如实打印后正常退出
+    #[arg(long)]
+    check_update: bool,
 }
 
 /// 问题反馈（--feedback）：收集 → 打印自检清单 → 上传。返回 issue URL；
@@ -1816,6 +1822,35 @@ async fn main() -> Result<()> {
                 std::process::exit(1);
             }
         };
+    }
+    // --check-update：版本更新检测（纯 GitLab API 走 host 网络，与设备/远程无关；
+    // 恒 exit 0——「有新版」是提示不是错误，脚本/agent 不因此失败）
+    if args.check_update {
+        let r = tokio::task::spawn_blocking(xperf_core::update::fetch_latest_release).await;
+        match r {
+            Ok(Ok(rel)) => {
+                let current = env!("CARGO_PKG_VERSION");
+                println!("当前版本: v{current}");
+                println!("最新版本: {}（发布于 {}）", rel.tag, rel.released_at);
+                match xperf_core::update::is_newer(&rel.tag, current) {
+                    Some(true) => println!("🆕 有新版可用: v{current} → {}", rel.tag),
+                    Some(false) => println!("✅ 已是最新版本"),
+                    None => println!("⚠️ 版本格式无法比较（最新 tag: {}）", rel.tag),
+                }
+                println!("Release 页: {}", rel.url);
+                if rel.assets.is_empty() {
+                    println!("资产清单: （无）");
+                } else {
+                    println!("资产清单（登录态浏览器可直接下载）:");
+                    for a in &rel.assets {
+                        println!("  - {}", a.name);
+                    }
+                }
+            }
+            Ok(Err(e)) => eprintln!("⚠️ 检查更新失败: {e:#}"),
+            Err(e) => eprintln!("⚠️ 检查更新线程异常: {e}"),
+        }
+        return Ok(());
     }
     // 监控流程必带 --package（clap required_unless_present 已保证；--mirror/--screenshot/
     // --record 单独使用时除外）

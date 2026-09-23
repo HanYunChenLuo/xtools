@@ -92,6 +92,11 @@ xperf-cli --device <serial> --package com.example.app --cpu --duration 10
 
 # Device attached to a remote Linux machine
 xperf-cli --remote <ssh-host> --package com.example.app --cpu --duration 10
+
+# Update check (pure GitLab API over the host network — no device/adb needed;
+# needs credentials like --feedback; ALWAYS exits 0, even on "new release found"
+# or failure — detect + print release URL/assets only, never self-updates)
+xperf-cli --check-update
 ```
 
 The app must be **running** during sampling — if no process matches the

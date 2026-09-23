@@ -58,6 +58,11 @@ down to ~50 ms are practical.
   `--gitlab-login` authorizes in the browser (OAuth, SSO/2FA compatible) so
   issues are created as you — or use the `GITLAB_TOKEN` env var /
   `~/.config/xperf/gitlab-token` (PAT)
+- **Update check** (`--check-update`): queries the internal GitLab for the
+  latest release and prints current/latest versions, the release page URL and
+  the asset list (detect + guide only, no self-update; always exits 0). The
+  GUI top bar Settings menu can toggle the startup auto-check (default on) and
+  run a manual check; a 🆕 badge appears when a newer release exists
 - **Utility commands**: `--force-stop` (stop the app), `--clean-cache` (clear
   caches and collected data), `--update-simpleperf-scripts` (refresh
   flamegraph scripts)
@@ -97,6 +102,7 @@ Common options (full list in `--help`):
 | Capture | `--screenshot`, `--record <seconds>`, `--mirror`, `--logcat [--logcat-regex <regex>]` |
 | Remote | `--remote <host>`, `--remote-adb <path>`, `--remote-adb-port <port>` |
 | Feedback | `--feedback <description>`, `--gitlab-login` / `--gitlab-logout` |
+| Update check | `--check-update` (always exits 0) |
 | Utility | `--force-stop`, `--clean-cache`, `--update-simpleperf-scripts` |
 
 The device-side agent is built (if missing) and pushed to

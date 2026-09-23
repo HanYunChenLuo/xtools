@@ -2413,9 +2413,122 @@ const feedbackUI = {
   },
 };
 
+// ---------- 版本更新检测（设置子菜单 + 顶栏徽标 + 模态） ----------
+const updateUI = {
+  release: null,  // 最近一次检测到的 ReleaseInfo（徽标点击后模态的数据源）
+
+  show(rel) {
+    this.release = rel;
+    document.getElementById('updTag').textContent = rel.tag;
+    document.getElementById('updMeta').textContent = '发布于 ' + (rel.released_at || '未知');
+    document.getElementById('updDesc').textContent = rel.description || '（无 Release 说明）';
+    const box = document.getElementById('updAssets');
+    box.textContent = '';
+    const assets = rel.assets || [];
+    if (assets.length === 0) {
+      box.textContent = '（无资产）';
+    } else {
+      for (const a of assets) {
+        const div = document.createElement('div');
+        div.textContent = a.name;
+        div.title = a.url;
+        box.appendChild(div);
+      }
+    }
+    document.getElementById('updateMask').classList.remove('hidden');
+  },
+  hide() {
+    document.getElementById('updateMask').classList.add('hidden');
+  },
+  showBadge(tag) {
+    const b = document.getElementById('updateBadge');
+    b.textContent = '🆕 ' + tag;
+    b.classList.remove('hidden');
+  },
+
+  // 检测一次。manual=true（设置菜单手动触发）：状态栏给结论含失败提示；
+  // manual=false（启动自动检测）：失败静默仅记 diag，有新版照常出徽标
+  async run(manual) {
+    try {
+      const r = await invoke('check_update');
+      if (!r.ok) {
+        _diag('check_update failed: ' + r.error);
+        if (manual) remoteUI.setGlobalStatus('检查更新失败: ' + r.error);
+        return;
+      }
+      if (r.has_update === true) {
+        this.release = r.release;
+        this.showBadge(r.release.tag);
+        remoteUI.setGlobalStatus('发现新版本 ' + r.release.tag + '（当前 ' + r.current + '），点顶栏徽标查看');
+      } else if (manual) {
+        remoteUI.setGlobalStatus(r.has_update === false
+          ? '已是最新版本（' + r.current + '）'
+          : '版本格式无法比较（最新 tag: ' + r.release.tag + '）');
+      }
+      _diag('check_update ok: latest=' + r.release.tag + ' has_update=' + r.has_update + (manual ? ' (manual)' : ''));
+    } catch (e) {
+      _diag('check_update ERROR: ' + JSON.stringify(e));
+      if (manual) remoteUI.setGlobalStatus('检查更新失败: ' + e);
+    }
+  },
+
+  async init() {
+    // 设置子菜单开合（点菜单外任意处收起）
+    const menu = document.getElementById('settingsMenu');
+    document.getElementById('settingsBtn').addEventListener('click', (e) => {
+      e.stopPropagation();
+      menu.classList.toggle('hidden');
+    });
+    document.addEventListener('click', (e) => {
+      if (!menu.classList.contains('hidden') && !document.getElementById('settingsBox').contains(e.target)) {
+        menu.classList.add('hidden');
+      }
+    });
+    // 设置项：启动时自动检查更新（持久化 gui-settings.json，默认开）
+    const autoCheck = document.getElementById('stAutoCheck');
+    try {
+      const st = await invoke('get_gui_settings');
+      autoCheck.checked = st.auto_check_update !== false;
+    } catch (e) {
+      _diag('get_gui_settings ERROR: ' + JSON.stringify(e));
+    }
+    autoCheck.addEventListener('change', async () => {
+      try {
+        await invoke('save_gui_settings', { autoCheckUpdate: autoCheck.checked });
+        _diag('gui settings saved: auto_check_update=' + autoCheck.checked);
+      } catch (e) {
+        await alertBox('保存设置失败: ' + (e && e.toString()), 'error');
+      }
+    });
+    document.getElementById('stCheckNow').addEventListener('click', () => {
+      menu.classList.add('hidden');
+      this.run(true);
+    });
+    // 徽标 → 模态；打开 Release 页；遮罩空白/关闭按钮收起
+    document.getElementById('updateBadge').addEventListener('click', () => {
+      if (this.release) this.show(this.release);
+    });
+    document.getElementById('updClose').addEventListener('click', () => this.hide());
+    document.getElementById('updateMask').addEventListener('click', (e) => {
+      if (e.target.id === 'updateMask') this.hide();
+    });
+    document.getElementById('updOpen').addEventListener('click', async () => {
+      if (!this.release) return;
+      try {
+        await invoke('open_url', { url: this.release.url });
+      } catch (e) {
+        await alertBox('打开浏览器失败: ' + (e && e.toString()), 'error');
+      }
+    });
+    // 启动自动检测（设置开启时；失败静默不打扰）
+    if (autoCheck.checked) this.run(false);
+  },
+};
+
 // ---------- 初始化：列设备建页 → 回填自动启动会话 → 动态窗口尺寸 ----------
 (async function init() {
   feedbackUI.init();
+  await updateUI.init();
   await remoteUI.init();
   try {
     const r = await invoke('list_devices');
