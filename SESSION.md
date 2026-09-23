@@ -17,6 +17,8 @@
 
 **遗留**：「有新版」的真机天然路径待 v0.3.3 发布后自然覆盖（单测已锁 is_newer 四态 + 注入假 release 已目验徽标/模态链路）。
 
+**Linux 验证（hppc 直编 debug GUI + Xvfb :99 + 调试 API，SS3+SS2MAX 在线）**：新功能脚本 7 项全绿（设备枚举/设置菜单元素/主题三态[webkit2gtk 下 prefers-color-scheme 正常，Xvfb 无暗色偏好 system→暗色]/字体三档 13→11.05/15.6px/设置落盘/徽标+模态/check_update 无凭证如实指引）；带凭证（GITLAB_TOKEN 取自 hppc git-credentials）check_update ok=true latest=v0.3.2 六资产、手动检查状态栏「已是最新版本（v0.3.2）」；回归套件 g1 2/2 + g2 22/22 绿。**教训**：ssh 远端命令里 `pkill -f "target/debug/xperf-gui"` 会自匹配 ssh `bash -c` 包装进程（cmdline 含同样字面量）自杀整条命令（ssh exit 255 零输出，`[t]arget` 方括号技巧无效——启动路径本身也含该串），远端杀 GUI 用 `pkill -x xperf-gui`。
+
 **追加（同会话用户 review 反馈，`be21e52` + `a561275` + `8ac3926`）**：① 顶栏按钮样式统一——新增的设置/徽标钮此前无样式落回原生外观，`#themeBtn`/`#feedbackTopBtn` 重复样式收敛为顶栏统一规则（徽标 specificity 提为 `#topbar > button#updateBadge` 压过统一规则，padding -1px 抵消 border 等高）；② 间距不一根因=`#themeBtn` 的 `margin-left:8px` 叠 topbar `gap:10px`=18px，主题钮移除后全 10px（DOM 实测）；③ 主题移入设置子菜单并改三态：跟随系统（新默认，`prefers-color-scheme` 实时跟随）/暗/亮，持久化从 localStorage 迁入 `gui-settings.json`（`get_gui_settings` 增 `existed` 标志：文件存在以其为准、不存在把当前值[含旧 `xperf-theme` key 迁移结果]一次性落盘），localStorage 降为启动防闪烁镜像；④ 设置子菜单再增「字体大小」小/中[默认]/大三档——CSS 全部 39 处 font-size 改 `calc(Npx * var(--font-scale))`（`[data-fontsize]` 切 0.85/1/1.2），canvas 图表文字经 `fontScale()` 同比例缩放（切档全图表重绘）。目验：三态切换即生效+落盘、重启按文件恢复、旧 key 迁移全链（**坑：迁移测试须先让 localStorage 种子活下来再删设置文件**——种子写入与启动建文件交叉会污染场景；WKWebView localStorage 跨重启持久性用探针单独实证过）、字体三档 13px→11.05/15.6px 实测。
 
 ## 2026-09-23（三）：全量 review（独立子代理）——5 一般 + 7 观察项全修
