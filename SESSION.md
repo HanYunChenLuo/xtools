@@ -5,6 +5,18 @@
 > 待办事项（backlog）在 `WORKSPACE.md` 维护，本文件只做历史追溯。
 > 新会话开始时可先读本文件了解近期上下文。
 
+## 2026-09-23：路径审计（用户 review 指令）——主机工具二进制解析四缺口全修
+
+**任务**：用户令 review 代码与文档，「关注需要使用的相关二进制的路径问题，有没有写死路径」。
+
+**审计结论（全量扫 `Command::new` + 绝对路径字面量）**：adb/ssh/cargo/agent/脚本集五条链已有 env→PATH→常见位置的完整解析（agent 与脚本集为本会话早前修复）；python3/curl/wget/open/xdg-open/dbus-send 走 PATH 属标准做法；设备端 `/data/local/tmp`、`/data/misc/perfetto-traces` 为 shell 可写常规位置（by design）；marker socket 与 GUI diag log 的 `/tmp` 字面量是「稳定知名路径」（代码与 AGENTS.md 消费路径一致）。**四个真缺口**：scrcpy 无 env 覆盖、scrcpy 无版本门槛（1.21 只报晦涩「连接失败」，I 节候补）、trace_processor 无 env 覆盖且 `/tmp/trace_processor` 字面量候选（macOS temp_dir≠/tmp）、chrome 无 env 覆盖。文档侧：README/AGENTS/skills 无个人主机与个人路径泄漏；README 缺可选依赖前置。
+
+**修复**（`86ebf1c` + `91f214d`，merge `947607e`）：`XPERF_SCRCPY`/`XPERF_TRACE_PROCESSOR`/`XPERF_CHROME` 三个 env 覆盖（与 `XPERF_ADB` 同「存在才生效、缺失回落」语义）；`SCRCPY_MIN_MAJOR=2` 版本门槛在 `spawn_scrcpy` 入口（CLI/GUI 共用）——`--version` 解析不出不挡（真实失败自然上报）；tp 候选改 temp_dir + `/tmp` 双查。文档：AGENTS.md 新增「主机工具解析表」（7 个 env 覆盖 + PATH-only 清单一表尽）、README 双语 Requirements 补 scrcpy ≥2/python3/trace_processor 自动下载、CLAUDE.md mirror/trace 节同步、CHANGELOG 两条。
+
+**验证（measured）**：单测 +3（scrcpy 版本行解析 4.2.1/1.21/垃圾、XPERF_SCRCPY 覆盖、XPERF_TRACE_PROCESSOR 覆盖）；hppc 直编 CLI 双假脚本——1.21 → 门槛拦截（完整文案 rc=1）、4.9.9 → 过门槛失败在启动检测；**kong 真 1.21**（CI #1421969 bullseye 产物，glibc 2.31 兼容 22.04）——裸跑与 `XPERF_SCRCPY` 指向不存在文件（回落 PATH）均为门槛拦截，文案含 `/usr/bin/scrcpy` 与升级指引。全量 core 171+8 / CLI 12 / GUI 16 绿，clippy/rustdoc（missing_docs 三 crate）零警告。CI #1421969 test/build 绿。
+
+**遗留**：无（审计范围内全部关闭；DMG 火焰图跨机补验仍按 K 节遗留等 v0.3.2）。
+
 ## 2026-09-22（深夜·二）：K 节收官——K1（Linux SSH 远程 + SS4 桥接）与 K2b（22.04 发布产物）双环境补齐
 
 **触发**：用户报「kong 上已经连接了 ss4」→ 车机通电，K1/K2 的硬件前提恢复。
