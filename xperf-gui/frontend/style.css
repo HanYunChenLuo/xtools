@@ -3,6 +3,7 @@
 /* ---------- 双主题：暗色（默认）/ 亮色，html[data-theme] 切换 ---------- */
 :root {
   color-scheme: dark; /* 原生控件（select 下拉/checkbox/number spinner/滚动条）暗色渲染 */
+  --font-scale: 1; /* 字体档位缩放（默认中号=1；小=0.85 大=1.2，html[data-fontsize] 切换） */
   --bg-main: #181825;    /* 主区背景 */
   --bg-card: #1e1e2e;    /* 卡片/图表/panel 背景 */
   --bg-input: #313244;   /* 输入框/状态块背景 */
@@ -47,22 +48,26 @@
 body { font-family: -apple-system, "Segoe UI", "Noto Sans CJK SC", "PingFang SC", sans-serif; display: flex; flex-direction: column; height: 100vh; -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility; background: var(--bg-main); color: var(--text); }
 .hidden { display: none !important; }
 
+/* 字体档位（设置子菜单「字体大小」；全部 font-size 声明乘 --font-scale） */
+:root[data-fontsize="small"] { --font-scale: 0.85; }
+:root[data-fontsize="large"] { --font-scale: 1.2; }
+
 /* ---------- 顶栏：品牌 + 设备 tab（每台在线设备一页）+ 状态 + 主题 ---------- */
 #topbar { display: flex; align-items: center; gap: 10px; padding: 6px 12px; background: var(--bg-card); flex-shrink: 0; }
-#brand { color: var(--accent); font-weight: 700; font-size: 14px; flex-shrink: 0; }
+#brand { color: var(--accent); font-weight: 700; font-size: calc(14px * var(--font-scale)); flex-shrink: 0; }
 /* 远程连接控件：本机/远端切换 + 新增配置（表单绝对定位浮层，不撑高顶栏） */
 #remoteBox { position: relative; display: flex; align-items: center; gap: 4px; flex-shrink: 0; }
 #remoteSelect { max-width: 140px; }
 #remoteForm { position: absolute; top: calc(100% + 6px); left: 0; z-index: 20; display: flex; flex-direction: column; gap: 6px; padding: 10px; background: var(--bg-card); border: 1px solid var(--bg-input); border-radius: 6px; box-shadow: 0 4px 16px rgba(0,0,0,0.35); width: 300px; }
 #remoteForm .rf-row { display: flex; gap: 6px; }
 #remoteForm .rf-row input { min-width: 0; flex: 1; }
-#remoteForm .rf-savecfg { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-mute); margin: 0; }
-.sidebar-remote .remote-host-label { font-size: 12px; color: var(--text-mute); word-break: break-all; }
+#remoteForm .rf-savecfg { display: flex; align-items: center; gap: 6px; font-size: calc(12px * var(--font-scale)); color: var(--text-mute); margin: 0; }
+.sidebar-remote .remote-host-label { font-size: calc(12px * var(--font-scale)); color: var(--text-mute); word-break: break-all; }
 #deviceTabs { display: flex; gap: 6px; overflow-x: auto; min-width: 0; flex: 0 1 auto; }
-#deviceTabs .device-tab { padding: 5px 14px; border: none; border-radius: 6px 6px 0 0; cursor: pointer; font-size: 13px; background: var(--bg-input); color: var(--text-mute); white-space: nowrap; flex-shrink: 0; }
+#deviceTabs .device-tab { padding: 5px 14px; border: none; border-radius: 6px 6px 0 0; cursor: pointer; font-size: calc(13px * var(--font-scale)); background: var(--bg-input); color: var(--text-mute); white-space: nowrap; flex-shrink: 0; }
 #deviceTabs .device-tab.active { background: var(--bg-card); color: var(--accent); font-weight: 600; box-shadow: inset 0 -2px 0 var(--accent); border-radius: 6px; }
 #deviceTabs .device-tab.offline { opacity: 0.55; font-style: italic; }
-#status { margin-left: auto; max-width: 40%; padding: 6px 10px; background: var(--bg-input); border-radius: 3px; font-size: 12px; text-align: center; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; position: relative; flex-shrink: 1; }
+#status { margin-left: auto; max-width: 40%; padding: 6px 10px; background: var(--bg-input); border-radius: 3px; font-size: calc(12px * var(--font-scale)); text-align: center; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; position: relative; flex-shrink: 1; }
 /* 录制进度态：绿色填充按 --progress 比例铺开（0%–100%）；填色/文字用主题变量，
    暗亮两套（dark: #a6e3a1 亮字 / light: #40a02b 白字）均满足对比度 */
 #status.progress {
@@ -72,7 +77,7 @@ body { font-family: -apple-system, "Segoe UI", "Noto Sans CJK SC", "PingFang SC"
   font-weight: 600;
 }
 /* 顶栏按钮统一样式（问题反馈/设置/新版徽标同一规格） */
-#topbar > button, #settingsBox > button { padding: 6px 12px; flex-shrink: 0; border: none; border-radius: 4px; cursor: pointer; font-size: 13px; background: var(--bg-btn); color: var(--text); }
+#topbar > button, #settingsBox > button { padding: 6px 12px; flex-shrink: 0; border: none; border-radius: 4px; cursor: pointer; font-size: calc(13px * var(--font-scale)); background: var(--bg-btn); color: var(--text); }
 
 /* ---------- 内容区：每台设备一页（.device-page），仅激活页可见 ---------- */
 #content { flex: 1; min-height: 0; padding: 12px; background: var(--bg-main); overflow: hidden; }
@@ -80,7 +85,7 @@ body { font-family: -apple-system, "Segoe UI", "Noto Sans CJK SC", "PingFang SC"
 .device-page.active { display: flex; }
 .sidebar { width: 280px; padding: 16px; background: var(--bg-card); color: var(--text); overflow-y: auto; overflow-x: hidden; border-radius: 6px; flex-shrink: 0; }
 .sidebar h2 { margin-bottom: 16px; color: var(--accent); }
-.sidebar label { display: block; margin: 8px 0; font-size: 13px; }
+.sidebar label { display: block; margin: 8px 0; font-size: calc(13px * var(--font-scale)); }
 /* 指标勾选两列排布：8 项侧栏纵向空间省一半，默认窗口高度下侧栏免滚动全量可见 */
 .checkboxes { display: grid; grid-template-columns: 1fr 1fr; gap: 2px 8px; margin: 4px 0; }
 .checkboxes label { display: flex; align-items: center; gap: 6px; margin: 0; }
@@ -90,7 +95,7 @@ body { font-family: -apple-system, "Segoe UI", "Noto Sans CJK SC", "PingFang SC"
 .sidebar-row { display: flex; gap: 4px; margin: 4px 0; align-items: center; }
 .sidebar-row .small { width: auto; padding: 4px 8px; flex-shrink: 0; }
 /* 设备权限徽章：root=绿 / shell（非 root）=黄 / 未知=灰 */
-.perm-badge { padding: 3px 8px; border-radius: 3px; font-size: 12px; background: var(--bg-input); color: var(--text-dim); white-space: nowrap; }
+.perm-badge { padding: 3px 8px; border-radius: 3px; font-size: calc(12px * var(--font-scale)); background: var(--bg-input); color: var(--text-dim); white-space: nowrap; }
 .perm-badge.perm-ok { color: var(--ok); }
 .perm-badge.perm-warn { color: var(--warn); }
 .sidebar-row .small.flex-fill { flex: 1; }
@@ -118,34 +123,34 @@ body { font-family: -apple-system, "Segoe UI", "Noto Sans CJK SC", "PingFang SC"
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 12px;
+  font-size: calc(12px * var(--font-scale));
   font-weight: 700;
   color: var(--on-accent);
 }
-.sidebar button { width: 100%; padding: 8px; margin: 4px 0; border: none; border-radius: 4px; cursor: pointer; font-size: 14px; }
-.sidebar button.small { width: 100%; padding: 5px; font-size: 12px; background: var(--bg-btn); color: var(--text); }
+.sidebar button { width: 100%; padding: 8px; margin: 4px 0; border: none; border-radius: 4px; cursor: pointer; font-size: calc(14px * var(--font-scale)); }
+.sidebar button.small { width: 100%; padding: 5px; font-size: calc(12px * var(--font-scale)); background: var(--bg-btn); color: var(--text); }
 .sidebar .start-btn { background: var(--ok); color: var(--on-ok); }
 .sidebar .stop-btn { background: var(--err); color: var(--on-ok); }
 .sidebar .stop-btn:disabled, .sidebar .start-btn:disabled { opacity: 0.4; cursor: not-allowed; }
-.sidebar h3 { margin-top: 16px; color: var(--accent); font-size: 14px; }
+.sidebar h3 { margin-top: 16px; color: var(--accent); font-size: calc(14px * var(--font-scale)); }
 .sidebar select { width: 100%; padding: 4px; margin-top: 2px; background: var(--bg-input); color: var(--text); border: 1px solid var(--border); border-radius: 3px; }
 .sidebar .export-btn { background: var(--bg-btn); color: var(--text); }
 
 .main-area { flex: 1; min-width: 0; background: var(--bg-main); display: flex; flex-direction: column; gap: 12px; overflow-y: auto; }
 /* 设备页内三个子 tab（性能指标 / Perfetto / Simpleperf） */
 .tab-bar { display: flex; gap: 6px; flex-shrink: 0; align-items: center; }
-.tab-bar .tab { padding: 6px 16px; border: none; border-radius: 6px 6px 0 0; cursor: pointer; font-size: 13px; background: var(--bg-input); color: var(--text-mute); }
+.tab-bar .tab { padding: 6px 16px; border: none; border-radius: 6px 6px 0 0; cursor: pointer; font-size: calc(13px * var(--font-scale)); background: var(--bg-input); color: var(--text-mute); }
 .tab-bar .tab.active { background: var(--bg-card); color: var(--accent); font-weight: 600; }
 /* 三个 tab 内容区共用布局：纵向 flex 占满主区（图表/报告滚动在各自容器内） */
 .tab-content { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 12px; }
 /* 空闲占位：无设备引导 / 指标页未开始监控引导（开始后隐藏） */
-.idle-hint { padding: 18px; background: var(--bg-card); border: 1px dashed var(--border); border-radius: 6px; color: var(--text-dim); font-size: 13px; text-align: center; }
+.idle-hint { padding: 18px; background: var(--bg-card); border: 1px dashed var(--border); border-radius: 6px; color: var(--text-dim); font-size: calc(13px * var(--font-scale)); text-align: center; }
 
 .chart { flex: 1; min-height: 120px; background: var(--bg-card); border-radius: 6px; position: relative; overflow: hidden; }
 .chart canvas { width: 100%; height: 100%; display: block; }
 /* 悬停读数（crosshair + tooltip）：DOM overlay 实现，不随 canvas 重绘被抹掉 */
 .chart-hover-line { position: absolute; width: 1px; background: var(--text-dim); opacity: .7; pointer-events: none; display: none; z-index: 5; }
-.chart-hover-tip { position: absolute; display: none; z-index: 6; pointer-events: none; background: var(--bg-card); border: 1px solid var(--border); border-radius: 4px; padding: 5px 8px; font-size: 12px; line-height: 1.5; color: var(--text); white-space: nowrap; box-shadow: 0 2px 8px rgba(0,0,0,.35); max-width: calc(100% - 8px); max-height: calc(100% - 8px); overflow: hidden; }
+.chart-hover-tip { position: absolute; display: none; z-index: 6; pointer-events: none; background: var(--bg-card); border: 1px solid var(--border); border-radius: 4px; padding: 5px 8px; font-size: calc(12px * var(--font-scale)); line-height: 1.5; color: var(--text); white-space: nowrap; box-shadow: 0 2px 8px rgba(0,0,0,.35); max-width: calc(100% - 8px); max-height: calc(100% - 8px); overflow: hidden; }
 .chart-hover-tip .ht-time { color: var(--text-dim); margin-bottom: 2px; font-variant-numeric: tabular-nums; }
 .chart-hover-tip .ht-row { display: flex; align-items: center; gap: 6px; font-variant-numeric: tabular-nums; }
 .chart-hover-tip .ht-chip { width: 8px; height: 8px; border-radius: 2px; flex: none; }
@@ -162,40 +167,40 @@ body { font-family: -apple-system, "Segoe UI", "Noto Sans CJK SC", "PingFang SC"
 /* ---------- 问题反馈浮层（居中模态；侧栏「问题反馈」按钮唤起） ---------- */
 #feedbackMask { position: fixed; inset: 0; z-index: 30; background: rgba(0,0,0,0.45); display: flex; align-items: center; justify-content: center; }
 #feedbackForm { display: flex; flex-direction: column; gap: 8px; width: 420px; max-width: 90vw; padding: 14px 16px; background: var(--bg-card); border: 1px solid var(--border); border-radius: 8px; box-shadow: 0 8px 28px rgba(0,0,0,0.45); }
-#feedbackForm h3 { margin: 0; color: var(--accent); font-size: 14px; }
-#feedbackForm .fb-hint { font-size: 12px; color: var(--text-dim); line-height: 1.6; }
-#feedbackForm textarea { resize: vertical; padding: 6px 8px; background: var(--bg-input); color: var(--text); border: 1px solid var(--border); border-radius: 4px; font-size: 13px; font-family: inherit; }
+#feedbackForm h3 { margin: 0; color: var(--accent); font-size: calc(14px * var(--font-scale)); }
+#feedbackForm .fb-hint { font-size: calc(12px * var(--font-scale)); color: var(--text-dim); line-height: 1.6; }
+#feedbackForm textarea { resize: vertical; padding: 6px 8px; background: var(--bg-input); color: var(--text); border: 1px solid var(--border); border-radius: 4px; font-size: calc(13px * var(--font-scale)); font-family: inherit; }
 #feedbackForm .fb-actions { display: flex; gap: 8px; justify-content: flex-end; }
 #feedbackForm .fb-actions button { min-width: 88px; }
-#feedbackForm .fb-auth { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--text-mute); }
+#feedbackForm .fb-auth { display: flex; align-items: center; gap: 8px; font-size: calc(12px * var(--font-scale)); color: var(--text-mute); }
 #feedbackForm .fb-auth button { flex-shrink: 0; }
 #feedbackForm .fb-auth.fb-warn #fbIdentity { color: var(--err); }
 /* 设置子菜单：绝对定位浮层（同 remoteForm 套路，不撑高顶栏） */
 #settingsBox { position: relative; flex-shrink: 0; }
 #settingsMenu { position: absolute; top: calc(100% + 6px); right: 0; z-index: 20; display: flex; flex-direction: column; gap: 8px; padding: 10px; background: var(--bg-card); border: 1px solid var(--bg-input); border-radius: 6px; box-shadow: 0 4px 16px rgba(0,0,0,0.35); width: 220px; }
-#settingsMenu label { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text); margin: 0; }
+#settingsMenu label { display: flex; align-items: center; gap: 6px; font-size: calc(12px * var(--font-scale)); color: var(--text); margin: 0; }
 #settingsMenu label.st-row { justify-content: space-between; }
-#settingsMenu select { font-size: 12px; padding: 2px 4px; background: var(--bg-input); color: var(--text); border: 1px solid var(--border); border-radius: 4px; }
-#settingsMenu button { padding: 5px 8px; border: none; border-radius: 4px; cursor: pointer; font-size: 12px; background: var(--bg-btn); color: var(--text); }
+#settingsMenu select { font-size: calc(12px * var(--font-scale)); padding: 2px 4px; background: var(--bg-input); color: var(--text); border: 1px solid var(--border); border-radius: 4px; }
+#settingsMenu button { padding: 5px 8px; border: none; border-radius: 4px; cursor: pointer; font-size: calc(12px * var(--font-scale)); background: var(--bg-btn); color: var(--text); }
 /* 新版本徽标：同规格按钮 + 绿色描边高亮（padding 减 1px 抵消 border 保持等高） */
 #topbar > button#updateBadge { border: 1px solid var(--ok); color: var(--ok); font-weight: 600; background: transparent; padding: 5px 11px; }
 /* 版本更新模态（复用 feedbackMask 遮罩样式语义） */
 #updateMask { position: fixed; inset: 0; z-index: 30; background: rgba(0,0,0,0.45); display: flex; align-items: center; justify-content: center; }
 #updateForm { display: flex; flex-direction: column; gap: 8px; width: 460px; max-width: 90vw; max-height: 80vh; padding: 14px 16px; background: var(--bg-card); border: 1px solid var(--border); border-radius: 8px; box-shadow: 0 8px 28px rgba(0,0,0,0.45); }
-#updateForm h3 { margin: 0; color: var(--accent); font-size: 14px; }
-#updateForm .upd-meta { font-size: 12px; color: var(--text-mute); }
-#updDesc { margin: 0; padding: 8px; background: var(--bg-input); border-radius: 4px; font-size: 12px; line-height: 1.6; white-space: pre-wrap; word-break: break-word; overflow-y: auto; max-height: 32vh; }
-#updateForm .upd-assets-title { font-size: 12px; color: var(--text-mute); margin-bottom: 4px; }
-#updAssets { display: flex; flex-direction: column; gap: 2px; font-size: 12px; overflow-y: auto; max-height: 16vh; }
+#updateForm h3 { margin: 0; color: var(--accent); font-size: calc(14px * var(--font-scale)); }
+#updateForm .upd-meta { font-size: calc(12px * var(--font-scale)); color: var(--text-mute); }
+#updDesc { margin: 0; padding: 8px; background: var(--bg-input); border-radius: 4px; font-size: calc(12px * var(--font-scale)); line-height: 1.6; white-space: pre-wrap; word-break: break-word; overflow-y: auto; max-height: 32vh; }
+#updateForm .upd-assets-title { font-size: calc(12px * var(--font-scale)); color: var(--text-mute); margin-bottom: 4px; }
+#updAssets { display: flex; flex-direction: column; gap: 2px; font-size: calc(12px * var(--font-scale)); overflow-y: auto; max-height: 16vh; }
 #updateForm .fb-actions { display: flex; gap: 8px; justify-content: flex-end; }
 .panels { display: flex; gap: 12px; flex-shrink: 0; flex-wrap: wrap; align-items: flex-start; }
 .panel { flex: 1 1 220px; background: var(--bg-card); border-radius: 6px; padding: 8px 12px; color: var(--text); }
-.panel h3 { font-size: 13px; color: var(--accent); margin-bottom: 6px; }
-.panel table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.panel h3 { font-size: calc(13px * var(--font-scale)); color: var(--accent); margin-bottom: 6px; }
+.panel table { width: 100%; border-collapse: collapse; font-size: calc(12px * var(--font-scale)); }
 .panel th { text-align: left; color: var(--text-dim); font-weight: 500; padding: 2px 8px 2px 0; }
 .panel td { padding: 2px 8px 2px 0; font-variant-numeric: tabular-nums; }
-.panel pre { white-space: pre-wrap; font-size: 12px; line-height: 1.5; margin: 0; color: var(--text); }
-.effective-rates { font-size: 11px; color: var(--text-dim); margin: 4px 0 8px; line-height: 1.6; }
+.panel pre { white-space: pre-wrap; font-size: calc(12px * var(--font-scale)); line-height: 1.5; margin: 0; color: var(--text); }
+.effective-rates { font-size: calc(11px * var(--font-scale)); color: var(--text-dim); margin: 4px 0 8px; line-height: 1.6; }
 .effective-rates .rate-label { font-weight: 600; }
 .effective-rates .rate-same { color: var(--ok); }
 .effective-rates .rate-limited { color: var(--warn); }
@@ -203,31 +208,31 @@ body { font-family: -apple-system, "Segoe UI", "Noto Sans CJK SC", "PingFang SC"
 /* ---------- 性能指标页控制区（原侧栏采样控制移入，随 tab 常驻） ---------- */
 .perf-controls { flex-shrink: 0; background: var(--bg-card); border-radius: 6px; padding: 10px 12px; display: flex; flex-direction: column; gap: 6px; }
 .perf-controls .ctrl-row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
-.perf-controls label, .perf-controls .ctrl-title { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--text); margin: 0; }
+.perf-controls label, .perf-controls .ctrl-title { display: flex; align-items: center; gap: 6px; font-size: calc(13px * var(--font-scale)); color: var(--text); margin: 0; }
 .perf-controls select { padding: 4px 6px; background: var(--bg-input); color: var(--text); border: 1px solid var(--border); border-radius: 3px; }
 .perf-controls button { border: none; border-radius: 4px; cursor: pointer; }
-.perf-controls .start-btn { background: var(--ok); color: var(--on-ok); padding: 6px 14px; font-size: 13px; }
-.perf-controls .stop-btn { background: var(--err); color: var(--on-ok); padding: 6px 14px; font-size: 13px; }
+.perf-controls .start-btn { background: var(--ok); color: var(--on-ok); padding: 6px 14px; font-size: calc(13px * var(--font-scale)); }
+.perf-controls .stop-btn { background: var(--err); color: var(--on-ok); padding: 6px 14px; font-size: calc(13px * var(--font-scale)); }
 .perf-controls .start-btn:disabled, .perf-controls .stop-btn:disabled { opacity: 0.4; cursor: not-allowed; }
-.perf-controls .small { width: auto; padding: 4px 8px; font-size: 12px; background: var(--bg-btn); color: var(--text); flex-shrink: 0; }
+.perf-controls .small { width: auto; padding: 4px 8px; font-size: calc(12px * var(--font-scale)); background: var(--bg-btn); color: var(--text); flex-shrink: 0; }
 /* 指标勾选横排（侧栏时代的两列 grid 改为单行流式） */
 .perf-controls .checkboxes { display: flex; flex-wrap: wrap; gap: 2px 12px; margin: 0; }
 
 /* ---------- Perfetto / Simpleperf 分析 tab ---------- */
 .trace-toolbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; flex-shrink: 0; }
 .trace-toolbar .small { width: auto; padding: 5px 10px; }
-.trace-toolbar .toolbar-record { font-size: 12px; color: var(--text-mute); display: flex; align-items: center; gap: 4px; flex-shrink: 0; }
+.trace-toolbar .toolbar-record { font-size: calc(12px * var(--font-scale)); color: var(--text-mute); display: flex; align-items: center; gap: 4px; flex-shrink: 0; }
 .trace-toolbar select { padding: 4px 6px; background: var(--bg-input); color: var(--text); border: 1px solid var(--border); border-radius: 3px; }
 .trace-toolbar input[type=text] { padding: 4px 6px; width: 160px; background: var(--bg-input); color: var(--text); border: 1px solid var(--border); border-radius: 3px; }
-.trace-file-label { font-size: 12px; color: var(--text-mute); word-break: break-all; }
+.trace-file-label { font-size: calc(12px * var(--font-scale)); color: var(--text-mute); word-break: break-all; }
 .trace-report-box { flex: 1; min-height: 0; background: var(--bg-card); border-radius: 6px; padding: 10px 14px; overflow: auto; }
-.trace-report-box pre { white-space: pre-wrap; font-size: 12px; line-height: 1.5; margin: 0; color: var(--text); }
+.trace-report-box pre { white-space: pre-wrap; font-size: calc(12px * var(--font-scale)); line-height: 1.5; margin: 0; color: var(--text); }
 
 /* ---------- 日志（logcat）tab ---------- */
 /* 滚动容器必须是 .logcat-view 本身（renderLogcatLines 的 scrollTop 设在它上）；
    外层 box 只做圆角背景，overflow hidden 防双层滚动条 */
 .logcat-view-box { padding: 6px 10px; overflow: hidden; }
-.logcat-view { overflow-y: auto; height: 100%; font-family: "SF Mono", Menlo, Consolas, monospace; font-size: 11.5px; line-height: 1.45; white-space: pre-wrap; word-break: break-all; }
+.logcat-view { overflow-y: auto; height: 100%; font-family: "SF Mono", Menlo, Consolas, monospace; font-size: calc(11.5px * var(--font-scale)); line-height: 1.45; white-space: pre-wrap; word-break: break-all; }
 .logcat-view .log-line { color: var(--text-mute); }
 .logcat-view .lv-V { color: var(--text-dim); }
 .logcat-view .lv-D { color: var(--sky); }

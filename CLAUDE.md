@@ -374,7 +374,7 @@ GitLab 发布新版本后工具能检测并引导升级（只检测 + 引导，*
 
 - **update.rs**：`fetch_latest_release()`（`GET /projects/<id>/releases` 列表 + **semver 选最新**，不依赖接口排序约定；非 semver tag 视为最旧；reqwest blocking 5s 超时）→ `ReleaseInfo{tag, released_at, url, description, assets}`（url 优先响应 `_links.self`，否则按约定拼）；`is_newer(latest, current)` 纯函数（strip `v` 前缀 semver 比较，非法格式如实返回 None 不猜测）。`parse_release`/`pick_latest` 纯函数 + 单测（脱敏样例内嵌）+ `#[ignore]` 真机集成测试（无凭证如实 SKIP）。
 - **CLI `--check-update`**（无需 `--package`，与 `--clean-cache` 同类）：打印当前/最新版本、是否新版、Release 页链接、资产名清单；无凭证/网络失败如实打印；**恒 exit 0**（检测完成即成功，「有新版」不是错误——脚本/agent 不因此失败）；纯 host 网络，与设备/`--remote` 无关（SSH 远程下天然可用）。
-- **GUI**：顶栏「⚙ 设置」子菜单（`⚙ 设置` 按钮右侧浮层）：「启动时自动检查更新」勾选（默认开，持久化 `~/.config/xperf/gui-settings.json` tmp+rename 原子写，serde default 兼容缺字段）+「检查更新」按钮（手动触发，状态栏给结论含失败提示）。启动检测由**前端 init 发起**（读设置→`check_update` 命令），不用后端事件推送（避开事件早于 listener 注册丢失的老坑）；失败静默仅记 diag。有新版时顶栏出 🆕 徽标 → 点击弹模态（版本/发布时间/Release 说明**纯文本**不渲染 markdown/资产清单/「在浏览器打开 Release 页」走 `open_url` 命令仅放行 http/https）。GUI 设置读写内核路径注入（免 env 突变单测竞态）。
+- **GUI**：顶栏「⚙ 设置」子菜单（`⚙ 设置` 按钮右侧浮层）：「主题」（跟随系统[默认]/暗/亮）、「字体大小」（小/中[默认]/大，全 UI 字号含 canvas 图表经 `--font-scale` × 0.85/1/1.2 缩放）、「启动时自动检查更新」勾选（默认开）+「检查更新」按钮（手动触发，状态栏给结论含失败提示）。三项持久化 `~/.config/xperf/gui-settings.json`（tmp+rename 原子写，serde default 兼容缺字段，`get_gui_settings` 带 `existed` 标志供前端一次性迁移/落盘；localStorage 仅存主题与字体的启动防闪烁镜像）。启动检测由**前端 init 发起**（读设置→`check_update` 命令），不用后端事件推送（避开事件早于 listener 注册丢失的老坑）；失败静默仅记 diag。有新版时顶栏出 🆕 徽标 → 点击弹模态（版本/发布时间/Release 说明**纯文本**不渲染 markdown/资产清单/「在浏览器打开 Release 页」走 `open_url` 命令仅放行 http/https）。GUI 设置读写内核路径注入（免 env 突变单测竞态）。
 
 ### perfetto 深挖模式（`--trace N`，xperf-core/src/trace.rs，CLI 与 GUI 共用）
 

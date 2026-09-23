@@ -898,6 +898,9 @@ struct GuiSettings {
     /// 主题：`system`（默认，跟随系统亮暗）/ `dark` / `light`
     #[serde(default = "default_theme")]
     theme: String,
+    /// 界面字体档位：`small` / `medium`（默认）/ `large`
+    #[serde(default = "default_font_size")]
+    font_size: String,
 }
 
 fn default_auto_check_update() -> bool {
@@ -908,9 +911,17 @@ fn default_theme() -> String {
     "system".into()
 }
 
+fn default_font_size() -> String {
+    "medium".into()
+}
+
 impl Default for GuiSettings {
     fn default() -> Self {
-        Self { auto_check_update: default_auto_check_update(), theme: default_theme() }
+        Self {
+            auto_check_update: default_auto_check_update(),
+            theme: default_theme(),
+            font_size: default_font_size(),
+        }
     }
 }
 
@@ -939,19 +950,27 @@ fn get_gui_settings() -> serde_json::Value {
     serde_json::json!({
         "auto_check_update": s.auto_check_update,
         "theme": s.theme,
+        "font_size": s.font_size,
         "existed": existed,
     })
 }
 
-/// 保存 GUI 设置（tmp+rename 原子写，防中途崩溃截断）。theme 仅接受
-/// system/dark/light，其余拒绝（前端 select 之外的注入防护）
+/// 保存 GUI 设置（tmp+rename 原子写，防中途崩溃截断）。theme/font_size 仅接受
+/// 枚举值，其余拒绝（前端 select 之外的注入防护）
 #[tauri::command]
-fn save_gui_settings(auto_check_update: bool, theme: String) -> Result<(), String> {
+fn save_gui_settings(
+    auto_check_update: bool,
+    theme: String,
+    font_size: String,
+) -> Result<(), String> {
     if !matches!(theme.as_str(), "system" | "dark" | "light") {
         return Err(format!("非法主题值: {theme}（仅 system/dark/light）"));
     }
+    if !matches!(font_size.as_str(), "small" | "medium" | "large") {
+        return Err(format!("非法字体档位: {font_size}（仅 small/medium/large）"));
+    }
     let p = gui_settings_path().ok_or("无法确定配置目录（HOME 未设置）")?;
-    save_gui_settings_to(&p, auto_check_update, &theme)
+    save_gui_settings_to(&p, auto_check_update, &theme, &font_size)
 }
 
 /// [`save_gui_settings`] 的可测内核（路径注入，免 env 突变）
@@ -959,8 +978,13 @@ fn save_gui_settings_to(
     path: &std::path::Path,
     auto_check_update: bool,
     theme: &str,
+    font_size: &str,
 ) -> Result<(), String> {
-    let settings = GuiSettings { auto_check_update, theme: theme.to_string() };
+    let settings = GuiSettings {
+        auto_check_update,
+        theme: theme.to_string(),
+        font_size: font_size.to_string(),
+    };
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     }
@@ -2532,24 +2556,24 @@ Host myserver          # 重复别名去重
     fn test_gui_settings_roundtrip() {
         let dir = std::env::temp_dir().join(format!("xperf-guisettings-test-{}", std::process::id()));
         let path = dir.join("gui-settings.json");
-        // 不存在 → 默认（自动检查开 + 跟随系统）
+        // 不存在 → 默认（自动检查开 + 跟随系统 + 中号字体）
         let d = load_gui_settings_from(&path);
-        assert!(d.auto_check_update && d.theme == "system");
+        assert!(d.auto_check_update && d.theme == "system" && d.font_size == "medium");
         // 保存 → 读回一致
-        save_gui_settings_to(&path, false, "light").unwrap();
+        save_gui_settings_to(&path, false, "light", "small").unwrap();
         let s = load_gui_settings_from(&path);
-        assert!(!s.auto_check_update && s.theme == "light");
-        save_gui_settings_to(&path, true, "dark").unwrap();
+        assert!(!s.auto_check_update && s.theme == "light" && s.font_size == "small");
+        save_gui_settings_to(&path, true, "dark", "large").unwrap();
         let s = load_gui_settings_from(&path);
-        assert!(s.auto_check_update && s.theme == "dark");
-        // 缺字段的旧 JSON 兼容（serde default → true + system）
+        assert!(s.auto_check_update && s.theme == "dark" && s.font_size == "large");
+        // 缺字段的旧 JSON 兼容（serde default → true + system + medium）
         std::fs::write(&path, "{}").unwrap();
         let s = load_gui_settings_from(&path);
-        assert!(s.auto_check_update && s.theme == "system");
-        // 只有旧版字段（无 theme）同样兼容
+        assert!(s.auto_check_update && s.theme == "system" && s.font_size == "medium");
+        // 只有旧版字段（无 theme/font_size）同样兼容
         std::fs::write(&path, r#"{"auto_check_update":false}"#).unwrap();
         let s = load_gui_settings_from(&path);
-        assert!(!s.auto_check_update && s.theme == "system");
+        assert!(!s.auto_check_update && s.theme == "system" && s.font_size == "medium");
         // 损坏 JSON → 默认
         std::fs::write(&path, b"not json").unwrap();
         assert!(load_gui_settings_from(&path).auto_check_update);

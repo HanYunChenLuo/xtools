@@ -40,6 +40,13 @@
             <option value="light">亮色</option>
           </select>
         </label>
+        <label class="st-row" title="界面字体大小（默认中号）">字体
+          <select id="stFontSize">
+            <option value="small">小</option>
+            <option value="medium" selected>中</option>
+            <option value="large">大</option>
+          </select>
+        </label>
         <label title="GUI 启动后在后台检测一次新版本（失败静默不打扰）；取消勾选则仅手动检查"><input id="stAutoCheck" type="checkbox" checked /> 启动时自动检查更新</label>
         <button id="stCheckNow" class="small" title="立即查询 GitLab 最新 Release（结果见状态栏；有新版时顶栏出徽标）">检查更新</button>
       </div>

@@ -400,7 +400,7 @@ class LineChart {
     ctx.fillRect(0, 0, W, H);
     // 标题
     ctx.fillStyle = C.text;
-    ctx.font = '500 14px system-ui, sans-serif';
+    ctx.font = `500 ${14 * fontScale()}px system-ui, sans-serif`;
     ctx.fillText(this.title, 12, 20);
     // 计算范围（tMax 永远取全量最新；tMin 按窗口模式：follow=最新往前 followMs，all=全量最早）
     let tMinAll = Infinity, tMax = -Infinity;
@@ -448,7 +448,7 @@ class LineChart {
     // 网格 + Y 轴刻度
     ctx.strokeStyle = C.grid;
     ctx.fillStyle = C.dim;
-    ctx.font = '12px system-ui, sans-serif';
+    ctx.font = `${12 * fontScale()}px system-ui, sans-serif`;
     for (let i = 0; i <= 4; i++) {
       const y = T + (H - B - T) * i / 4;
       ctx.beginPath(); ctx.moveTo(L, y); ctx.lineTo(W - R, y); ctx.stroke();
@@ -2096,6 +2096,23 @@ themeMedia.addEventListener('change', () => { if (themeMode === 'system') applyT
 // 读 gui-settings.json 对账（设置文件存在则以其为准）
 applyTheme(themeMode);
 
+// ---------- 字体档位（小/中[默认]/大，--font-scale 全局缩放 + canvas 图表同比例） ----------
+function fontScale() {
+  const v = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--font-scale'));
+  return Number.isFinite(v) ? v : 1;
+}
+function applyFontSize(size) {
+  const mode = (size === 'small' || size === 'large') ? size : 'medium';
+  document.documentElement.dataset.fontsize = mode;
+  localStorage.setItem('xperf-font-size', mode);
+  // canvas 图表文字不随 CSS，重绘时经 fontScale() 缩放
+  for (const s of app.sessions.values()) {
+    for (const c of s.allCharts) c.draw();
+    s.renderLive();
+  }
+}
+applyFontSize(localStorage.getItem('xperf-font-size') || 'medium');
+
 // ---------- 周期渲染（仅激活页——隐藏页无渲染意义；全部按 dirty 标志跳过无变化工作） ----------
 // 图表合帧：数据事件只标脏（requestDraw），150ms 统一绘制——极端配置（50ms×多 PID）
 // 下每图最多 ~7 次/秒绘制（原实现每事件一次全量重绘，可达数百次/秒/图）
@@ -2503,15 +2520,16 @@ const updateUI = {
         menu.classList.add('hidden');
       }
     });
-    // 设置项：主题（三态）+ 启动时自动检查更新（持久化 gui-settings.json，默认
-    // 跟随系统 + 开）。对账：设置文件存在则以其为准（同步 localStorage 镜像）；
-    // 不存在则把当前生效值（含旧版 localStorage 迁移结果）写回设置文件。
+    // 设置项：主题（三态）+ 字体档位（小/中/大）+ 启动时自动检查更新（持久化
+    // gui-settings.json）。对账：设置文件存在则以其为准（同步 localStorage
+    // 镜像）；不存在则把当前生效值（含旧版 localStorage 迁移结果）写回设置文件。
     const autoCheck = document.getElementById('stAutoCheck');
     const themeSel = document.getElementById('stTheme');
+    const fontSel = document.getElementById('stFontSize');
     const save = async () => {
       try {
-        await invoke('save_gui_settings', { autoCheckUpdate: autoCheck.checked, theme: themeSel.value });
-        _diag('gui settings saved: auto_check_update=' + autoCheck.checked + ' theme=' + themeSel.value);
+        await invoke('save_gui_settings', { autoCheckUpdate: autoCheck.checked, theme: themeSel.value, fontSize: fontSel.value });
+        _diag('gui settings saved: auto_check_update=' + autoCheck.checked + ' theme=' + themeSel.value + ' font_size=' + fontSel.value);
       } catch (e) {
         await alertBox('保存设置失败: ' + (e && e.toString()), 'error');
       }
@@ -2522,16 +2540,24 @@ const updateUI = {
       if (st.existed) {
         themeSel.value = st.theme;
         if (st.theme !== themeMode) applyTheme(st.theme);
+        fontSel.value = st.font_size || 'medium';
+        applyFontSize(fontSel.value);
       } else {
         themeSel.value = themeMode;
+        fontSel.value = document.documentElement.dataset.fontsize || 'medium';
         save(); // 一次性落盘（含旧版 localStorage 迁移值）
       }
     } catch (e) {
       _diag('get_gui_settings ERROR: ' + JSON.stringify(e));
       themeSel.value = themeMode;
+      fontSel.value = document.documentElement.dataset.fontsize || 'medium';
     }
     themeSel.addEventListener('change', () => {
       applyTheme(themeSel.value);
+      save();
+    });
+    fontSel.addEventListener('change', () => {
+      applyFontSize(fontSel.value);
       save();
     });
     autoCheck.addEventListener('change', save);
