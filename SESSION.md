@@ -5,6 +5,18 @@
 > 待办事项（backlog）在 `WORKSPACE.md` 维护，本文件只做历史追溯。
 > 新会话开始时可先读本文件了解近期上下文。
 
+## 2026-09-23（四）：版本更新检测（GitLab Release）——I 节排期项落地
+
+**任务**：I 节「版本更新检测」+ 用户追加「GUI 增加设置子菜单，可以选择是否自动更新」。按已拍板设计实施（只检测+引导，不做自动更新/自替换；「自动更新」解读为自动**检测**开关）。
+
+**commit 链**（`feature/update-check` → main，merge `54cd3e1`）：`508573c` core（新 `gitlab.rs` 从 feedback.rs 提取公共访问层：resolve_auth 凭证链/gitlab_api/project_id/project_web_url/auth_hint；新 `update.rs`：fetch_latest_release=GET releases 列表 + **semver 选最新**不依赖接口排序、is_newer 纯函数非法格式 None、parse_release/pick_latest 单测 + `#[ignore]` 真机测试；semver 显式入依赖）→ `5c60361` CLI `--check-update`（恒 exit 0）→ `36e33dd` GUI（check_update/open_url/get|save_gui_settings 四命令 + 顶栏「⚙ 设置」子菜单 + 🆕 徽标 + 更新模态 + gui-settings.json 原子写）→ `dd30970` 文档（README 双语/AGENTS/CLAUDE 新节/CHANGELOG）→ `e9b4d45` 检测成功留 diag 行。
+
+**关键设计点**：① 启动自动检测由**前端 init 发起**（读设置→invoke check_update），不走后端事件推送——避开「后端事件早于前端 listener 注册必丢」老坑；② 启动检测失败静默仅 diag，手动检测状态栏给结论；③ 设置读写内核路径注入（`load_gui_settings_from`/`save_gui_settings_to`），单测免 env 突变（避开与 test_remote_config_upsert 的 XDG_CONFIG_HOME 竞态）；④ open_url 仅放行 http(s) scheme。
+
+**验证（measured）**：单测 core 179+9 / CLI 12 / GUI 17 绿，clippy + cargo doc（missing_docs 三 crate）零警告。真机：CLI `--check-update` 对 v0.3.2「已是最新」exit 0 + 六资产清单；隔离 HOME 无凭证如实三路径指引 exit 0。GUI 调试 API 全链：设置菜单开合/手动检查状态栏「已是最新版本（v0.3.2）」/开关持久化双向（gui-settings.json false↔true）/注入假 release v9.9.9 → 徽标→模态（tag/发布时间/说明/资产全对）→关闭/open_url 拒 file:// / **设置关→重启无检测记录，开→diag 一行 `check_update ok`**（A/B 对照）。
+
+**遗留**：「有新版」的真机天然路径待 v0.3.3 发布后自然覆盖（单测已锁 is_newer 四态 + 注入假 release 已目验徽标/模态链路）。
+
 ## 2026-09-23（三）：全量 review（独立子代理）——5 一般 + 7 观察项全修
 
 **任务**：用户令 review 本会话改动（`f8617f8..b9338f7`，17 commit）。干净上下文子代理审（声明会抽查 file:line 引用），我并行做文档一致性。
