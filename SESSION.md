@@ -5,6 +5,18 @@
 > 待办事项（backlog）在 `WORKSPACE.md` 维护，本文件只做历史追溯。
 > 新会话开始时可先读本文件了解近期上下文。
 
+## 2026-09-23（二）：发布 v0.3.2
+
+**流程**（按 CLAUDE.md 发版约定）：根 Cargo.toml 0.3.1→0.3.2（四 crate workspace 继承，Cargo.lock 同步）→ CHANGELOG [Unreleased] 定稿为 [v0.3.2] - 2026-09-23（补齐 v0.3.1 后积累的 5 条用户可见修复：挂死自愈/隧道自愈/WebKit 刻度串内存/主线程冻结/双击竞态/切换设备列表；连点冷却条目更正为终态 5s）→ 合 main `a888d87` → tag `v0.3.2` 推 GitLab → 流水线 validate:tag/test/build/gui/release 全绿 → `release-macos.sh v0.3.2` 上传 macOS 四资产。
+
+**发布实况**：
+- build:linux 首跑失败＝**网络瞬断**（NDK zip 下载 Connection reset，非代码）——API retry 即过，下游自动恢复。
+- **release-macos.sh 首跑实撞新坑**：`stage_simpleperf_scripts.sh` 的 `$dest（含 bin/$plat）` 在 macOS **bash 3.2** 下把紧邻的多字节字符并入变量名（`dest…: unbound variable`；Linux bash 5 UTF-8 感知正常，CI 测不出）→ 改 `${dest}/${plat}`（`5f39165`），本机 bash 3.2 实跑 stage 通过后重发。**教训**：发给 bash 的字符串里变量后紧跟非 ASCII 字符必须花括号；macOS 系统 bash 停在 3.2。
+- 后台脚本存活坑再实锤：launch 命令立即返回 → harness 会话清理回收进程组（第二次 relaunch 0 字节即死）；命令内驻留 sleep 后存活。
+- **Release v0.3.2 六资产全挂**（package registry API 路径）：Linux AppImage（114MB）+ Linux CLI tar + macOS 双架构 CLI tar（12MB，含 simpleperf_scripts darwin dylib）+ 双架构 DMG（14MB）。DMG 核验：Resources 含 simpleperf_scripts 24MB（dylib 落位）+ agent 可执行 + codesign valid on disk。
+
+**遗留**：① DMG「非构建 macOS 机」火焰图按钮补验（打包侧已核验，解析链已被 AppImage 双机证明）；② `validate:tag` 对 bash 脚本无覆盖——发布脚本类变更（release-macos.sh/stage_*.sh）目前只能靠发版现场撞（本页第二条即例证），候补：CI 加 `bash -n` + shellcheck job。
+
 ## 2026-09-23：路径审计（用户 review 指令）——主机工具二进制解析四缺口全修
 
 **任务**：用户令 review 代码与文档，「关注需要使用的相关二进制的路径问题，有没有写死路径」。
