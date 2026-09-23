@@ -2465,6 +2465,7 @@ const updateUI = {
           ? '已是最新版本（' + r.current + '）'
           : '版本格式无法比较（最新 tag: ' + r.release.tag + '）');
       }
+      _diag('check_update ok: latest=' + r.release.tag + ' has_update=' + r.has_update + (manual ? ' (manual)' : ''));
     } catch (e) {
       _diag('check_update ERROR: ' + JSON.stringify(e));
       if (manual) remoteUI.setGlobalStatus('检查更新失败: ' + e);
