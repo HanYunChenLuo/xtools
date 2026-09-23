@@ -17,7 +17,7 @@
 
 **遗留**：「有新版」的真机天然路径待 v0.3.3 发布后自然覆盖（单测已锁 is_newer 四态 + 注入假 release 已目验徽标/模态链路）。
 
-**追加（同会话用户 review 反馈，`be21e52` + `a561275`）**：① 顶栏按钮样式统一——新增的设置/徽标钮此前无样式落回原生外观，`#themeBtn`/`#feedbackTopBtn` 重复样式收敛为顶栏统一规则（徽标 specificity 提为 `#topbar > button#updateBadge` 压过统一规则，padding -1px 抵消 border 等高）；② 间距不一根因=`#themeBtn` 的 `margin-left:8px` 叠 topbar `gap:10px`=18px，主题钮移除后全 10px（DOM 实测）；③ 主题移入设置子菜单并改三态：跟随系统（新默认，`prefers-color-scheme` 实时跟随）/暗/亮，持久化从 localStorage 迁入 `gui-settings.json`（`get_gui_settings` 增 `existed` 标志：文件存在以其为准、不存在把当前值[含旧 `xperf-theme` key 迁移结果]一次性落盘），localStorage 降为启动防闪烁镜像。目验：三态切换即生效+落盘、重启按文件恢复、旧 key 迁移全链（**坑：迁移测试须先让 localStorage 种子活下来再删设置文件**——种子写入与启动建文件交叉会污染场景；WKWebView localStorage 跨重启持久性用探针单独实证过）。
+**追加（同会话用户 review 反馈，`be21e52` + `a561275` + `8ac3926`）**：① 顶栏按钮样式统一——新增的设置/徽标钮此前无样式落回原生外观，`#themeBtn`/`#feedbackTopBtn` 重复样式收敛为顶栏统一规则（徽标 specificity 提为 `#topbar > button#updateBadge` 压过统一规则，padding -1px 抵消 border 等高）；② 间距不一根因=`#themeBtn` 的 `margin-left:8px` 叠 topbar `gap:10px`=18px，主题钮移除后全 10px（DOM 实测）；③ 主题移入设置子菜单并改三态：跟随系统（新默认，`prefers-color-scheme` 实时跟随）/暗/亮，持久化从 localStorage 迁入 `gui-settings.json`（`get_gui_settings` 增 `existed` 标志：文件存在以其为准、不存在把当前值[含旧 `xperf-theme` key 迁移结果]一次性落盘），localStorage 降为启动防闪烁镜像；④ 设置子菜单再增「字体大小」小/中[默认]/大三档——CSS 全部 39 处 font-size 改 `calc(Npx * var(--font-scale))`（`[data-fontsize]` 切 0.85/1/1.2），canvas 图表文字经 `fontScale()` 同比例缩放（切档全图表重绘）。目验：三态切换即生效+落盘、重启按文件恢复、旧 key 迁移全链（**坑：迁移测试须先让 localStorage 种子活下来再删设置文件**——种子写入与启动建文件交叉会污染场景；WKWebView localStorage 跨重启持久性用探针单独实证过）、字体三档 13px→11.05/15.6px 实测。
 
 ## 2026-09-23（三）：全量 review（独立子代理）——5 一般 + 7 观察项全修
 
