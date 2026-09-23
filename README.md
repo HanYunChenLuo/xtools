@@ -72,6 +72,12 @@ down to ~50 ms are practical.
   process IO unavailable — see WORKSPACE.md section G for the full matrix)
 - Host: Rust toolchain; Android NDK (≥ 25.1) for the agent cross-build — the
   linker is auto-detected by `.cargo/ndk-clang.sh` per host OS
+- Optional tools, resolved as `XPERF_*` env override → `PATH` → well-known
+  locations (see AGENTS.md for the full table): `scrcpy` **≥ 2** for
+  mirror/record (built and verified against 4.x; older builds such as the
+  Ubuntu 22.04 apt package are rejected with a clear error), `python3` for
+  flamegraph rendering, and `trace_processor` for `--trace` SQL analysis
+  (auto-downloaded from get.perfetto.dev on first use)
 
 #### Usage
 

@@ -64,6 +64,11 @@ Android 应用性能分析工具集：CLI + 桌面 GUI + 设备端采样 agent�
   为限频 `dumpsys`、进程 IO 不可用——完整矩阵见 WORKSPACE.md G 节）
 - 主机：Rust 工具链；agent 交叉编译需要 Android NDK（≥ 25.1）——链接器由
   `.cargo/ndk-clang.sh` 按宿主 OS 自动探测
+- 可选工具，解析顺序为 `XPERF_*` 环境变量覆盖 → `PATH` → 常见安装位置
+  （完整表见 AGENTS.md）：镜像/录屏需要 `scrcpy` **≥ 2**（按 4.x 设计与验证，
+  Ubuntu 22.04 apt 的 1.21 等旧版会被明确拒绝）；火焰图渲染需要 `python3`；
+  `--trace` 的 SQL 分析需要 `trace_processor`（首次使用自动从
+  get.perfetto.dev 下载）
 
 #### 使用方法
 

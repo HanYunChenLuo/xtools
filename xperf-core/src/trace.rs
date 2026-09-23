@@ -225,8 +225,17 @@ pub fn record(
 
 // ==================== trace_processor 定位/引导 ====================
 
-/// 定位 trace_processor：官方缓存 > PATH > /tmp 下载脚本（自举后原生二进制落在官方缓存）
+/// 定位 trace_processor：`XPERF_TRACE_PROCESSOR` 显式覆盖（文件存在才生效）→
+/// 官方缓存 > PATH > 临时目录下载脚本（自举后原生二进制落在官方缓存）。
+/// `/tmp/trace_processor` 同时保留为候选：官方教程引导用户 `curl -o /tmp/trace_processor`，
+/// 而 macOS 的 `temp_dir()` 是 `/var/folders/...`（两者不等价，都得查）。
 fn find_trace_processor() -> Option<PathBuf> {
+    if let Some(p) = std::env::var_os("XPERF_TRACE_PROCESSOR") {
+        let p = PathBuf::from(p);
+        if p.is_file() {
+            return Some(p);
+        }
+    }
     if let Some(home) = std::env::var_os("HOME") {
         let cache = PathBuf::from(home).join(TP_CACHE_SUBDIR);
         if let Ok(rd) = std::fs::read_dir(&cache) {
@@ -257,9 +266,14 @@ fn find_trace_processor() -> Option<PathBuf> {
             }
         }
     }
-    let tmp = PathBuf::from("/tmp/trace_processor");
-    if tmp.is_file() {
-        return Some(tmp);
+    if let Some(cand) = [
+        std::env::temp_dir().join("trace_processor"),
+        PathBuf::from("/tmp/trace_processor"),
+    ]
+    .into_iter()
+    .find(|c| c.is_file())
+    {
+        return Some(cand);
     }
     None
 }
@@ -871,6 +885,13 @@ fn extract_ui_assets(netlog: &str) -> Vec<String> {
 
 /// 定位 Chrome/Chromium（headless 资源发现用）；找不到返回 None（回退拖拽方案）
 fn find_chrome() -> Option<PathBuf> {
+    // XPERF_CHROME 显式覆盖（文件存在才生效）——非标准安装位/CI 无头环境常用
+    if let Some(p) = std::env::var_os("XPERF_CHROME") {
+        let p = PathBuf::from(p);
+        if p.is_file() {
+            return Some(p);
+        }
+    }
     for name in ["google-chrome", "chromium", "chromium-browser"] {
         let out = Command::new("sh")
             .args(["-c", &format!("command -v {name}")])

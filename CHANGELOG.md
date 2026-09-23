@@ -6,6 +6,8 @@
 
 ### 修复
 
+- 修复 scrcpy 版本过旧时的晦涩失败：镜像/录屏按 scrcpy 4.x 设计与验证，Ubuntu 22.04 apt 的 1.21 等旧版原本只报一条「连接失败」——现在入口处解析 `scrcpy --version`，主版本 <2 直接给出可操作提示（安装 ≥2/推荐 4.x，或用 `XPERF_SCRCPY` 指定路径）。
+- 主机工具路径解析补齐 `XPERF_*` 显式覆盖（与 `XPERF_ADB` 同语义：文件存在才生效，缺失回落）：`XPERF_SCRCPY`（scrcpy）、`XPERF_TRACE_PROCESSOR`（trace_processor，另把 `/tmp/trace_processor` 硬编码候选改为系统临时目录 + `/tmp` 双候选，macOS 的 temp_dir 不在 `/tmp`）、`XPERF_CHROME`（Perfetto UI 镜像用的 headless Chrome）。完整解析表见 AGENTS.md；README 双语补可选依赖前置（scrcpy ≥2 / python3 / trace_processor 自动下载）。
 - 修复**发布产物（Linux AppImage / macOS DMG）里「在浏览器打开火焰图」必失败**：脚本集目录此前取编译期 `CARGO_MANIFEST_DIR`，把构建机路径烤进二进制（CI 产物指向容器内 `/builds/...`，用户机不存在且不可写，连 AOSP 引导下载的兜底也一起失败；本机/直编环境恰好存在所以测不出）。改为解析链：`XPERF_SIMPLEPERF_SCRIPTS` 显式覆盖 → 随产物分发（GUI 的 Tauri 资源目录 / CLI tarball 里 `xperf-cli` 旁 `simpleperf_scripts/`）→ 源码检出的仓库 vendor 目录（存在才用，git 同步 vendor 的语义不变）→ `~/.cache/xperf/simpleperf_scripts/` 可写缓存；下载前建目录。发布产物随包附脚本集（按主机平台带 report 库，Linux +~7MB / macOS +~24MB，换取零网络可用）；`--update-simpleperf-scripts` 遇只读随包资源如实拒绝而非静默改写；`--clean-cache` 不再触碰发布包内置脚本集；每次打开火焰图在 stderr 打一行实际使用的目录便于排障。
 - 「清理缓存与数据」与 `--clean-cache` 的火焰图脚本项口径同上更新（源码检出的 vendor 目录 + 用户缓存）。
 - 修复 AppImage 里火焰图渲染仍失败的**第二层**原因：AppImage 的 AppRun（linuxdeploy python 插件）为整个应用设 `PYTHONHOME=$APPDIR/usr/` 与 `PYTHONPATH=$APPDIR/usr/share/pyshared/`，宿主 `python3` 子进程继承后连标准库都找不到（`ModuleNotFoundError: No module named 'encodings'`）。渲染火焰图时显式剥掉这两个变量。

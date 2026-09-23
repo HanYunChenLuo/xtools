@@ -28,6 +28,24 @@ Resolution order: `XPERF_AGENT_BIN` env override → `agent/xperf-agent` next to
 the `xperf-cli` binary → dev-checkout auto cross-build (needs Rust + NDK).
 An explicit `XPERF_AGENT_BIN` pointing to a missing file is a hard error
 (exit 1, no fallback); an empty value is treated as unset.
+
+Other host tools follow the same pattern — env override (file must exist)
+→ `PATH` → well-known install locations. Use these when a tool lives
+outside `PATH` (e.g. GUI launched from Finder has a minimal PATH):
+
+| Tool | Env override | Notes |
+|------|--------------|-------|
+| adb | `XPERF_ADB` | also probes `ANDROID_HOME`/`ANDROID_SDK_ROOT` and `~/Library/Android/sdk`, `~/Android/Sdk` |
+| ssh | `XPERF_SSH` | |
+| cargo | `XPERF_CARGO` | only used for dev-checkout agent builds |
+| scrcpy | `XPERF_SCRCPY` | mirror/record only; **needs scrcpy ≥ 2** (built against 4.x; Ubuntu 22.04 apt's 1.21 is rejected with a clear error) |
+| trace_processor | `XPERF_TRACE_PROCESSOR` | else `~/.local/share/perfetto/prebuilts` → `PATH` → auto-download from get.perfetto.dev |
+| Chrome | `XPERF_CHROME` | headless Chrome is only used to mirror the Perfetto UI on first use |
+| flamegraph scripts | `XPERF_SIMPLEPERF_SCRIPTS` | shipped next to the binary in the tarball/AppImage; fallback to `~/.cache/xperf/simpleperf_scripts/` |
+
+PATH-only tools (no override, all standard): `python3` (flamegraph
+rendering), `curl` (script downloads), `open`/`xdg-open` (browser).
+
 No NDK or extra setup is needed when using the tarball as-is. Do not move
 `xperf-cli` out of its directory without also moving `agent/`.
 
