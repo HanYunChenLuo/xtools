@@ -2,7 +2,7 @@
 
 本文件记录 xperf 各版本的用户可见变更。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
-## [Unreleased]
+## [v0.3.3] - 2026-09-23
 
 ### 新增
 
@@ -16,6 +16,8 @@
 ### 修复
 
 - 修复 GUI 窗口在不同 DPI 显示器之间拖动（如 Retina 内屏 ↔ 外接 1x 屏）后图表文字/线条模糊：跨屏改变 devicePixelRatio 不触发 window resize，现在在每次绘制前比对 dpr，变化即按新 dpr 重建 canvas 缓冲区。
+- 修复版本检测在 Release 总数超过 20 后可能误报「已是最新」：releases 接口默认每页 20 条，现在显式取 100 条/页再做 semver 比较。
+- 设置文件健壮性：合法 JSON 但枚举值非法（手改文件）按字段回落默认（此前会让保存被校验拒绝卡住）；损坏文件视为不存在由前端重建修复。
 
 ## [v0.3.2] - 2026-09-23
 
