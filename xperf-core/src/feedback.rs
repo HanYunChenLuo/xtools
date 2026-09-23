@@ -42,12 +42,6 @@ const MAX_FILE_BYTES: u64 = 32 * 1024 * 1024;
 /// GUI 诊断日志尾段截取上限（512 KB）
 const DIAG_TAIL_BYTES: u64 = 512 * 1024;
 
-/// GitLab 项目 ID（ligraphic/xperf）
-const DEFAULT_PROJECT_ID: &str = "39859";
-
-/// GitLab API base（与 `scripts/release_upload.py` 同源）
-const DEFAULT_GITLAB_API: &str = "https://gitlab.chehejia.com/api/v4";
-
 /// 设备端 agent daemon 日志路径
 const AGENT_LOG_DEVICE_PATH: &str = "/data/local/tmp/xperf-agent.log";
 
@@ -117,7 +111,7 @@ pub fn collect(description: &str) -> Result<FeedbackBundle> {
 /// 失败返回 Err（错误信息含归档路径提示）；归档文件不删除。
 /// 须在非 tokio runtime 线程调用（`reqwest::blocking`）。
 pub fn submit(bundle: &FeedbackBundle) -> Result<String> {
-    let auth = resolve_auth()?;
+    let auth = crate::gitlab::resolve_auth()?;
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(180))
         .build()
@@ -480,76 +474,7 @@ fn pack_tar_gz(staging: &Path, archive: &Path) -> Result<()> {
     Ok(())
 }
 
-// ==================== 上传（GitLab API） ====================
-
-/// GitLab API base（`GITLAB_API` 环境变量可覆盖，与 `scripts/release_upload.py` 同源）
-fn gitlab_api() -> String {
-    std::env::var("GITLAB_API")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| DEFAULT_GITLAB_API.into())
-}
-
-/// 401/403 时给错误信息追加凭证失效指引（PAT 过期 / OAuth 需重新登录）
-fn auth_hint(status: reqwest::StatusCode) -> &'static str {
-    match status {
-        reqwest::StatusCode::UNAUTHORIZED => {
-            "（凭证失效：PAT 过期或 OAuth 授权被撤销——重新登录：GUI 浮层「登录 GitLab」/ CLI --gitlab-login）"
-        }
-        reqwest::StatusCode::FORBIDDEN => "（凭证权限不足：需 api scope + 项目 Reporter 及以上角色）",
-        _ => "",
-    }
-}
-
-/// GitLab 项目 ID（`GITLAB_PROJECT_ID` 环境变量可覆盖）
-fn gitlab_project_id() -> String {
-    std::env::var("GITLAB_PROJECT_ID")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| DEFAULT_PROJECT_ID.into())
-}
-
-/// 解析 GitLab 凭证（优先级：`GITLAB_TOKEN` env > `~/.config/xperf/gitlab-token` PAT 文件
-/// > OAuth 已登录 token——临期自动刷新）。三者皆无时报错并指引三条路径。
-pub fn resolve_auth() -> Result<crate::oauth::GitlabAuth> {
-    if let Some(t) = resolve_token_from(
-        std::env::var("GITLAB_TOKEN").ok().as_deref(),
-        &token_file_path(),
-    ) {
-        return Ok(crate::oauth::GitlabAuth::Pat(t));
-    }
-    if let Some(t) = crate::oauth::current_access_token()? {
-        return Ok(crate::oauth::GitlabAuth::OAuth(t));
-    }
-    Err(anyhow!(
-        "未找到 GitLab 凭证，三条路径任选：① GITLAB_TOKEN 环境变量（api 权限 PAT）；\
-         ② 将 PAT 写入 {}（建议 chmod 600）；③ OAuth 登录（GUI 反馈浮层「登录 GitLab」\
-         或 CLI `xperf-cli --gitlab-login`）",
-        token_file_path().display()
-    ))
-}
-
-/// token 文件路径（`~/.config/xperf/gitlab-token`，与 remotes.json 同目录约定）
-fn token_file_path() -> PathBuf {
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".config/xperf/gitlab-token")
-}
-
-/// PAT 解析的纯函数内核（单测可注入）：env > 文件
-fn resolve_token_from(env: Option<&str>, token_file: &Path) -> Option<String> {
-    if let Some(t) = env.map(str::trim).filter(|t| !t.is_empty()) {
-        return Some(t.to_string());
-    }
-    if let Ok(content) = fs::read_to_string(token_file) {
-        let t = content.trim();
-        if !t.is_empty() {
-            return Some(t.to_string());
-        }
-    }
-    None
-}
+// ==================== 上传（GitLab API，公共部分见 crate::gitlab） ====================
 
 /// 上传归档为 issue 附件；超过 `max_attachment_size`（413）时回退 package registry。
 /// 返回可嵌入 issue 正文的 markdown 链接。
@@ -565,7 +490,7 @@ fn upload_attachment(
         .ok_or_else(|| anyhow!("归档路径异常: {}", archive.display()))?
         .to_string();
     let bytes = fs::read(archive).context("读归档失败")?;
-    let url = format!("{}/projects/{}/uploads", gitlab_api(), gitlab_project_id());
+    let url = format!("{}/projects/{}/uploads", crate::gitlab::gitlab_api(), crate::gitlab::gitlab_project_id());
     let part = reqwest::blocking::multipart::Part::bytes(bytes.clone()).file_name(fname.clone());
     let resp = client
         .post(&url)
@@ -578,8 +503,8 @@ fn upload_attachment(
         let stem = fname.trim_end_matches(".tar.gz");
         let reg_url = format!(
             "{}/projects/{}/packages/generic/xperf-feedback/{}/{}",
-            gitlab_api(),
-            gitlab_project_id(),
+            crate::gitlab::gitlab_api(),
+            crate::gitlab::gitlab_project_id(),
             stem,
             fname
         );
@@ -592,7 +517,7 @@ fn upload_attachment(
         if !r2.status().is_success() {
             let status = r2.status();
             let text = r2.text().unwrap_or_default();
-            bail!("package registry 上传失败: {} {}{}", status, text, auth_hint(status));
+            bail!("package registry 上传失败: {} {}{}", status, text, crate::gitlab::auth_hint(status));
         }
         return Ok(format!(
             "[{fname}]({reg_url})（超过实例附件上限，走 package registry）"
@@ -601,7 +526,7 @@ fn upload_attachment(
     if !resp.status().is_success() {
         let status = resp.status();
         let text = resp.text().unwrap_or_default();
-        bail!("uploads 上传失败: {} {}{}", status, text, auth_hint(status));
+        bail!("uploads 上传失败: {} {}{}", status, text, crate::gitlab::auth_hint(status));
     }
     let v: serde_json::Value = resp.json().context("解析 uploads 响应失败")?;
     v.get("markdown")
@@ -618,7 +543,7 @@ fn create_issue(
     title: &str,
     body: &str,
 ) -> Result<String> {
-    let url = format!("{}/projects/{}/issues", gitlab_api(), gitlab_project_id());
+    let url = format!("{}/projects/{}/issues", crate::gitlab::gitlab_api(), crate::gitlab::gitlab_project_id());
     let (hname, hval) = auth.header();
     let assignee = default_assignee().and_then(|name| resolve_user_id(client, auth, &name));
     let mut payload = serde_json::json!({ "title": title, "description": body });
@@ -649,7 +574,7 @@ fn create_issue(
         if labels.is_empty() || resp.status() != reqwest::StatusCode::BAD_REQUEST {
             let status = resp.status();
             let text = resp.text().unwrap_or_default();
-            bail!("创建 issue 失败: {} {}{}", status, text, auth_hint(status));
+            bail!("创建 issue 失败: {} {}{}", status, text, crate::gitlab::auth_hint(status));
         }
     }
     unreachable!("labels 为空时失败已提前返回")
@@ -680,7 +605,7 @@ fn resolve_user_id(
 ) -> Option<u64> {
     let (hname, hval) = auth.header();
     let resp = client
-        .get(format!("{}/users?username={}", gitlab_api(), username))
+        .get(format!("{}/users?username={}", crate::gitlab::gitlab_api(), username))
         .header(hname, &hval)
         .send()
         .map_err(|e| crate::utils::diag(&format!("feedback: 指派人查询失败: {e:#}")))
@@ -936,21 +861,6 @@ mod tests {
         assert_eq!(assignee_from_env(Some("  someone ")).as_deref(), Some("someone"));
         assert_eq!(assignee_from_env(Some("  ")), None);
         assert_eq!(assignee_from_env(Some("")), None);
-    }
-
-    #[test]
-    fn test_resolve_token_from_priority() {
-        let dir = std::env::temp_dir().join(format!("xperf-fbtest-tok-{}", std::process::id()));
-        let token_file = dir.join("gitlab-token");
-        // env 优先
-        write_file(&token_file, b"file-token\n");
-        assert_eq!(resolve_token_from(Some(" env-token "), &token_file).as_deref(), Some("env-token"));
-        // 文件兜底（去空白）
-        assert_eq!(resolve_token_from(None, &token_file).as_deref(), Some("file-token"));
-        assert_eq!(resolve_token_from(Some("  "), &token_file).as_deref(), Some("file-token"));
-        // 均无 → None（由 resolve_auth 统一报错指引）
-        assert!(resolve_token_from(None, &dir.join("nonexist")).is_none());
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

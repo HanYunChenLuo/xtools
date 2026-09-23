@@ -25,6 +25,8 @@ pub mod csvstream;
 pub mod feedback;
 /// FPS 采样协议类型（时序数据结构）。
 pub mod fps;
+/// GitLab 实例公共访问：API base / 项目 ID / 凭证解析链（feedback/update 共用）。
+pub mod gitlab;
 /// host 侧采样通道（SS4 专属：ligfx GPU busy，合成事件汇入 AgentStream）。
 pub mod hostchan;
 /// logcat 日志抓取：adb logcat 流式落盘（按包 UID/pid 过滤、断连自动重连）。
@@ -46,6 +48,9 @@ pub mod simpleperf;
 pub mod trace;
 /// adb 传输后端：本机 adb server 或经 SSH 隧道的远端 adb server（远程调试）。
 pub mod transport;
+/// 版本更新检测：查询 GitLab 最新 Release 并与当前版本比较（只检测+引导，
+/// 不做自动更新/自替换；CLI `--check-update` 与 GUI 顶栏徽标共用）。
+pub mod update;
 /// 主机侧通用工具（adb 命令封装、中断标志、控制字符清洗）。
 pub mod utils;
 
