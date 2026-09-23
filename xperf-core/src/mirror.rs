@@ -52,10 +52,17 @@ pub enum MirrorExit {
     Failed(String),
 }
 
-/// scrcpy 可执行文件探测：PATH 各目录 → 常见安装位置兜底
+/// scrcpy 可执行文件探测：`XPERF_SCRCPY` 显式覆盖（文件存在才生效，缺失回落
+/// 后续候选——与 `XPERF_ADB` 同语义）→ PATH 各目录 → 常见安装位置兜底
 /// （GUI 从 Finder/桌面环境启动时 PATH 常不含 `/opt/homebrew/bin` 等）。
 /// 仅面向 macOS/Linux 宿主（无 .exe 探测）。
 pub fn find_scrcpy() -> Option<PathBuf> {
+    if let Some(p) = std::env::var_os("XPERF_SCRCPY") {
+        let p = PathBuf::from(p);
+        if p.is_file() {
+            return Some(p);
+        }
+    }
     let mut candidates: Vec<PathBuf> = std::env::var_os("PATH")
         .map(|p| std::env::split_paths(&p).map(|d| d.join("scrcpy")).collect())
         .unwrap_or_default();
@@ -68,6 +75,24 @@ pub fn find_scrcpy() -> Option<PathBuf> {
         candidates.push(PathBuf::from(extra));
     }
     candidates.into_iter().find(|p| p.is_file())
+}
+
+/// 本工具要求的 scrcpy 最低主版本。参数与隧道形态按 4.x 设计与真机验证
+/// （`-p P --tunnel-port=P` 双钉同号、`localabstract:scrcpy-*` 残留规则清扫）；
+/// 1.x（Ubuntu 22.04 apt 的 1.21 等）起不来——表现为一条晦涩的连接失败
+/// （2026-09-22 kong 实测），故在入口挡掉并给出可操作提示。
+pub const SCRCPY_MIN_MAJOR: u32 = 2;
+
+/// 解析 `scrcpy --version` 首行（`scrcpy 4.2.1 <commit>`）的主版本；纯函数供单测。
+fn parse_scrcpy_major(first_line: &str) -> Option<u32> {
+    first_line.split_whitespace().nth(1)?.split('.').next()?.parse().ok()
+}
+
+/// scrcpy 主版本（起不来/解析不出 → None，调用方据此跳过版本门槛按原路径报错）
+fn scrcpy_major_version(bin: &Path) -> Option<u32> {
+    let out = Command::new(bin).arg("--version").output().ok()?;
+    let s = String::from_utf8_lossy(&out.stdout);
+    parse_scrcpy_major(s.lines().next()?)
 }
 
 /// 解析 `adb forward --list` 的一行：`<serial> tcp:<port> <target>` →
@@ -413,6 +438,20 @@ pub fn start_recorder(serial: Option<&str>, dest_dir: &Path) -> Result<MirrorHan
 fn spawn_scrcpy(serial: Option<&str>, mode: ScrcpyMode) -> Result<MirrorHandle> {
     let bin = find_scrcpy()
         .context("未找到 scrcpy 可执行文件（安装：brew install scrcpy / 发行版包管理器）")?;
+    // 版本门槛：低于最低主版本直接给出可操作错误，而不是让晦涩的「连接失败」
+    // （1.x 对 `--tunnel-port`/隧道形态不兼容）一路冒到用户面前。
+    // `--version` 起不来（None）时不挡——按原路径继续，让真实失败自然上报。
+    if let Some(v) = scrcpy_major_version(&bin) {
+        if v < SCRCPY_MIN_MAJOR {
+            bail!(
+                "scrcpy 版本过低（{v}，最低要求 {SCRCPY_MIN_MAJOR}）：{}。\n\
+                 旧版（如 Ubuntu 22.04 apt 的 1.21）与本工具的隧道/参数形态不兼容，\
+                 请安装 scrcpy ≥ 2（推荐 4.x，snap/brew/官网），\
+                 或设 XPERF_SCRCPY 指向新版本路径",
+                bin.display()
+            );
+        }
+    }
     let eff = crate::utils::resolve_serial(serial).context("未选择目标设备（先连接设备）")?;
     sweep_scrcpy_rules(&eff);
 
@@ -497,6 +536,42 @@ fn spawn_scrcpy(serial: Option<&str>, mode: ScrcpyMode) -> Result<MirrorHandle> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `scrcpy --version` 首行主版本解析（真机样例：4.2.1 / 1.21 / 3.0）
+    #[test]
+    fn test_parse_scrcpy_major() {
+        assert_eq!(parse_scrcpy_major("scrcpy 4.2.1 <git-hash>\n"), Some(4));
+        assert_eq!(parse_scrcpy_major("scrcpy 1.21 <git-hash>"), Some(1));
+        assert_eq!(parse_scrcpy_major("scrcpy 3.0"), Some(3));
+        // 非预期形态 → None（调用方按「版本未知」放行，不误伤）
+        assert_eq!(parse_scrcpy_major(""), None);
+        assert_eq!(parse_scrcpy_major("scrcpy"), None);
+        assert_eq!(parse_scrcpy_major("not scrcpy at all"), None);
+        assert_eq!(parse_scrcpy_major("scrcpy x.y.z"), None);
+    }
+
+    /// XPERF_SCRCPY 显式覆盖优先于 PATH（文件存在才生效）
+    #[test]
+    fn test_find_scrcpy_env_override() {
+        let dir = std::env::temp_dir().join(format!("xperf_scrcpy_env_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let fake = dir.join("scrcpy");
+        std::fs::write(&fake, b"#!/bin/sh\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        // env-var 测试隔离：此用例独占该变量（默认并行下无其他读者/写者）
+        std::env::set_var("XPERF_SCRCPY", &fake);
+        assert_eq!(find_scrcpy(), Some(fake.clone()));
+        // 指向不存在文件 → 回落（此机器有无 scrcpy 不定，只断言不再选 fake）
+        std::env::set_var("XPERF_SCRCPY", dir.join("nope"));
+        assert_ne!(find_scrcpy(), Some(fake));
+        std::env::remove_var("XPERF_SCRCPY");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// 测试用手柄构造（包一层假子进程；hop2/sweep 在测试环境为空操作——
     /// serial 不存在于任何 forward 规则）
