@@ -5,6 +5,20 @@
 > 待办事项（backlog）在 `WORKSPACE.md` 维护，本文件只做历史追溯。
 > 新会话开始时可先读本文件了解近期上下文。
 
+## 2026-09-23（三）：全量 review（独立子代理）——5 一般 + 7 观察项全修
+
+**任务**：用户令 review 本会话改动（`f8617f8..b9338f7`，17 commit）。干净上下文子代理审（声明会抽查 file:line 引用），我并行做文档一致性。
+
+**子代理结论**：0 严重 / 5 一般 / 11 观察；引用逐条核实无虚报。文档侧自查：env 变量表与代码零出入、CHANGELOG v0.3.2 逐条对上代码锚点、README 数据根 macOS 口径缺注（已补 $TMPDIR）。
+
+**修复**（`340f2d8`）：① `/api/status` 活查询 5s 超时——传输切换失败路径清空缓存后 adb 卡死会把压测修过的「挂死 handler」重新引入；② `update_simpleperf_scripts` 拒绝 GUI 注入的随包资源档（.app Resources 常可写，但改它破坏 code signature；tarball exe 旁保持可原地刷新）；③ `cache_scripts_dir` HOME 缺失时不再拼相对路径写 CWD；④ 套件 ssh 注入宿主从 `/api/status remote.host` 取（XPERF_TEST_SSH 配错不再打错机器）；⑤ trace SKIP 签名收窄（不再吞任意超时）+ scrcpy 版本解析 stderr 回退 + LFS 指针覆盖留痕 + poll_fails 去 Arc + g3/g4 判据四处 + stage 脚本显式缺项 + CI else WARN + AGENTS「缺失时行为」列 + GUI-TEST-PLAN #10 python3 PATH 残余备注。
+
+**不修（设计语义，已留痕）**：监视器 in-flight 枚举竞态（≤3s 自愈，#12 已记）；root 用户恒过可写探针（拒绝语义=物理只读挂载，非权限模型）；trace.rs HOME 同型旧账在 clean_all_caches（相对路径 remove 无害）。
+
+**验证（measured）**：单测 +1（注入档拒绝，不触网）；全量 core 173+8 / CLI 12 / GUI 16 绿，clippy + rustdoc 零警告，py 语法过；Mac tarball sibling 原地更新保留（新拒绝只作用于 GUI 注入档）；**hppc 新构建 GUI `--remote kong` 跑 g1 29/29 / g3 15/15+SKIP(scrcpy 未装) / g4 20/20，总计 FAIL 0**——所有改过的判据在 K1 拓扑下端到端复验。
+
+**遗留**：AppImage 级「更新脚本按钮拒绝」的产物级验证随 v0.3.3（单测+逻辑已锁，v0.3.2 产物不含此修复）；DMG 非构建机火焰图补验仍按 K 节遗留。
+
 ## 2026-09-23（二）：发布 v0.3.2
 
 **流程**（按 CLAUDE.md 发版约定）：根 Cargo.toml 0.3.1→0.3.2（四 crate workspace 继承，Cargo.lock 同步）→ CHANGELOG [Unreleased] 定稿为 [v0.3.2] - 2026-09-23（补齐 v0.3.1 后积累的 5 条用户可见修复：挂死自愈/隧道自愈/WebKit 刻度串内存/主线程冻结/双击竞态/切换设备列表；连点冷却条目更正为终态 5s）→ 合 main `a888d87` → tag `v0.3.2` 推 GitLab → 流水线 validate:tag/test/build/gui/release 全绿 → `release-macos.sh v0.3.2` 上传 macOS 四资产。

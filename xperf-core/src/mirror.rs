@@ -88,11 +88,22 @@ fn parse_scrcpy_major(first_line: &str) -> Option<u32> {
     first_line.split_whitespace().nth(1)?.split('.').next()?.parse().ok()
 }
 
-/// scrcpy 主版本（起不来/解析不出 → None，调用方据此跳过版本门槛按原路径报错）
+/// scrcpy 主版本（起不来/解析不出 → None，调用方据此跳过版本门槛按原路径报错）。
+/// 版本行以 stdout 为准，个别打包（snap 等）只写 stderr 时回退取 stderr 首行。
 fn scrcpy_major_version(bin: &Path) -> Option<u32> {
     let out = Command::new(bin).arg("--version").output().ok()?;
-    let s = String::from_utf8_lossy(&out.stdout);
-    parse_scrcpy_major(s.lines().next()?)
+    let first = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .next()
+        .filter(|l| parse_scrcpy_major(l).is_some())
+        .map(str::to_owned)
+        .or_else(|| {
+            String::from_utf8_lossy(&out.stderr)
+                .lines()
+                .next()
+                .map(str::to_owned)
+        })?;
+    parse_scrcpy_major(&first)
 }
 
 /// 解析 `adb forward --list` 的一行：`<serial> tcp:<port> <target>` →

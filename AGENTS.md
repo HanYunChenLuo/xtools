@@ -33,15 +33,16 @@ Other host tools follow the same pattern — env override (file must exist)
 → `PATH` → well-known install locations. Use these when a tool lives
 outside `PATH` (e.g. GUI launched from Finder has a minimal PATH):
 
-| Tool | Env override | Notes |
-|------|--------------|-------|
-| adb | `XPERF_ADB` | also probes `ANDROID_HOME`/`ANDROID_SDK_ROOT` and `~/Library/Android/sdk`, `~/Android/Sdk` |
-| ssh | `XPERF_SSH` | |
-| cargo | `XPERF_CARGO` | only used for dev-checkout agent builds |
-| scrcpy | `XPERF_SCRCPY` | mirror/record only; **needs scrcpy ≥ 2** (built against 4.x; Ubuntu 22.04 apt's 1.21 is rejected with a clear error) |
-| trace_processor | `XPERF_TRACE_PROCESSOR` | else `~/.local/share/perfetto/prebuilts` → `PATH` → auto-download from get.perfetto.dev |
-| Chrome | `XPERF_CHROME` | headless Chrome is only used to mirror the Perfetto UI on first use |
-| flamegraph scripts | `XPERF_SIMPLEPERF_SCRIPTS` | shipped next to the binary in the tarball/AppImage; fallback to `~/.cache/xperf/simpleperf_scripts/` |
+| Tool | Env override | Notes | Missing env target |
+|------|--------------|-------|--------------------|
+| adb | `XPERF_ADB` | also probes `ANDROID_HOME`/`ANDROID_SDK_ROOT` and `~/Library/Android/sdk`, `~/Android/Sdk` | falls through to PATH etc. (last resort: bare `adb`) |
+| ssh | `XPERF_SSH` | | falls through |
+| cargo | `XPERF_CARGO` | only used for dev-checkout agent builds | falls through |
+| scrcpy | `XPERF_SCRCPY` | mirror/record only; **needs scrcpy ≥ 2** (built against 4.x; Ubuntu 22.04 apt's 1.21 is rejected with a clear error) | falls through |
+| trace_processor | `XPERF_TRACE_PROCESSOR` | else `~/.local/share/perfetto/prebuilts` → `PATH` → auto-download from get.perfetto.dev | falls through |
+| Chrome | `XPERF_CHROME` | headless Chrome is only used to mirror the Perfetto UI on first use | falls through |
+| flamegraph scripts | `XPERF_SIMPLEPERF_SCRIPTS` | shipped next to the binary in the tarball/AppImage; fallback to `~/.cache/xperf/simpleperf_scripts/` | **hard error** (points at a missing dir, no fallback) |
+| agent binary | `XPERF_AGENT_BIN` | tarball layout `agent/xperf-agent` next to the CLI; dev checkout auto-builds | **hard error** (like above) |
 
 PATH-only tools (no override, all standard): `python3` (flamegraph
 rendering), `curl` (script downloads), `open`/`xdg-open` (browser).
