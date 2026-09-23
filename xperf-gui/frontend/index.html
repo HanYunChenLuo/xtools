@@ -33,11 +33,17 @@
     <div id="settingsBox">
       <button id="settingsBtn" title="设置">⚙ 设置</button>
       <div id="settingsMenu" class="hidden">
+        <label class="st-row" title="界面主题：跟随系统（默认，随系统亮暗自动切换）/ 暗色 / 亮色">主题
+          <select id="stTheme">
+            <option value="system">跟随系统</option>
+            <option value="dark">暗色</option>
+            <option value="light">亮色</option>
+          </select>
+        </label>
         <label title="GUI 启动后在后台检测一次新版本（失败静默不打扰）；取消勾选则仅手动检查"><input id="stAutoCheck" type="checkbox" checked /> 启动时自动检查更新</label>
         <button id="stCheckNow" class="small" title="立即查询 GitLab 最新 Release（结果见状态栏；有新版时顶栏出徽标）">检查更新</button>
       </div>
     </div>
-    <button id="themeBtn" title="切换暗色/亮色主题">☾ 亮色</button>
   </header>
   <main id="content">
     <div id="noDeviceHint" class="idle-hint">

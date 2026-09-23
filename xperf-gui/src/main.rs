@@ -895,15 +895,22 @@ struct GuiSettings {
     /// 启动时自动检查更新（默认开；检测失败静默不打扰，仅记 diag）
     #[serde(default = "default_auto_check_update")]
     auto_check_update: bool,
+    /// 主题：`system`（默认，跟随系统亮暗）/ `dark` / `light`
+    #[serde(default = "default_theme")]
+    theme: String,
 }
 
 fn default_auto_check_update() -> bool {
     true
 }
 
+fn default_theme() -> String {
+    "system".into()
+}
+
 impl Default for GuiSettings {
     fn default() -> Self {
-        Self { auto_check_update: default_auto_check_update() }
+        Self { auto_check_update: default_auto_check_update(), theme: default_theme() }
     }
 }
 
@@ -914,13 +921,7 @@ fn gui_settings_path() -> Option<std::path::PathBuf> {
     base.map(|b| b.join("xperf").join("gui-settings.json"))
 }
 
-fn load_gui_settings() -> GuiSettings {
-    gui_settings_path()
-        .map(|p| load_gui_settings_from(&p))
-        .unwrap_or_default()
-}
-
-/// [`load_gui_settings`] 的可测内核（路径注入，免 env 突变）
+/// [`get_gui_settings`] 的可测内核（路径注入，免 env 突变）
 fn load_gui_settings_from(path: &std::path::Path) -> GuiSettings {
     std::fs::read_to_string(path)
         .ok()
@@ -928,22 +929,38 @@ fn load_gui_settings_from(path: &std::path::Path) -> GuiSettings {
         .unwrap_or_default()
 }
 
-/// 读取 GUI 设置（设置子菜单初始化数据源）
+/// 读取 GUI 设置（设置子菜单初始化数据源）。`existed` 标记设置文件是否已存在——
+/// 前端据此做一次性迁移（把旧版 localStorage 里的显式主题选择导入设置文件）
 #[tauri::command]
-fn get_gui_settings() -> GuiSettings {
-    load_gui_settings()
+fn get_gui_settings() -> serde_json::Value {
+    let path = gui_settings_path();
+    let existed = path.as_ref().map(|p| p.is_file()).unwrap_or(false);
+    let s = path.map(|p| load_gui_settings_from(&p)).unwrap_or_default();
+    serde_json::json!({
+        "auto_check_update": s.auto_check_update,
+        "theme": s.theme,
+        "existed": existed,
+    })
 }
 
-/// 保存 GUI 设置（tmp+rename 原子写，防中途崩溃截断）
+/// 保存 GUI 设置（tmp+rename 原子写，防中途崩溃截断）。theme 仅接受
+/// system/dark/light，其余拒绝（前端 select 之外的注入防护）
 #[tauri::command]
-fn save_gui_settings(auto_check_update: bool) -> Result<(), String> {
+fn save_gui_settings(auto_check_update: bool, theme: String) -> Result<(), String> {
+    if !matches!(theme.as_str(), "system" | "dark" | "light") {
+        return Err(format!("非法主题值: {theme}（仅 system/dark/light）"));
+    }
     let p = gui_settings_path().ok_or("无法确定配置目录（HOME 未设置）")?;
-    save_gui_settings_to(&p, auto_check_update)
+    save_gui_settings_to(&p, auto_check_update, &theme)
 }
 
 /// [`save_gui_settings`] 的可测内核（路径注入，免 env 突变）
-fn save_gui_settings_to(path: &std::path::Path, auto_check_update: bool) -> Result<(), String> {
-    let settings = GuiSettings { auto_check_update };
+fn save_gui_settings_to(
+    path: &std::path::Path,
+    auto_check_update: bool,
+    theme: &str,
+) -> Result<(), String> {
+    let settings = GuiSettings { auto_check_update, theme: theme.to_string() };
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     }
@@ -2515,16 +2532,24 @@ Host myserver          # 重复别名去重
     fn test_gui_settings_roundtrip() {
         let dir = std::env::temp_dir().join(format!("xperf-guisettings-test-{}", std::process::id()));
         let path = dir.join("gui-settings.json");
-        // 不存在 → 默认（自动检查开）
-        assert!(load_gui_settings_from(&path).auto_check_update);
-        // 保存 false → 读回 false；保存 true → 读回 true
-        save_gui_settings_to(&path, false).unwrap();
-        assert!(!load_gui_settings_from(&path).auto_check_update);
-        save_gui_settings_to(&path, true).unwrap();
-        assert!(load_gui_settings_from(&path).auto_check_update);
-        // 缺字段的旧 JSON 兼容（serde default → true）
+        // 不存在 → 默认（自动检查开 + 跟随系统）
+        let d = load_gui_settings_from(&path);
+        assert!(d.auto_check_update && d.theme == "system");
+        // 保存 → 读回一致
+        save_gui_settings_to(&path, false, "light").unwrap();
+        let s = load_gui_settings_from(&path);
+        assert!(!s.auto_check_update && s.theme == "light");
+        save_gui_settings_to(&path, true, "dark").unwrap();
+        let s = load_gui_settings_from(&path);
+        assert!(s.auto_check_update && s.theme == "dark");
+        // 缺字段的旧 JSON 兼容（serde default → true + system）
         std::fs::write(&path, "{}").unwrap();
-        assert!(load_gui_settings_from(&path).auto_check_update);
+        let s = load_gui_settings_from(&path);
+        assert!(s.auto_check_update && s.theme == "system");
+        // 只有旧版字段（无 theme）同样兼容
+        std::fs::write(&path, r#"{"auto_check_update":false}"#).unwrap();
+        let s = load_gui_settings_from(&path);
+        assert!(!s.auto_check_update && s.theme == "system");
         // 损坏 JSON → 默认
         std::fs::write(&path, b"not json").unwrap();
         assert!(load_gui_settings_from(&path).auto_check_update);

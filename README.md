@@ -161,7 +161,7 @@ Tauri 2 desktop GUI over the same agent transport:
 - **SSH remote connection**: top-bar dropdown (with a username+IP+password
   form)
 - **Feedback**: one-click collect-and-upload to a GitLab issue
-- Dark/light theme; `--package --device` command-line args auto-start sampling
+- Theme modes (Settings menu): follow system (default) / dark / light; `--package --device` command-line args auto-start sampling
 
 ```bash
 ./target/release/xperf-gui --package <package_name> --cpu --memory --fps

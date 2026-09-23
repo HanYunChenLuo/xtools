@@ -147,7 +147,7 @@ Android 应用性能分析工具集：CLI + 桌面 GUI + 设备端采样 agent�
     过滤，口径热切换）
 - **SSH 远程连接**：顶栏下拉切换远端（含 用户名+IP+密码 配置表单）
 - **问题反馈**：顶栏一键收集上传 GitLab issue
-- 暗/亮双主题；`--package --device` 命令行参数自动启动采样
+- 主题三态（设置子菜单）：跟随系统（默认）/ 暗色 / 亮色；`--package --device` 命令行参数自动启动采样
 
 ```bash
 ./target/release/xperf-gui --package <包名> --cpu --memory --fps

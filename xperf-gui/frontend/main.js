@@ -2060,22 +2060,41 @@ listen('scripts-update', (e) => {
 });
 _diag('event listeners registered');
 
-// ---------- 主题切换（暗/亮，localStorage 持久化；全部设备页同步） ----------
-function applyTheme(theme) {
-  document.documentElement.dataset.theme = theme === 'light' ? 'light' : '';
-  if (theme !== 'light') delete document.documentElement.dataset.theme;
-  document.getElementById('themeBtn').textContent = theme === 'light' ? '☀ 暗色' : '☾ 亮色';
-  localStorage.setItem('xperf-theme', theme);
+// ---------- 主题（跟随系统[默认]/暗色/亮色） ----------
+// 持久化：gui-settings.json 是权威来源（后端 save_gui_settings）；localStorage
+// 仅存镜像供启动同步应用防闪烁。旧版 key `xperf-theme`（light/dark）一次性迁移。
+const themeMedia = window.matchMedia('(prefers-color-scheme: light)');
+let themeMode = (() => {
+  const m = localStorage.getItem('xperf-theme-mode');
+  if (m === 'system' || m === 'dark' || m === 'light') return m;
+  const old = localStorage.getItem('xperf-theme'); // 旧版两态 key 迁移
+  if (old === 'light' || old === 'dark') {
+    localStorage.setItem('xperf-theme-mode', old);
+    localStorage.removeItem('xperf-theme');
+    return old;
+  }
+  return 'system';
+})();
+function effectiveTheme() {
+  return themeMode === 'system' ? (themeMedia.matches ? 'light' : 'dark') : themeMode;
+}
+function applyTheme(mode) {
+  themeMode = (mode === 'system' || mode === 'dark' || mode === 'light') ? mode : 'system';
+  const eff = effectiveTheme();
+  document.documentElement.dataset.theme = eff === 'light' ? 'light' : '';
+  if (eff !== 'light') delete document.documentElement.dataset.theme;
+  localStorage.setItem('xperf-theme-mode', themeMode);
   // 图表与实时面板取色跟随主题（所有设备页）
   for (const s of app.sessions.values()) {
     for (const c of s.allCharts) c.draw();
     s.renderLive();
   }
 }
-document.getElementById('themeBtn').addEventListener('click', () => {
-  applyTheme(document.documentElement.dataset.theme === 'light' ? 'dark' : 'light');
-});
-applyTheme(localStorage.getItem('xperf-theme') || 'dark');
+// system 模式下跟随系统亮暗实时切换
+themeMedia.addEventListener('change', () => { if (themeMode === 'system') applyTheme('system'); });
+// 启动先用 localStorage 镜像同步应用（防等待设置的闪烁）；随后 updateUI.init
+// 读 gui-settings.json 对账（设置文件存在则以其为准）
+applyTheme(themeMode);
 
 // ---------- 周期渲染（仅激活页——隐藏页无渲染意义；全部按 dirty 标志跳过无变化工作） ----------
 // 图表合帧：数据事件只标脏（requestDraw），150ms 统一绘制——极端配置（50ms×多 PID）
@@ -2484,22 +2503,38 @@ const updateUI = {
         menu.classList.add('hidden');
       }
     });
-    // 设置项：启动时自动检查更新（持久化 gui-settings.json，默认开）
+    // 设置项：主题（三态）+ 启动时自动检查更新（持久化 gui-settings.json，默认
+    // 跟随系统 + 开）。对账：设置文件存在则以其为准（同步 localStorage 镜像）；
+    // 不存在则把当前生效值（含旧版 localStorage 迁移结果）写回设置文件。
     const autoCheck = document.getElementById('stAutoCheck');
-    try {
-      const st = await invoke('get_gui_settings');
-      autoCheck.checked = st.auto_check_update !== false;
-    } catch (e) {
-      _diag('get_gui_settings ERROR: ' + JSON.stringify(e));
-    }
-    autoCheck.addEventListener('change', async () => {
+    const themeSel = document.getElementById('stTheme');
+    const save = async () => {
       try {
-        await invoke('save_gui_settings', { autoCheckUpdate: autoCheck.checked });
-        _diag('gui settings saved: auto_check_update=' + autoCheck.checked);
+        await invoke('save_gui_settings', { autoCheckUpdate: autoCheck.checked, theme: themeSel.value });
+        _diag('gui settings saved: auto_check_update=' + autoCheck.checked + ' theme=' + themeSel.value);
       } catch (e) {
         await alertBox('保存设置失败: ' + (e && e.toString()), 'error');
       }
+    };
+    try {
+      const st = await invoke('get_gui_settings');
+      autoCheck.checked = st.auto_check_update !== false;
+      if (st.existed) {
+        themeSel.value = st.theme;
+        if (st.theme !== themeMode) applyTheme(st.theme);
+      } else {
+        themeSel.value = themeMode;
+        save(); // 一次性落盘（含旧版 localStorage 迁移值）
+      }
+    } catch (e) {
+      _diag('get_gui_settings ERROR: ' + JSON.stringify(e));
+      themeSel.value = themeMode;
+    }
+    themeSel.addEventListener('change', () => {
+      applyTheme(themeSel.value);
+      save();
     });
+    autoCheck.addEventListener('change', save);
     document.getElementById('stCheckNow').addEventListener('click', () => {
       menu.classList.add('hidden');
       this.run(true);
