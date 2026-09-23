@@ -79,9 +79,24 @@ def ensure_visible(c, timeout=8):
     ) is not None
 
 
+def ssh_target_host():
+    """ssh 模式下命令注入（pkg_installed/g4 断连等）的目标宿主：取 GUI 实际连上的
+    `remote.host`（命令行 --remote 指定），而非环境变量 XPERF_TEST_SSH——两者配错时
+    判据会打到另一台机器的 adb 上（2026-09-23 review；GUI 启动早期 host 可能短暂为
+    None，回退 XPERF_TEST_SSH）。本机模式无 ssh，返回值不被使用。
+    """
+    try:
+        st = ARGS.client.status().get("remote") or {}
+        if st.get("mode") == "ssh" and st.get("host"):
+            return st["host"]
+    except Exception:
+        pass
+    return REMOTE_ADB
+
+
 def ssh_run(cmd, timeout=30):
     return subprocess.run(
-        ["ssh", REMOTE_ADB, cmd], capture_output=True, text=True, timeout=timeout,
+        ["ssh", ssh_target_host(), cmd], capture_output=True, text=True, timeout=timeout,
     )
 
 
@@ -802,10 +817,12 @@ def group_g3(c, ck, serial):
         # 产品行为是「trace 已保存 + 如实报分析失败」——判据按环境受限 SKIP
         why = ((c.eval(f"document.querySelector('{p} .trace-report').textContent") or "")
                + " | " + (c.eval("document.getElementById('status').textContent") or ""))
-        if "trace_processor" in why or "分析失败" in why:
+        sigs = ("未找到 trace_processor", "下载失败。请手动安装", "自举失败")
+        if any(x in why for x in sigs):
             ck.skip("trace 报告生成（含分段标记）",
                     "宿主机无 trace_processor 且引导下载不可达（外网受限）；"
-                    "trace 本体见下一条产物判据。现场：" + why[:140])
+                    "trace 本体见下一条产物判据。签名: " +
+                    next(x for x in sigs if x in why))
         else:
             ck.check("trace 报告生成（含分段标记）", False, "超时 | " + why[:140])
     else:
@@ -869,8 +886,9 @@ def group_g3(c, ck, serial):
 
     def _flame():
         t = c.eval("document.getElementById('status').textContent") or ""
+        ok_text = any(k in t for k in ("已生成", "直接打开", "已打开"))
         got = [f for f in os.listdir(fl_dir) if f.endswith(".html")] if fl_dir else []
-        return (t[:60], got) if got or "火焰图" in t else None
+        return (t[:60], got) if got or ok_text else None
     fl = c.poll(_flame, timeout=180)
     ck.check("在浏览器打开火焰图", bool(fl), str(fl)[:140])
     if stack_path:
@@ -892,8 +910,8 @@ def group_g3(c, ck, serial):
     #       本工具的隧道/参数形态按 4.x 设计与验证，1.21 起不来（2026-09-22 kong
     #       AppImage 实测「录屏开始/镜像启动」失败），已知可用版本 ≥2
     def _scrcpy_ver():
-        exe = shutil.which("scrcpy") or ("/opt/homebrew/bin/scrcpy"
-                                         if os.path.exists("/opt/homebrew/bin/scrcpy") else None)
+        exe = os.environ.get("XPERF_SCRCPY") or shutil.which("scrcpy") or (
+            "/opt/homebrew/bin/scrcpy" if os.path.exists("/opt/homebrew/bin/scrcpy") else None)
         if not exe:
             return None, "宿主机未安装 scrcpy"
         try:
@@ -971,7 +989,8 @@ def group_g4(c, ck, serial):
         started = c.poll(lambda s_=s_, n0=n0: (
             len(c.state(s_).get("coldStarts") or []) > n0) or None, timeout=40)
         if not started:
-            ck.skip(f"[{s_}] 并行 series 增长", f"「打开应用」未见冷启动记录（{PKG} 起不来）")
+            ck.skip(f"[{s_}] 并行采样启动", f"「打开应用」未见冷启动记录（{PKG} 起不来）")
+            ck.skip(f"[{s_}] 并行 series 增长", "同上（应用起不来，无数据源）")
             continue
         data_serials.append(s_)
         c.action("click", selector=f"{page(s_)} .start-btn")
@@ -983,7 +1002,10 @@ def group_g4(c, ck, serial):
             lambda s_=s_: sum(v.get("count", 0) for v in (c.state(s_).get("charts") or {})
                               .get("cpu", {}).get("series", {}).values()) >= 3, timeout=60)))
     iso_other = data_serials[-1] if len(data_serials) >= 2 else None
-    base = c.state(serial).get("charts", {}).get("cpu", {}).get("series", {})
+    # base 取有数据源的第一台：主 serial 可能因未装包/起不来不在 data_serials 里，
+    # 其 series 为空会让隔离判据假 FAIL（2026-09-23 review）
+    base = (c.state(data_serials[0]) if data_serials else c.state(serial)) \
+        .get("charts", {}).get("cpu", {}).get("series", {})
     if iso_other:
         c.action("click", selector=f"{page(iso_other)} .tab.subtab[data-tab='trace']")
         other = c.state(iso_other).get("charts", {}).get("cpu", {}).get("series", {})

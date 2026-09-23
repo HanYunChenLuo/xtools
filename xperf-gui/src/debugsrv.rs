@@ -271,15 +271,21 @@ async fn api_status(State(ctx): State<Ctx>) -> (StatusCode, Json<Value>) {
             .collect()
     };
     // 设备列表读监视器缓存（非阻塞）：adb server 卡死时活查询会永久挂起
-    // handler 拖死整个调试接口（2026-09-22 压测实测 /api/status 超时）；缓存为空
-    // （启动首 3s 监视器未产出）才回退活查询——adb 枚举含 bridge refresh 可能秒级，
-    // 放 blocking 池不占 runtime 线程
+    // handler 拖死整个调试接口（2026-09-22 压测实测）；缓存为空才回退活查询
+    // （启动首 3s 监视器未产出，或传输切换失败路径清空后未 seed——2026-09-23
+    // review 抓到该窗口会把挂死重新引入）。活查询本身带 5s 超时：adb 卡死时
+    // 返回空列表而不是挂死 handler（超时的 blocking 任务任其自灭，不再阻塞应答）。
+    // 注意返回空列表会让 /api/status 短暂报「无设备」——监视器下一轮（≤3s）回填。
     let cached = st.devices_cache.lock().unwrap().clone();
     let live = if cached.is_empty() {
-        tokio::task::spawn_blocking(xperf_core::list_adb_devices)
-            .await
-            .unwrap_or_else(|_| Ok(Vec::new()))
-            .unwrap_or_default()
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            tokio::task::spawn_blocking(xperf_core::list_adb_devices),
+        )
+        .await
+        .unwrap_or_else(|_| Ok(Ok(Vec::new()))) // 超时：按无设备应答
+        .unwrap_or_else(|_| Ok(Vec::new()))
+        .unwrap_or_default()
     } else {
         cached
     };

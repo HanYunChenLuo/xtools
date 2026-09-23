@@ -434,11 +434,14 @@ fn workspace_scripts_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("simpleperf_scripts")
 }
 
-/// 用户级可写缓存目录（与 perfetto UI 镜像同根，`--clean-cache` 一并清理）
+/// 用户级可写缓存目录（与 perfetto UI 镜像同根，`--clean-cache` 一并清理）。
+/// HOME 未设置（launchd 起的极简环境等）时退系统临时目录——不能是 `unwrap_or_default`：
+/// 空基座会把 `.cache/xperf/...` 拼成**相对路径**，静默写进进程 CWD（2026-09-23 review）。
 const SCRIPTS_CACHE_SUBDIR: &str = ".cache/xperf/simpleperf_scripts";
 fn cache_scripts_dir() -> PathBuf {
-    let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
-    home.join(SCRIPTS_CACHE_SUBDIR)
+    std::env::var_os("HOME")
+        .map(|h| PathBuf::from(h).join(SCRIPTS_CACHE_SUBDIR))
+        .unwrap_or_else(|| std::env::temp_dir().join("xperf/simpleperf_scripts"))
 }
 
 /// 读取 `XPERF_SIMPLEPERF_SCRIPTS`（空串视同未设置）
@@ -711,6 +714,16 @@ fn download_scripts(needed: &[(String, PathBuf)]) -> Result<()> {
         {
             continue;
         }
+        // 覆盖既存小文件（LFS 指针/半截残缺）时留痕——这会改写 git 管理的 vendor 文件，
+        // 用户 `git status` 看到二进制变化时应能对上这条日志（2026-09-23 review）
+        if dest.is_file() {
+            eprintln!(
+                "[simpleperf] 覆盖残缺/指针文件（{}，{}B）: {}",
+                rel,
+                std::fs::metadata(dest).map(|m| m.len()).unwrap_or(0),
+                dest.display()
+            );
+        }
         // 缓存目录（解析链末位）可能尚未建立，bin/<os>/<arch> 子目录同理
         if let Some(parent) = dest.parent() {
             std::fs::create_dir_all(parent)
@@ -772,9 +785,19 @@ pub fn update_simpleperf_scripts(
 ) -> Result<String> {
     let _guard = SCRIPTS_LOCK.lock().expect("脚本缓存锁失败");
     let dir = scripts_dir()?;
-    // 写回前提：目标目录可写。发布包内置的只读脚本集（AppImage 挂载点/.app Resources）
-    // 明确拒绝而非静默改写别处——本命令的用途是跟进上游 simpleperf 并 git 提交分发，
-    // 只在源码检出（或用户自己可写的 tarball 目录）有意义。
+    // **GUI 应用包内的随包资源不支持原地更新**：`.app/Contents/Resources` 在用户的
+    // 安装机上常常可写，但改它会破坏 .app 的 code signature（下次启动 Gatekeeper
+    // 报「已损坏」）；AppImage 挂载点则只读、由下面的可写探针拦下。tarball 的
+    // exe 旁目录不在此列——原地刷新无害且是 CLI 用户的合理用法。
+    if host_bundled_scripts_dir().as_deref() == Some(dir.as_path()) {
+        bail!(
+            "随包资源不支持原地更新: {}（GUI 应用包内文件受 code signature 保护）。\n\
+             请在源码检出环境执行更新后随版本分发；或删除该目录后由程序从 AOSP 重新下载",
+            dir.display()
+        );
+    }
+    // 写回前提：目标目录可写。不可写（如 AppImage 的只读挂载点）明确拒绝而非
+    // 静默改写别处——本命令的用途是跟进上游 simpleperf 并 git 提交分发。
     if !dir_writable(&dir) {
         bail!(
             "脚本集目录只读，无法更新: {}（请在源码检出环境执行，或删除该缓存后由程序重新下载）",
@@ -1689,6 +1712,28 @@ mod tests {
         }
     }
 
+
+    /// GUI 注入的随包资源（.app Resources / AppImage 挂载点）拒绝原地更新——改它会
+    /// 破坏 .app 的 code signature；即便目录可写（.app Resources 在用户机上常可写）
+    /// 也必须拦下（2026-09-23 review 抓到注释与实现的矛盾）
+    #[test]
+    fn test_update_rejects_bundled_resource_dir() {
+        // 空目录即可：拒绝判定在 `needed_files` 之前，只看「解析结果 == 宿主注入档」
+        let dir = std::env::temp_dir().join(format!("xperf_bundled_upd_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap(); // 可写（.app Resources 在用户机上常可写）
+        std::env::remove_var("XPERF_SIMPLEPERF_SCRIPTS"); // 排除 Explicit 档干扰
+        set_bundled_scripts_dir(&dir);
+        let msg = format!(
+            "{:#}",
+            update_simpleperf_scripts(None)
+                .err()
+                .unwrap_or_else(|| anyhow::anyhow!("随包资源档竟被放行更新"))
+        );
+        assert!(msg.contains("随包资源不支持原地更新"), "实际: {msg}");
+        set_bundled_scripts_dir("/nonexistent-xperf-slot"); // 还原，不影响后续用例
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// report 库按 >1MB 判存在（LFS 指针文本 ~130B 不算），普通脚本按非空判
     #[test]

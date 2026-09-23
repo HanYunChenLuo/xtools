@@ -162,6 +162,8 @@ build:linux:
         git lfs install --local >/dev/null 2>&1 || true
         git lfs pull --include "xperf-core/simpleperf_scripts/**" \
           || echo "WARN: git lfs pull 失败——按指针大小决定随包内容"
+      else
+        echo "WARN: runner 无 git-lfs——report 库为指针文本，随包只带脚本本体"
       fi
     - bash scripts/stage_simpleperf_scripts.sh "artifacts/$PKG/simpleperf_scripts" linux/x86_64
     - tar -C artifacts -czf "artifacts/$PKG.tar.gz" "$PKG"

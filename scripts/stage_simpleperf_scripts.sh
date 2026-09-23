@@ -17,7 +17,17 @@ src="xperf-core/simpleperf_scripts"
 
 test -d "$src" || { echo "找不到 $src（须在仓库根执行）" >&2; exit 1; }
 mkdir -p "$dest"
-cp "$src"/*.py "$src"/*.js "$dest"/
+# 显式检查再拷贝：glob 无匹配时 cp 只收到目标参数、报错是裸的 cannot stat（2026-09-23
+# review）——缺 report_html.py/js 会渲染半截 HTML，fail fast 并写清缺了什么
+for pat in '*.py' '*.js'; do
+    # shellcheck disable=SC2086
+    set -- "$src"/$pat
+    if [ ! -e "$1" ]; then
+        echo "ERROR: $src 下缺 $pat（vendor 不完整？）" >&2
+        exit 1
+    fi
+    cp "$@" "$dest"/
+done
 
 lib="$src/bin/$plat"
 big=0

@@ -64,6 +64,7 @@ down to ~50 ms are practical.
 - **Multi-device**: `--device SERIAL` (per-device sessions in the GUI)
 - **Data export**
   - Streaming CSV + charts under `/tmp/xperf/<package>/<timestamp>/{cpu,memory,fps,thread,...}/`
+    (macOS: `$TMPDIR/xperf/...`)
 
 #### Requirements
 
@@ -166,7 +167,7 @@ Tauri 2 desktop GUI over the same agent transport:
 window and consume the artifacts.
 
 ```bash
-# Bounded sampling → exit 0 after 30 s; CSVs under /tmp/xperf/<pkg>/<ts>/
+# Bounded sampling → exit 0 after 30 s; CSVs under /tmp/xperf/<pkg>/<ts>/ (macOS: $TMPDIR/xperf/...)
 xperf-cli --package com.example.app --cpu --memory --fps --duration 30
 
 # Regression assertion — verdict in <session>/baseline_report.txt

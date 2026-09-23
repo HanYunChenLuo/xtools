@@ -57,6 +57,7 @@ Android 应用性能分析工具集：CLI + 桌面 GUI + 设备端采样 agent�
 - **多设备**：`--device SERIAL`（GUI 内每设备独立会话并行）
 - **数据导出**
   - 流式 CSV + 图表，位于 `/tmp/xperf/<包名>/<时间戳>/{cpu,memory,fps,thread,...}/`
+    （macOS 为 `$TMPDIR/xperf/...`）
 
 #### 环境要求
 
@@ -153,7 +154,7 @@ Android 应用性能分析工具集：CLI + 桌面 GUI + 设备端采样 agent�
 消费落盘产物即可。
 
 ```bash
-# 限时采样 → 30s 后自动退出（exit 0）；CSV 落 /tmp/xperf/<包名>/<时间戳>/
+# 限时采样 → 30s 后自动退出（exit 0）；CSV 落 /tmp/xperf/<包名>/<时间戳>/（macOS 为 $TMPDIR/xperf/...）
 xperf-cli --package com.example.app --cpu --memory --fps --duration 30
 
 # 回归断言 —— 判定结论见 <会话目录>/baseline_report.txt

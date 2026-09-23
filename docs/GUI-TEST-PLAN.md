@@ -137,7 +137,9 @@ python3 scripts/gui_tests/harness.py --check                  # harness 自检
     路径解析处，都必须在**发布产物 + 干净机器**上验一次，直编环境不构成证据；
     ② 发布产物里起的**宿主子进程**（python3/curl/xdg-open/trace_processor）会继承 bundle
     的打包环境（`PYTHONHOME`/`LD_LIBRARY_PATH`/`PATH`），排障先看 `/proc/<gui pid>/environ`
-    再复现，别先怀疑脚本或数据本身。
+    再复现，别先怀疑脚本或数据本身。**残余（记录在案）**：`python3_command()` 只剥
+    PYTHONHOME/PYTHONPATH，PATH 本身原样继承——若未来某打包方案往 PATH 前部塞自有
+    python，宿主 python3 会被遮蔽（当前 AppImage 未改 PATH，实测无此问题）。
 
 11. **旧版产物上「通过」的用例不等于回归证据（2026-09-22 同轮）**：v0.3.1 tag（
     `80c2968`，9-20）不含 9-21/9-22 的修复，但本轮 g4「start 双击仅启动一次」与

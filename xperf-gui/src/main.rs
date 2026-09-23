@@ -1643,7 +1643,8 @@ async fn connect_remote(
     }
     // 传输切换即刻作废监视器缓存：否则切完到下个 3s 轮询之间，`/api/status`
     // 仍给出旧机队（2026-09-22 hppc `--remote kong` 实测「切回本机」后设备列表
-    // 停在远程两台 >15s 不刷新——轮询期间 adb 短暂报错被静默 continue 吞掉）
+    // 停在远程两台 >15s——根因是切换窗口的枚举失败被静默吞掉、旧快照无限期充当
+    // 真相，配合监视线程的失败留痕一起修）
     if let Ok(mut c) = state.devices_cache.lock() {
         c.clear();
     }
@@ -1717,7 +1718,7 @@ fn seed_devices_cache(state: &AppState, devices: &[xperf_core::AdbDevice]) {
 fn spawn_device_monitor(app: tauri::AppHandle) {
     std::thread::spawn(move || {
         let mut last: Vec<xperf_core::AdbDevice> = Vec::new();
-        let poll_fails = std::sync::Arc::new(std::sync::Mutex::new(0u32));
+        let mut poll_fails: u32 = 0; // 本线程私有，无需 Arc<Mutex>（2026-09-23 review 简化）
         let mut first_round = true;
         let mut tunnel_was_dead = false;
         loop {
@@ -1763,20 +1764,16 @@ fn spawn_device_monitor(app: tauri::AppHandle) {
                 Err(e) => {
                     // 连续失败留痕：缓存停在旧机队是「切换后设备列表不动」的直接症状，
                     // 静默 continue 曾让该现象无法归因（2026-09-22 hppc --remote kong）
-                    let n = {
-                        let mut c = poll_fails.lock().unwrap();
-                        *c += 1;
-                        *c
-                    };
-                    if n == 1 || n % 10 == 0 {
+                    poll_fails += 1;
+                    if poll_fails == 1 || poll_fails.is_multiple_of(10) {
                         xperf_core::utils::diag(&format!(
-                            "devices: 枚举失败 x{n}（缓存停留在旧快照）: {e}"
+                            "devices: 枚举失败 x{poll_fails}（缓存停留在旧快照）: {e}"
                         ));
                     }
                     continue; // adb 暂不可用，下轮重试
                 }
             };
-            *poll_fails.lock().unwrap() = 0;
+            poll_fails = 0;
             let (added, removed) = xperf_core::diff_devices(&last, &devices);
             if first_round || (added.is_empty() && removed.is_empty()) {
                 last = devices;
