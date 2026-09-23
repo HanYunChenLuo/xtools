@@ -377,6 +377,7 @@ class LineChart {
     // ctx 用 setTransform(dpr,0,0,dpr,0,0)，后续 draw 坐标按 CSS 像素书写即可。
     const r = this.canvas.parentElement.getBoundingClientRect();
     const dpr = window.devicePixelRatio || 1;
+    this._dpr = dpr; // draw() 据此检测跨屏 dpr 变化（resize 事件不覆盖该场景）
     this.cssW = r.width;
     this.cssH = r.height;
     this.canvas.width = Math.max(1, Math.round(r.width * dpr));
@@ -390,6 +391,9 @@ class LineChart {
     pushCapped(this.series[pid], { t, v });
   }
   draw() {
+    // 窗口跨屏移动改变 devicePixelRatio（Retina ↔ 外接 1x 屏）时不触发 window
+    // resize——绘制前比对，变了先按新 dpr 重建缓冲区，否则文字/线条模糊
+    if ((window.devicePixelRatio || 1) !== this._dpr) this.resize();
     const { ctx } = this;
     const C = uiColors();
     const W = this.cssW, H = this.cssH;

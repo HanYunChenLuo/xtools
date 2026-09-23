@@ -13,6 +13,10 @@
 - 主题切换从顶栏按钮移入「⚙ 设置」子菜单，并改为三态：跟随系统（新默认，`prefers-color-scheme` 实时跟随）/ 暗色 / 亮色；持久化从 localStorage 迁入 `gui-settings.json`（localStorage 保留为启动防闪烁镜像，旧版两态选择一次性迁移）。顶栏按钮样式与间距统一（此前新增按钮落回浏览器原生外观、间隔不一）。
 - 设置子菜单新增「字体大小」档位：小 / 中（默认）/ 大，全部 UI 字号（含 canvas 图表文字）按 0.85 / 1 / 1.2 缩放，持久化到 `gui-settings.json`。
 
+### 修复
+
+- 修复 GUI 窗口在不同 DPI 显示器之间拖动（如 Retina 内屏 ↔ 外接 1x 屏）后图表文字/线条模糊：跨屏改变 devicePixelRatio 不触发 window resize，现在在每次绘制前比对 dpr，变化即按新 dpr 重建 canvas 缓冲区。
+
 ## [v0.3.2] - 2026-09-23
 
 ### 修复
