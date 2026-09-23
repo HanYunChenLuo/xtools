@@ -1237,6 +1237,23 @@ pub fn reveal_trace_and_open_ui(trace: &Path) -> Result<String> {
 mod tests {
     use super::*;
 
+    /// `XPERF_TRACE_PROCESSOR` 显式覆盖优先（文件存在才生效）；指向不存在文件时回落
+    /// （机器上有无官方缓存/PATH 命中不定，只断言不再选 env 指的路径）
+    #[test]
+    fn test_find_trace_processor_env_override() {
+        let dir = std::env::temp_dir().join(format!("xperf_tp_env_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let fake = dir.join("trace_processor_shell_fake");
+        std::fs::write(&fake, b"#!/bin/sh\n").unwrap();
+        std::env::set_var("XPERF_TRACE_PROCESSOR", &fake);
+        assert_eq!(find_trace_processor(), Some(fake.clone()));
+        std::env::set_var("XPERF_TRACE_PROCESSOR", dir.join("nope"));
+        assert_ne!(find_trace_processor(), Some(fake));
+        std::env::remove_var("XPERF_TRACE_PROCESSOR");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// 镜像修复路径：缓存缺完成标记 → 重镜像 → bundle 大小与上游 Content-Length 一致
     /// （半截文件回归测试：2026-09-09 实测 frontend_bundle.js 截断 4% 致 UI 蓝屏）
     #[test]
