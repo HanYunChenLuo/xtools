@@ -52,6 +52,10 @@ Android 应用性能分析工具集：CLI + 桌面 GUI + 设备端采样 agent�
   （会话产物/诊断日志/各设备端 agent 日志）自检打包上传内部 GitLab issue；
   `--gitlab-login` 浏览器 OAuth 授权后 issue 作者为本人（兼容 SSO/2FA），
   或用 `GITLAB_TOKEN` 环境变量 / `~/.config/xperf/gitlab-token`（PAT）
+- **版本更新检测**（`--check-update`）：查询内部 GitLab 最新 Release，打印
+  当前/最新版本、Release 页链接与资产清单（只检测 + 引导，不自动更新；
+  恒 exit 0）。GUI 顶栏「设置」子菜单可开关启动自动检测（默认开）、手动检查；
+  有新版时顶栏出 🆕 徽标，点击查看说明与资产
 - **工具命令**：`--force-stop`（清场停止应用）、`--clean-cache`（清理缓存与
   采集数据）、`--update-simpleperf-scripts`（更新火焰图脚本）
 - **多设备**：`--device SERIAL`（GUI 内每设备独立会话并行）
@@ -88,6 +92,7 @@ Android 应用性能分析工具集：CLI + 桌面 GUI + 设备端采样 agent�
 | 捕获 | `--screenshot`、`--record <秒>`、`--mirror`、`--logcat [--logcat-regex <正则>]` |
 | 远程 | `--remote <主机>`、`--remote-adb <路径>`、`--remote-adb-port <端口>` |
 | 反馈 | `--feedback <描述>`、`--gitlab-login` / `--gitlab-logout` |
+| 更新检测 | `--check-update`（恒 exit 0） |
 | 工具 | `--force-stop`、`--clean-cache`、`--update-simpleperf-scripts` |
 
 使用 CLI 时，设备端 agent 如缺失会在首次运行时自动编译并推送到
