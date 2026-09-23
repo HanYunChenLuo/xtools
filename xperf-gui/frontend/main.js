@@ -2101,9 +2101,15 @@ themeMedia.addEventListener('change', () => { if (themeMode === 'system') applyT
 applyTheme(themeMode);
 
 // ---------- 字体档位（小/中[默认]/大，--font-scale 全局缩放 + canvas 图表同比例） ----------
+// 按档位缓存（同 uiColors 动机：getComputedStyle 在每次 draw 调用太贵）
+let _fsKey = null, _fsVal = 1;
 function fontScale() {
+  const key = document.documentElement.dataset.fontsize || 'medium';
+  if (key === _fsKey) return _fsVal;
   const v = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--font-scale'));
-  return Number.isFinite(v) ? v : 1;
+  _fsVal = Number.isFinite(v) ? v : 1;
+  _fsKey = key;
+  return _fsVal;
 }
 function applyFontSize(size) {
   const mode = (size === 'small' || size === 'large') ? size : 'medium';

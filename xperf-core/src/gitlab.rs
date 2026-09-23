@@ -80,7 +80,9 @@ pub fn resolve_auth() -> Result<crate::oauth::GitlabAuth> {
 
 /// token 文件路径（`~/.config/xperf/gitlab-token`，与 remotes.json 同目录约定）
 fn token_file_path() -> PathBuf {
+    // HOME 空串视同未设置（空基座会拼成相对路径落进程 CWD）
     std::env::var_os("HOME")
+        .filter(|s| !s.is_empty())
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."))
         .join(".config/xperf/gitlab-token")

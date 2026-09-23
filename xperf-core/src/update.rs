@@ -48,8 +48,10 @@ pub fn fetch_latest_release() -> Result<ReleaseInfo> {
         .build()
         .context("构建 HTTP client 失败")?;
     let (hname, hval) = auth.header();
+    // per_page=100：默认只回 20 条/页，Release 数超页后高版本可能落在后续页，
+    // 「semver 选最新」会假报已是最新（review M1）；100 对本项目余量充足
     let url = format!(
-        "{}/projects/{}/releases",
+        "{}/projects/{}/releases?per_page=100",
         gitlab::gitlab_api(),
         gitlab::gitlab_project_id()
     );
@@ -60,7 +62,8 @@ pub fn fetch_latest_release() -> Result<ReleaseInfo> {
         .context("releases 请求发送失败")?;
     if !resp.status().is_success() {
         let status = resp.status();
-        let text = resp.text().unwrap_or_default();
+        // 错误 body 截断：极端情况下大段 HTML 进状态栏/diag（diag 会被 feedback 打包）
+        let text: String = resp.text().unwrap_or_default().chars().take(200).collect();
         bail!("查询 releases 失败: {} {}{}", status, text, gitlab::auth_hint(status));
     }
     let list: Vec<serde_json::Value> = resp.json().context("解析 releases 响应失败")?;

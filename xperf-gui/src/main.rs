@@ -926,26 +926,46 @@ impl Default for GuiSettings {
 }
 
 fn gui_settings_path() -> Option<std::path::PathBuf> {
+    // 空串视同未设置（空基座会拼成相对路径落进程 CWD，Finder/桌面启动时 CWD=/）
     let base = std::env::var_os("XDG_CONFIG_HOME")
+        .filter(|s| !s.is_empty())
         .map(std::path::PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".config")));
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .filter(|s| !s.is_empty())
+                .map(|h| std::path::PathBuf::from(h).join(".config"))
+        });
     base.map(|b| b.join("xperf").join("gui-settings.json"))
 }
 
-/// [`get_gui_settings`] 的可测内核（路径注入，免 env 突变）
+/// [`get_gui_settings`] 的可测内核（路径注入，免 env 突变）。
+/// 读不到/解析失败回落默认；**合法 JSON 但枚举值非法**（手改文件）按字段回落默认，
+/// 防非法值进前端 select（无此 option 时 value 变空串，保存被后端校验拒绝卡住）。
 fn load_gui_settings_from(path: &std::path::Path) -> GuiSettings {
-    std::fs::read_to_string(path)
+    let mut s: GuiSettings = std::fs::read_to_string(path)
         .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default()
+        .and_then(|c| serde_json::from_str(&c).ok())
+        .unwrap_or_default();
+    if !matches!(s.theme.as_str(), "system" | "dark" | "light") {
+        s.theme = default_theme();
+    }
+    if !matches!(s.font_size.as_str(), "small" | "medium" | "large") {
+        s.font_size = default_font_size();
+    }
+    s
 }
 
-/// 读取 GUI 设置（设置子菜单初始化数据源）。`existed` 标记设置文件是否已存在——
+/// 读取 GUI 设置（设置子菜单初始化数据源）。`existed` 标记设置文件是否已存在
+/// **且可解析**（损坏文件视为不存在——前端走「当前值一次性落盘」分支顺带修复）。
 /// 前端据此做一次性迁移（把旧版 localStorage 里的显式主题选择导入设置文件）
 #[tauri::command]
 fn get_gui_settings() -> serde_json::Value {
     let path = gui_settings_path();
-    let existed = path.as_ref().map(|p| p.is_file()).unwrap_or(false);
+    let content = path.as_ref().and_then(|p| std::fs::read_to_string(p).ok());
+    let existed = content
+        .as_ref()
+        .map(|c| serde_json::from_str::<GuiSettings>(c).is_ok())
+        .unwrap_or(false);
     let s = path.map(|p| load_gui_settings_from(&p)).unwrap_or_default();
     serde_json::json!({
         "auto_check_update": s.auto_check_update,
@@ -2577,6 +2597,10 @@ Host myserver          # 重复别名去重
         // 损坏 JSON → 默认
         std::fs::write(&path, b"not json").unwrap();
         assert!(load_gui_settings_from(&path).auto_check_update);
+        // 合法 JSON 但枚举值非法 → 按字段回落默认，其余字段保留
+        std::fs::write(&path, r#"{"auto_check_update":false,"theme":"bogus","font_size":"huge"}"#).unwrap();
+        let s = load_gui_settings_from(&path);
+        assert!(!s.auto_check_update && s.theme == "system" && s.font_size == "medium");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
