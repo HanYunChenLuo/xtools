@@ -12,4 +12,4 @@ resolver = "2"
 # 行首 version（本文件行首 version 仅此一处）。运行时消费者：CLI --version
 # （clap）、feedback manifest（env!("CARGO_PKG_VERSION")）、DMG productVersion。
 [workspace.package]
-version = "0.3.1"
+version = "0.3.2"
